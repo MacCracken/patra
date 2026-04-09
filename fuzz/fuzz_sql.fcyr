@@ -1,0 +1,207 @@
+# fuzz_sql.fcyr — SQL parser and file format invariant checks
+#
+# Run: cyrius fuzz fuzz/fuzz_sql.fcyr
+# Exit 0 = all invariants pass. Non-zero = which invariant failed.
+
+include "src/lib.cyr"
+
+alloc_init();
+fl_init();
+patra_init();
+
+# ── SQL parser: empty / incomplete ──────────────────────────
+
+sql_tokenize("");
+if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 1); }
+
+sql_tokenize("CREATE");
+if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 2); }
+
+sql_tokenize("CREATE TABLE");
+if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 3); }
+
+sql_tokenize("CREATE TABLE t");
+if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 4); }
+
+sql_tokenize("CREATE TABLE t (");
+if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 5); }
+
+sql_tokenize("INSERT");
+if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 6); }
+
+sql_tokenize("INSERT INTO");
+if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 7); }
+
+sql_tokenize("INSERT INTO t");
+if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 8); }
+
+sql_tokenize("INSERT INTO t VALUES");
+if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 9); }
+
+sql_tokenize("INSERT INTO t VALUES (");
+if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 10); }
+
+sql_tokenize("SELECT");
+if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 11); }
+
+sql_tokenize("SELECT FROM t");
+if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 12); }
+
+sql_tokenize("SELECT *");
+if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 13); }
+
+sql_tokenize("SELECT * FROM");
+if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 14); }
+
+# ── SQL parser: garbage input ───────────────────────────────
+
+sql_tokenize("!@#$%^&");
+if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 20); }
+
+sql_tokenize("BANANA SPLIT");
+if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 21); }
+
+sql_tokenize("42 42 42");
+if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 22); }
+
+sql_tokenize("''''''");
+if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 23); }
+
+# ── SQL parser: structural errors ───────────────────────────
+
+# Missing parens
+sql_tokenize("CREATE TABLE t id INT");
+if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 30); }
+
+sql_tokenize("INSERT INTO t VALUES 1");
+if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 31); }
+
+# Nested parens
+sql_tokenize("CREATE TABLE t ((id INT))");
+if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 32); }
+
+# Wrong type keywords
+sql_tokenize("CREATE TABLE t (id FLOAT)");
+if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 33); }
+
+# Missing column type
+sql_tokenize("CREATE TABLE t (id)");
+if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 34); }
+
+# Unclosed string literal
+sql_tokenize("INSERT INTO t VALUES ('hello");
+if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 35); }
+
+# ── SQL parser: valid edge cases must succeed ───────────────
+
+# Case insensitive
+sql_tokenize("create table t (x int)");
+if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 40); }
+
+# Mixed case
+sql_tokenize("Create Table t (x Int, y Str)");
+if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 41); }
+
+# Single column
+sql_tokenize("CREATE TABLE t (x INT)");
+if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 42); }
+
+# Many columns
+sql_tokenize("CREATE TABLE t (a INT, b INT, c INT, d STR, e STR)");
+if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 43); }
+
+# ── Header verification ─────────────────────────────────────
+
+var buf = fl_alloc(PAGE_SIZE);
+
+# Zeroed buffer = bad magic
+memset(buf, 0, PAGE_SIZE);
+if (patra_hdr_verify(buf) == PATRA_OK) { syscall(SYS_EXIT, 50); }
+
+# Garbage magic
+store32(buf, 0xDEADBEEF);
+if (patra_hdr_verify(buf) == PATRA_OK) { syscall(SYS_EXIT, 51); }
+
+# All 0xFF
+memset(buf, 255, PAGE_SIZE);
+if (patra_hdr_verify(buf) == PATRA_OK) { syscall(SYS_EXIT, 52); }
+
+# Valid magic
+patra_hdr_init(buf);
+if (patra_hdr_verify(buf) != PATRA_OK) { syscall(SYS_EXIT, 53); }
+
+fl_free(buf);
+
+# ── Row encoding: string truncation ─────────────────────────
+
+var schema = fl_alloc(PAGE_SIZE);
+memset(schema, 0, PAGE_SIZE);
+store64(schema + SCH_NCOLS, 1);
+store64(schema + SCH_START + SCH_CTYPE, COL_STR);
+var rsz = row_compute_size(schema, 1);
+if (rsz != COL_STR_SZ) { syscall(SYS_EXIT, 60); }
+
+var row = fl_alloc(rsz);
+memset(row, 0, rsz);
+
+# Overlong string must be truncated, not overflow
+row_write_str(row, 0, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 73);
+var s = row_read_str(row, 0);
+var slen = strlen(s);
+if (slen != 63) { syscall(SYS_EXIT, 61); }
+
+# Empty string
+row_write_str(row, 0, "", 0);
+s = row_read_str(row, 0);
+if (strlen(s) != 0) { syscall(SYS_EXIT, 62); }
+
+fl_free(row);
+fl_free(schema);
+
+# ── Integration: error paths ────────────────────────────────
+
+var tpath = "/tmp/patra_fuzz.patra";
+syscall(SYS_UNLINK, tpath);
+var db = patra_open(tpath);
+if (db == 0) { syscall(SYS_EXIT, 70); }
+
+patra_exec(db, "CREATE TABLE fuzz (id INT, name STR)");
+
+# Type mismatch: string where INT expected
+var res = patra_exec(db, "INSERT INTO fuzz VALUES ('bad', 42)");
+if (res == PATRA_OK) { syscall(SYS_EXIT, 71); }
+
+# Too few values
+res = patra_exec(db, "INSERT INTO fuzz VALUES (1)");
+if (res == PATRA_OK) { syscall(SYS_EXIT, 72); }
+
+# Too many values
+res = patra_exec(db, "INSERT INTO fuzz VALUES (1, 'a', 99)");
+if (res == PATRA_OK) { syscall(SYS_EXIT, 73); }
+
+# Missing table
+res = patra_exec(db, "INSERT INTO ghost VALUES (1, 'x')");
+if (res != PATRA_ERR_NOTFOUND) { syscall(SYS_EXIT, 74); }
+
+# Query missing table returns null
+var rs = patra_query(db, "SELECT * FROM ghost");
+if (rs != 0) { syscall(SYS_EXIT, 75); }
+
+# Duplicate table
+res = patra_exec(db, "CREATE TABLE fuzz (x INT)");
+if (res != PATRA_ERR_EXISTS) { syscall(SYS_EXIT, 76); }
+
+# Valid round-trip
+patra_exec(db, "INSERT INTO fuzz VALUES (99, 'ok')");
+rs = patra_query(db, "SELECT * FROM fuzz");
+if (rs == 0) { syscall(SYS_EXIT, 77); }
+if (patra_result_count(rs) != 1) { syscall(SYS_EXIT, 78); }
+if (patra_result_get_int(rs, 0, 0) != 99) { syscall(SYS_EXIT, 79); }
+if (streq(patra_result_get_str(rs, 0, 1), "ok") != 1) { syscall(SYS_EXIT, 80); }
+patra_result_free(rs);
+
+patra_close(db);
+syscall(SYS_UNLINK, tpath);
+
+# All invariants passed
+syscall(SYS_EXIT, 0);
