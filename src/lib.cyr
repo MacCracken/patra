@@ -13,6 +13,7 @@ include "lib/io.cyr"
 include "lib/fmt.cyr"
 include "lib/str.cyr"
 include "lib/vec.cyr"
+include "lib/sakshi.cyr"
 
 # ── Modules (order matters: sql before where before table) ──
 
@@ -45,6 +46,7 @@ enum RsOff {
 
 fn patra_init() {
     _sql_init();
+    sakshi_set_level(SK_WARN);
 }
 
 # ── Open / Close ────────────────────────────────────────────

@@ -5,72 +5,38 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.0] - 2026-04-09
+## [0.8.0] - 2026-04-09
 
 ### Added
 
-- Fuzz harness for malformed .patra files (fuzz_file.fcyr)
-- Integration tests: libro-style audit log, vidya-style knowledge index
-- Persistence verification tests (close/reopen/query)
+- .patra file format: 4KB pages, "PTRA" magic header, free list page recycling
+- Page manager: alloc, read, write, free list
+- Row encoding: i64 + 64-byte fixed strings, null-padded
+- SQL parser: recursive descent tokenizer with case-insensitive keywords
+  - CREATE TABLE, INSERT, SELECT, UPDATE, DELETE
+  - WHERE (=, !=, <, >, <=, >=) with AND/OR
+  - ORDER BY (ascending, single column), LIMIT
+- B+ tree index: order-64, auto-created on first INT column
+  - Insert with leaf and internal node splitting
+  - Search (exact key, duplicate support), range scan
+  - 39% faster indexed SELECT on 1K-row tables
+- JSON Lines mode: append-only JSONL storage with flock
+  - JSON object builder with string escaping
+  - libro-compatible audit log backend
+- flock advisory locking: exclusive for writes, shared for reads
+- Result set API: count, get_int, get_str, col_name, col_type, free
+- sakshi integration: structured tracing via Cyrius stdlib
 
-### Status
+### Testing
 
-- 157 unit tests passing
-- 2 fuzz harnesses (143 invariants)
-- 15 benchmarks
-- 2 integration test programs (libro, vidya)
-- Binary: 89KB (demo), patra overhead ~60KB over stdlib baseline
-- Source: 2,304 lines across 9 modules
-
-## [0.4.0] - 2026-04-09
-
-### Added
-
-- JSON Lines append-only mode (jsonl.cyr)
-- jsonl_open/close/append/read/count — flock-protected JSONL file I/O
-- jsonl_append_obj — build and append JSON objects from key-value pairs
-- json_build — JSON object serializer with string escaping
-- libro-compatible audit log storage backend
-
-## [0.3.0] - 2026-04-09
-
-### Added
-
-- B+ tree index (btree.cyr) — order-64, 4KB node pages
-- B-tree insert with leaf and internal node splitting
-- B-tree search (exact key lookup with duplicate support)
-- B-tree range scan (recursive in-order traversal)
-- Auto-index on first INT column of each table
-- INSERT maintains B-tree index
-- SELECT WHERE on indexed column uses B-tree (39% faster on 1K rows)
+- 157 unit tests across 31 test groups
+- 2 fuzz harnesses (SQL parser + malformed file invariants)
+- 15 benchmarks (SQL parsing, page I/O, INSERT, SELECT, UPDATE, DELETE, JSONL)
+- Integration tests: libro audit log, vidya knowledge index
 
 ### Known Limitations
 
-- DELETE/UPDATE do not update the B-tree (stale refs filtered by verification)
-- Only first INT column is auto-indexed
-
-## [0.2.0] - 2026-04-09
-
-### Added
-
-- WHERE clause: =, !=, <, >, <=, >= on INT and STR columns
-- AND / OR in WHERE (uniform join, no mixing)
-- ORDER BY (ascending, single column)
-- LIMIT
-- UPDATE table SET col = val [, ...] WHERE ...
-- DELETE FROM table [WHERE ...]
-- Case-insensitive SQL keywords
-
-## [0.1.0] - 2026-04-09
-
-### Added
-
-- .patra file format: 4KB pages, "PTRA" magic, free list
-- Page manager: alloc, read, write, free list recycling
-- Row encoding: i64 + 64-byte fixed strings
-- SQL parser: tokenizer + recursive descent (CREATE, INSERT, SELECT)
-- CREATE TABLE with schema pages
-- INSERT with multi-page overflow
-- SELECT * with full table scan
-- flock advisory locking (exclusive/shared)
-- Result set API: count, get_int, get_str, col_name, col_type
+- DELETE/UPDATE do not update the B-tree index (stale refs filtered by verification)
+- Only first INT column is auto-indexed (no CREATE INDEX syntax)
+- No JOINs, subqueries, or aggregates
+- Binary size: ~60KB patra overhead (full SQL + B-tree + JSONL engine)

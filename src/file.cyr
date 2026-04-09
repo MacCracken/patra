@@ -110,8 +110,7 @@ fn patra_hdr_verify(buf) {
 }
 
 fn _pt_err(msg) {
-    syscall(SYS_WRITE, 2, msg, strlen(msg));
-    syscall(SYS_WRITE, 2, "\n", 1);
+    sakshi_error(msg, strlen(msg));
 }
 
 # ── File create / open ──────────────────────────────────────
