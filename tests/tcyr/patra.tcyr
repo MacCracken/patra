@@ -882,6 +882,198 @@ fn test_indexed_range_with_filter() {
     patra_close(db);
 }
 
+# ── Coverage: persistence ────────────────────────────────────
+
+fn test_persistence() {
+    test_group("persistence");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE p (id INT, val STR)");
+    patra_exec(db, "INSERT INTO p VALUES (1, 'alpha')");
+    patra_exec(db, "INSERT INTO p VALUES (2, 'beta')");
+    patra_close(db);
+
+    # Reopen and verify
+    db = patra_open(_tpath);
+    var rs = patra_query(db, "SELECT * FROM p");
+    assert_eq(patra_result_count(rs), 2, "persisted 2");
+    assert_eq(patra_result_get_int(rs, 0, 0), 1, "id 1");
+    assert_streq(patra_result_get_str(rs, 0, 1), "alpha", "alpha");
+    assert_eq(patra_result_get_int(rs, 1, 0), 2, "id 2");
+    assert_streq(patra_result_get_str(rs, 1, 1), "beta", "beta");
+    patra_result_free(rs);
+
+    # Indexed lookup still works after reopen
+    rs = patra_query(db, "SELECT * FROM p WHERE id = 2");
+    assert_eq(patra_result_count(rs), 1, "index after reopen");
+    patra_result_free(rs);
+
+    patra_close(db);
+}
+
+# ── Coverage: page overflow ──────────────────────────────────
+
+fn test_page_overflow() {
+    test_group("page overflow");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE wide (id INT, a STR, b STR)");
+    # Row size: 8 + 64 + 64 = 136 bytes. Page capacity: (4096-24)/136 = 29 rows.
+    # Insert 60 rows to span 3 pages.
+    for (var i = 1; i <= 60; i = i + 1) {
+        patra_exec(db, "INSERT INTO wide VALUES (1, 'aaaa', 'bbbb')");
+    }
+    var rs = patra_query(db, "SELECT * FROM wide");
+    assert_eq(patra_result_count(rs), 60, "60 rows multi-page");
+    patra_result_free(rs);
+
+    # Delete half, verify
+    patra_exec(db, "DELETE FROM wide WHERE id = 1 LIMIT 30");
+    patra_close(db);
+}
+
+# ── Coverage: string edge cases ──────────────────────────────
+
+fn test_string_edges() {
+    test_group("string edges");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE se (id INT, s STR)");
+
+    # Empty string
+    patra_exec(db, "INSERT INTO se VALUES (1, '')");
+    var rs = patra_query(db, "SELECT * FROM se WHERE id = 1");
+    assert_eq(patra_result_count(rs), 1, "empty str");
+    assert_streq(patra_result_get_str(rs, 0, 1), "", "empty val");
+    patra_result_free(rs);
+
+    # Max length (63 chars — last byte null)
+    patra_exec(db, "INSERT INTO se VALUES (2, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')");
+    rs = patra_query(db, "SELECT * FROM se WHERE id = 2");
+    assert_eq(patra_result_count(rs), 1, "max str");
+    assert_eq(strlen(patra_result_get_str(rs, 0, 1)), 63, "63 chars");
+    patra_result_free(rs);
+
+    # WHERE on empty string
+    rs = patra_query(db, "SELECT * FROM se WHERE s = ''");
+    assert_eq(patra_result_count(rs), 1, "where empty");
+    patra_result_free(rs);
+
+    patra_close(db);
+}
+
+# ── Coverage: NEQ and STR comparisons ────────────────────────
+
+fn test_neq_and_str_cmp() {
+    test_group("neq and str cmp");
+    cleanup();
+    var db = patra_open(_tpath);
+    _setup_people(db);
+
+    # NEQ on INT
+    var rs = patra_query(db, "SELECT * FROM people WHERE age != 25");
+    assert_eq(patra_result_count(rs), 3, "age!=25: 3");
+    patra_result_free(rs);
+
+    # NEQ on STR
+    rs = patra_query(db, "SELECT * FROM people WHERE name != 'alice'");
+    assert_eq(patra_result_count(rs), 4, "name!=alice: 4");
+    patra_result_free(rs);
+
+    # STR comparison operators
+    rs = patra_query(db, "SELECT * FROM people WHERE name > 'carol'");
+    assert_eq(patra_result_count(rs), 2, "name>carol: dave,eve");
+    patra_result_free(rs);
+
+    rs = patra_query(db, "SELECT * FROM people WHERE name < 'carol'");
+    assert_eq(patra_result_count(rs), 2, "name<carol: alice,bob");
+    patra_result_free(rs);
+
+    rs = patra_query(db, "SELECT * FROM people WHERE name >= 'dave'");
+    assert_eq(patra_result_count(rs), 2, "name>=dave: 2");
+    patra_result_free(rs);
+
+    patra_close(db);
+}
+
+# ── Coverage: multi-table isolation ──────────────────────────
+
+fn test_multi_table_isolation() {
+    test_group("multi table isolation");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t1 (id INT, x INT)");
+    patra_exec(db, "CREATE TABLE t2 (id INT, y STR)");
+
+    patra_exec(db, "INSERT INTO t1 VALUES (1, 100)");
+    patra_exec(db, "INSERT INTO t1 VALUES (2, 200)");
+    patra_exec(db, "INSERT INTO t2 VALUES (1, 'one')");
+
+    # Changes to t1 don't affect t2
+    patra_exec(db, "DELETE FROM t1 WHERE id = 1");
+    var rs = patra_query(db, "SELECT * FROM t1");
+    assert_eq(patra_result_count(rs), 1, "t1: 1 left");
+    patra_result_free(rs);
+
+    rs = patra_query(db, "SELECT * FROM t2");
+    assert_eq(patra_result_count(rs), 1, "t2: untouched");
+    patra_result_free(rs);
+
+    # Update one table
+    patra_exec(db, "UPDATE t2 SET y = 'ONE' WHERE id = 1");
+    rs = patra_query(db, "SELECT * FROM t1 WHERE id = 2");
+    assert_eq(patra_result_get_int(rs, 0, 1), 200, "t1 unchanged");
+    patra_result_free(rs);
+
+    patra_close(db);
+}
+
+# ── Coverage: SQL edge cases ─────────────────────────────────
+
+fn test_sql_semicolons() {
+    test_group("sql semicolons");
+    # Trailing semicolons should not break parsing
+    sql_tokenize("SELECT * FROM t;");
+    assert_eq(sql_parse(), PATRA_OK, "trailing semi");
+    assert_eq(load64(_sql_pr + PR_STMT), STMT_SELECT, "select with semi");
+
+    sql_tokenize("INSERT INTO t VALUES (1);");
+    assert_eq(sql_parse(), PATRA_OK, "insert semi");
+
+    sql_tokenize("DELETE FROM t WHERE id = 1;");
+    assert_eq(sql_parse(), PATRA_OK, "delete semi");
+}
+
+# ── Coverage: JSONL special chars ────────────────────────────
+
+fn test_jsonl_special_chars() {
+    test_group("jsonl special chars");
+    jcleanup();
+    var fd = jsonl_open(_jpath);
+
+    var keys = fl_alloc(8);
+    var vals = fl_alloc(8);
+    var types = fl_alloc(8);
+    store64(keys, "msg");
+    store64(vals, "line1\nline2");
+    store64(types, COL_STR);
+
+    jsonl_append_obj(fd, keys, vals, types, 1);
+
+    # Should be 1 line (newline escaped)
+    assert_eq(jsonl_count(fd), 1, "escaped newline = 1 line");
+
+    var lr = jsonl_read(fd);
+    assert_eq(jsonl_lines_count(lr), 1, "read 1");
+    jsonl_lines_free(lr);
+
+    fl_free(keys);
+    fl_free(vals);
+    fl_free(types);
+    jsonl_close(fd);
+    jcleanup();
+}
+
 # ── Runner ──────────────────────────────────────────────────
 
 fn main() {
@@ -949,6 +1141,15 @@ fn main() {
     # v0.8.1 indexed range
     test_indexed_range();
     test_indexed_range_with_filter();
+
+    # Coverage
+    test_persistence();
+    test_page_overflow();
+    test_string_edges();
+    test_neq_and_str_cmp();
+    test_multi_table_isolation();
+    test_sql_semicolons();
+    test_jsonl_special_chars();
 
     cleanup();
     return assert_summary();

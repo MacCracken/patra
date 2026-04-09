@@ -208,6 +208,94 @@ fn main() {
     jsonl_close(jfd);
     syscall(SYS_UNLINK, _jbpath);
 
+    # --- B-tree insert ---
+
+    _bcleanup();
+    var b16 = bench_new("btree_insert_1k");
+    fd = _pt_file_create(_bpath);
+    hdr = fl_alloc(PAGE_SIZE);
+    patra_hdr_read(fd, hdr);
+    var bt_root = btree_create(fd, hdr);
+    bench_batch_start(b16);
+    for (var bi = 0; bi < 1000; bi = bi + 1) {
+        bt_root = btree_insert(fd, hdr, bt_root, bi, bi);
+    }
+    bench_batch_stop(b16, 1000);
+    vec_push(benches, b16);
+
+    # --- B-tree search ---
+
+    var b17 = bench_new("btree_search_1k");
+    var bout = fl_alloc(64);
+    ri = 0;
+    while (ri < 100) {
+        bench_batch_start(b17);
+        for (var si = 0; si < 1000; si = si + 1) {
+            btree_search(fd, bt_root, si, bout, 8);
+        }
+        bench_batch_stop(b17, 1000);
+        ri = ri + 1;
+    }
+    vec_push(benches, b17);
+    fl_free(bout);
+    fl_free(hdr);
+    syscall(SYS_CLOSE, fd);
+    _bcleanup();
+
+    # --- Indexed SELECT vs full scan ---
+
+    _bcleanup();
+    _bdb = patra_open(_bpath);
+    patra_exec(_bdb, "CREATE TABLE idx (id INT, val STR)");
+    for (var ii = 0; ii < 500; ii = ii + 1) {
+        patra_exec(_bdb, "INSERT INTO idx VALUES (1, 'x')");
+    }
+
+    var b18 = bench_new("select_idx_eq_500");
+    ri = 0;
+    while (ri < 100) {
+        bench_batch_start(b18);
+        var rs = patra_query(_bdb, "SELECT * FROM idx WHERE id = 1");
+        bench_batch_stop(b18, 1);
+        patra_result_free(rs);
+        ri = ri + 1;
+    }
+    vec_push(benches, b18);
+
+    var b19 = bench_new("select_scan_500");
+    ri = 0;
+    while (ri < 100) {
+        bench_batch_start(b19);
+        var rs = patra_query(_bdb, "SELECT * FROM idx");
+        bench_batch_stop(b19, 1);
+        patra_result_free(rs);
+        ri = ri + 1;
+    }
+    vec_push(benches, b19);
+    patra_close(_bdb);
+    _bcleanup();
+
+    # --- ORDER BY ---
+
+    _bcleanup();
+    _bdb = patra_open(_bpath);
+    patra_exec(_bdb, "CREATE TABLE srt (id INT, x INT)");
+    for (var oi = 0; oi < 200; oi = oi + 1) {
+        patra_exec(_bdb, "INSERT INTO srt VALUES (1, 0)");
+    }
+    var b20 = bench_new("order_by_200");
+    ri = 0;
+    while (ri < 100) {
+        bench_batch_start(b20);
+        var rs = patra_query(_bdb, "SELECT * FROM srt ORDER BY id");
+        bench_batch_stop(b20, 1);
+        patra_result_free(rs);
+        ri = ri + 1;
+    }
+    vec_push(benches, b20);
+    patra_close(_bdb);
+    _bcleanup();
+
     bench_report_all(benches);
     return 0;
 }
