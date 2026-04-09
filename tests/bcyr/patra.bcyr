@@ -1,6 +1,4 @@
-# patra.bcyr — Patra benchmarks
-#
-# Run: cyrius bench tests/bcyr/patra.bcyr
+# patra.bcyr — Patra benchmarks (v0.1 + v0.2)
 
 include "src/lib.cyr"
 include "lib/bench.cyr"
@@ -9,49 +7,14 @@ include "lib/fnptr.cyr"
 var _bpath = "/tmp/patra_bench.patra";
 var _bdb = 0;
 
-fn _bcleanup() { syscall(SYS_UNLINK, _bpath); }
+fn _bcleanup() { syscall(SYS_UNLINK, _bpath); return 0; }
 
-# ── Work functions (zero-arg for bench_run) ─────────────────
-
-fn work_tokenize() {
-    sql_tokenize("INSERT INTO users VALUES (42, 'hello world')");
-    return 0;
-}
-
-fn work_parse_insert() {
-    sql_tokenize("INSERT INTO users VALUES (42, 'hello world')");
-    sql_parse();
-    return 0;
-}
-
-fn work_parse_select() {
-    sql_tokenize("SELECT * FROM users");
-    sql_parse();
-    return 0;
-}
-
-fn work_parse_create() {
-    sql_tokenize("CREATE TABLE t (id INT, name STR, age INT)");
-    sql_parse();
-    return 0;
-}
-
-fn work_hdr_init() {
-    var buf = fl_alloc(PAGE_SIZE);
-    patra_hdr_init(buf);
-    fl_free(buf);
-    return 0;
-}
-
-fn work_hdr_verify() {
-    var buf = fl_alloc(PAGE_SIZE);
-    patra_hdr_init(buf);
-    patra_hdr_verify(buf);
-    fl_free(buf);
-    return 0;
-}
-
-# ── Main ────────────────────────────────────────────────────
+fn work_tokenize() { sql_tokenize("INSERT INTO users VALUES (42, 'hello world')"); return 0; }
+fn work_parse_insert() { sql_tokenize("INSERT INTO users VALUES (42, 'hello world')"); sql_parse(); return 0; }
+fn work_parse_select() { sql_tokenize("SELECT * FROM users"); sql_parse(); return 0; }
+fn work_parse_create() { sql_tokenize("CREATE TABLE t (id INT, name STR, age INT)"); sql_parse(); return 0; }
+fn work_parse_where() { sql_tokenize("SELECT * FROM t WHERE age > 25 AND id < 100"); sql_parse(); return 0; }
+fn work_parse_update() { sql_tokenize("UPDATE t SET age = 31 WHERE name = 'alice'"); sql_parse(); return 0; }
 
 fn main() {
     alloc_init();
@@ -60,38 +23,33 @@ fn main() {
 
     var benches = vec_new();
     var N = 10000;
+    var ri = 0;
 
-    # --- SQL layer ---
+    # --- SQL parsing ---
 
     var b1 = bench_new("sql_tokenize");
     bench_run(b1, &work_tokenize, N);
     vec_push(benches, b1);
 
-    var b2 = bench_new("sql_parse_insert");
+    var b2 = bench_new("parse_insert");
     bench_run(b2, &work_parse_insert, N);
     vec_push(benches, b2);
 
-    var b3 = bench_new("sql_parse_select");
+    var b3 = bench_new("parse_select");
     bench_run(b3, &work_parse_select, N);
     vec_push(benches, b3);
 
-    var b4 = bench_new("sql_parse_create");
-    bench_run(b4, &work_parse_create, N);
+    var b4 = bench_new("parse_where");
+    bench_run(b4, &work_parse_where, N);
     vec_push(benches, b4);
 
-    # --- Header operations ---
-
-    var b5 = bench_new("hdr_init");
-    bench_run(b5, &work_hdr_init, N);
+    var b5 = bench_new("parse_update");
+    bench_run(b5, &work_parse_update, N);
     vec_push(benches, b5);
 
-    var b6 = bench_new("hdr_verify");
-    bench_run(b6, &work_hdr_verify, N);
-    vec_push(benches, b6);
+    # --- Row encoding ---
 
-    # --- Row encoding (inline batch) ---
-
-    var b7 = bench_new("row_encode_2col");
+    var b6 = bench_new("row_encode_2col");
     var schema = fl_alloc(PAGE_SIZE);
     memset(schema, 0, PAGE_SIZE);
     store64(schema + SCH_NCOLS, 2);
@@ -99,89 +57,127 @@ fn main() {
     store64(schema + SCH_START + 1 * SCH_ENTRY_SZ + SCH_CTYPE, COL_STR);
     var rsz = row_compute_size(schema, 2);
     var row = fl_alloc(rsz);
-    var rounds = 100;
-    var batch = 10000;
-    var ri = 0;
-    while (ri < rounds) {
-        bench_batch_start(b7);
+    ri = 0;
+    while (ri < 100) {
+        bench_batch_start(b6);
         var bi = 0;
-        while (bi < batch) {
+        while (bi < 10000) {
             memset(row, 0, rsz);
             row_write_int(row, 0, bi);
             row_write_str(row, 8, "bench", 5);
             bi = bi + 1;
         }
-        bench_batch_stop(b7, batch);
+        bench_batch_stop(b6, 10000);
         ri = ri + 1;
     }
-    vec_push(benches, b7);
+    vec_push(benches, b6);
     fl_free(row);
     fl_free(schema);
 
-    # --- Page alloc throughput ---
+    # --- Page alloc ---
 
     _bcleanup();
-    var b8 = bench_new("page_alloc_1k");
+    var b7 = bench_new("page_alloc_1k");
     var fd = _pt_file_create(_bpath);
     var hdr = fl_alloc(PAGE_SIZE);
     patra_hdr_read(fd, hdr);
-    bench_batch_start(b8);
-    for (var i = 0; i < 1000; i = i + 1) {
-        page_alloc(fd, hdr);
-    }
-    bench_batch_stop(b8, 1000);
-    vec_push(benches, b8);
+    bench_batch_start(b7);
+    for (var i = 0; i < 1000; i = i + 1) { page_alloc(fd, hdr); }
+    bench_batch_stop(b7, 1000);
+    vec_push(benches, b7);
     fl_free(hdr);
     syscall(SYS_CLOSE, fd);
     _bcleanup();
 
-    # --- INSERT throughput ---
+    # --- INSERT 1K ---
 
     _bcleanup();
-    var b9 = bench_new("insert_1k");
+    var b8 = bench_new("insert_1k");
     _bdb = patra_open(_bpath);
     patra_exec(_bdb, "CREATE TABLE bench (id INT, val STR)");
-    bench_batch_start(b9);
+    bench_batch_start(b8);
     for (var i = 0; i < 1000; i = i + 1) {
         patra_exec(_bdb, "INSERT INTO bench VALUES (1, 'data')");
     }
-    bench_batch_stop(b9, 1000);
+    bench_batch_stop(b8, 1000);
+    vec_push(benches, b8);
+
+    # --- SELECT * 1K rows ---
+
+    var b9 = bench_new("select_1k");
+    ri = 0;
+    while (ri < 100) {
+        bench_batch_start(b9);
+        var rs = patra_query(_bdb, "SELECT * FROM bench");
+        bench_batch_stop(b9, 1);
+        patra_result_free(rs);
+        ri = ri + 1;
+    }
     vec_push(benches, b9);
 
-    # --- SELECT * scan 1000 rows ---
+    # --- SELECT with WHERE ---
 
-    var b10 = bench_new("select_1k_rows");
+    var b10 = bench_new("select_where_1k");
     ri = 0;
     while (ri < 100) {
         bench_batch_start(b10);
-        var rs = patra_query(_bdb, "SELECT * FROM bench");
+        var rs = patra_query(_bdb, "SELECT * FROM bench WHERE id = 1");
         bench_batch_stop(b10, 1);
         patra_result_free(rs);
         ri = ri + 1;
     }
     vec_push(benches, b10);
 
-    patra_close(_bdb);
-    _bcleanup();
+    # --- UPDATE with WHERE ---
 
-    # --- Full round-trip (create + insert + query + close) ---
-
-    var b11 = bench_new("roundtrip");
+    var b11 = bench_new("update_where");
     ri = 0;
     while (ri < 100) {
-        _bcleanup();
         bench_batch_start(b11);
-        var db = patra_open(_bpath);
-        patra_exec(db, "CREATE TABLE t (x INT)");
-        patra_exec(db, "INSERT INTO t VALUES (1)");
-        patra_exec(db, "INSERT INTO t VALUES (2)");
-        var rs = patra_query(db, "SELECT * FROM t");
-        patra_result_free(rs);
-        patra_close(db);
+        patra_exec(_bdb, "UPDATE bench SET val = 'upd' WHERE id = 1");
         bench_batch_stop(b11, 1);
         ri = ri + 1;
     }
     vec_push(benches, b11);
+
+    # --- DELETE (small set) ---
+
+    patra_close(_bdb);
+    _bcleanup();
+    var b12 = bench_new("delete_50");
+    _bdb = patra_open(_bpath);
+    patra_exec(_bdb, "CREATE TABLE del (id INT)");
+    for (var i = 0; i < 50; i = i + 1) {
+        patra_exec(_bdb, "INSERT INTO del VALUES (1)");
+    }
+    bench_batch_start(b12);
+    patra_exec(_bdb, "DELETE FROM del");
+    bench_batch_stop(b12, 1);
+    vec_push(benches, b12);
+
+    patra_close(_bdb);
+    _bcleanup();
+
+    # --- Full roundtrip ---
+
+    var b13 = bench_new("roundtrip");
+    ri = 0;
+    while (ri < 100) {
+        _bcleanup();
+        bench_batch_start(b13);
+        var db = patra_open(_bpath);
+        patra_exec(db, "CREATE TABLE t (x INT)");
+        patra_exec(db, "INSERT INTO t VALUES (1)");
+        patra_exec(db, "INSERT INTO t VALUES (2)");
+        var rs = patra_query(db, "SELECT * FROM t WHERE x = 1");
+        patra_result_free(rs);
+        patra_exec(db, "UPDATE t SET x = 3 WHERE x = 2");
+        patra_exec(db, "DELETE FROM t WHERE x = 1");
+        patra_close(db);
+        bench_batch_stop(b13, 1);
+        ri = ri + 1;
+    }
+    vec_push(benches, b13);
     _bcleanup();
 
     bench_report_all(benches);

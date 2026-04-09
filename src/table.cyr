@@ -1,4 +1,4 @@
-# table.cyr — table metadata, schema, create, insert, scan
+# table.cyr — table metadata, create, insert, scan, update, delete
 
 fn _tbl_entry(hdr, idx) {
     return hdr + HDR_TBLDIR + idx * TBL_ENTRY_SZ;
@@ -10,7 +10,6 @@ fn _tbl_name_eq(entry, name, nlen) {
     return memeq(entry + TBL_NAME, name, nlen);
 }
 
-# Find table by name, returns index or -1
 fn tbl_find(hdr, name, nlen) {
     var count = load64(hdr + HDR_TBLCOUNT);
     for (var i = 0; i < count; i = i + 1) {
@@ -21,14 +20,13 @@ fn tbl_find(hdr, name, nlen) {
     return 0 - 1;
 }
 
-# col_names: array of (ptr, len) pairs — each 16 bytes
-# col_types: array of i64 — each 8 bytes
+# col_names: array of (ptr, len) pairs — 16 bytes each
+# col_types: array of i64 — 8 bytes each
 fn tbl_create(fd, hdr, name, nlen, col_names, col_types, ncols) {
     if (load64(hdr + HDR_TBLCOUNT) >= MAX_TABLES) { return PATRA_ERR_FULL; }
     if (ncols > MAX_COLS) { return PATRA_ERR_COLCOUNT; }
     if (tbl_find(hdr, name, nlen) >= 0) { return PATRA_ERR_EXISTS; }
 
-    # Write schema page
     var spg = page_alloc(fd, hdr);
     var sbuf = fl_alloc(PAGE_SIZE);
     memset(sbuf, 0, PAGE_SIZE);
@@ -47,14 +45,12 @@ fn tbl_create(fd, hdr, name, nlen, col_names, col_types, ncols) {
     page_write(fd, spg, sbuf);
     fl_free(sbuf);
 
-    # Allocate first data page
     var dpg = page_alloc(fd, hdr);
     var dbuf = fl_alloc(PAGE_SIZE);
     page_init_data(dbuf);
     page_write(fd, dpg, dbuf);
     fl_free(dbuf);
 
-    # Write table directory entry
     var idx = load64(hdr + HDR_TBLCOUNT);
     var entry = _tbl_entry(hdr, idx);
     memset(entry, 0, TBL_ENTRY_SZ);
@@ -71,13 +67,11 @@ fn tbl_create(fd, hdr, name, nlen, col_names, col_types, ncols) {
     return PATRA_OK;
 }
 
-# Insert a row into the table at index idx
 fn tbl_insert(fd, hdr, idx, row_data, row_sz) {
     var entry = _tbl_entry(hdr, idx);
     var cur = load64(entry + TBL_ROOT);
     var buf = fl_alloc(PAGE_SIZE);
 
-    # Walk to last data page
     page_read(fd, cur, buf);
     while (load64(buf + DP_NEXT) != 0) {
         cur = load64(buf + DP_NEXT);
@@ -88,12 +82,10 @@ fn tbl_insert(fd, hdr, idx, row_data, row_sz) {
     var used = DP_DATA + nrows * row_sz;
 
     if (used + row_sz <= PAGE_SIZE) {
-        # Fits in current page
         memcpy(buf + used, row_data, row_sz);
         store64(buf + DP_NROWS, nrows + 1);
         page_write(fd, cur, buf);
     } else {
-        # Page full — allocate new page, link it
         var npg = page_alloc(fd, hdr);
         store64(buf + DP_NEXT, npg);
         page_write(fd, cur, buf);
@@ -111,7 +103,7 @@ fn tbl_insert(fd, hdr, idx, row_data, row_sz) {
     return PATRA_OK;
 }
 
-# Scan all rows into pre-allocated output buffer. Returns rows copied.
+# Scan all rows (no filter). Returns rows copied.
 fn tbl_scan(fd, hdr, idx, out, row_sz) {
     var entry = _tbl_entry(hdr, idx);
     var cur = load64(entry + TBL_ROOT);
@@ -129,4 +121,108 @@ fn tbl_scan(fd, hdr, idx, out, row_sz) {
 
     fl_free(buf);
     return written / row_sz;
+}
+
+# Filtered scan — copies matching rows into out. Returns count.
+fn tbl_scan_where(fd, hdr, idx, out, row_sz, schema, ncols, pr) {
+    var entry = _tbl_entry(hdr, idx);
+    var cur = load64(entry + TBL_ROOT);
+    var buf = fl_alloc(PAGE_SIZE);
+    var kept = 0;
+
+    while (cur != 0) {
+        page_read(fd, cur, buf);
+        var nrows = load64(buf + DP_NROWS);
+        for (var i = 0; i < nrows; i = i + 1) {
+            var rptr = buf + DP_DATA + i * row_sz;
+            if (where_eval(rptr, schema, ncols, pr)) {
+                memcpy(out + kept * row_sz, rptr, row_sz);
+                kept = kept + 1;
+            }
+        }
+        cur = load64(buf + DP_NEXT);
+    }
+
+    fl_free(buf);
+    return kept;
+}
+
+# Update matching rows in-place. Returns PATRA_OK or error.
+fn tbl_update(fd, hdr, idx, row_sz, schema, ncols, pr) {
+    var entry = _tbl_entry(hdr, idx);
+    var cur = load64(entry + TBL_ROOT);
+    var buf = fl_alloc(PAGE_SIZE);
+    var nsets = load64(pr + PR_COUNT);
+
+    while (cur != 0) {
+        page_read(fd, cur, buf);
+        var nrows = load64(buf + DP_NROWS);
+        var modified = 0;
+
+        for (var i = 0; i < nrows; i = i + 1) {
+            var rptr = buf + DP_DATA + i * row_sz;
+            if (where_eval(rptr, schema, ncols, pr)) {
+                for (var s = 0; s < nsets; s = s + 1) {
+                    var set = pr + PR_ITEMS + s * SET_SZ;
+                    var cidx = _wh_resolve_col(schema, ncols,
+                        load64(set + SET_CPTR), load64(set + SET_CLEN));
+                    if (cidx < 0) {
+                        fl_free(buf);
+                        return PATRA_ERR_NOTFOUND;
+                    }
+                    var coff = row_field_offset(schema, ncols, cidx);
+                    if (load64(set + SET_VTYPE) == COL_INT) {
+                        row_write_int(rptr, coff, load64(set + SET_IVAL));
+                    } else {
+                        row_write_str(rptr, coff, load64(set + SET_SPTR), load64(set + SET_SLEN));
+                    }
+                }
+                modified = 1;
+            }
+        }
+
+        if (modified != 0) { page_write(fd, cur, buf); }
+        cur = load64(buf + DP_NEXT);
+    }
+
+    fl_free(buf);
+    return PATRA_OK;
+}
+
+# Delete matching rows with page compaction. Returns PATRA_OK.
+fn tbl_delete(fd, hdr, idx, row_sz, schema, ncols, pr) {
+    var entry = _tbl_entry(hdr, idx);
+    var cur = load64(entry + TBL_ROOT);
+    var buf = fl_alloc(PAGE_SIZE);
+    var deleted = 0;
+
+    while (cur != 0) {
+        page_read(fd, cur, buf);
+        var nrows = load64(buf + DP_NROWS);
+        var kept = 0;
+
+        for (var i = 0; i < nrows; i = i + 1) {
+            var rptr = buf + DP_DATA + i * row_sz;
+            if (where_eval(rptr, schema, ncols, pr)) {
+                deleted = deleted + 1;
+            } else {
+                if (kept != i) {
+                    memcpy(buf + DP_DATA + kept * row_sz, rptr, row_sz);
+                }
+                kept = kept + 1;
+            }
+        }
+
+        if (kept != nrows) {
+            store64(buf + DP_NROWS, kept);
+            page_write(fd, cur, buf);
+        }
+        cur = load64(buf + DP_NEXT);
+    }
+
+    var rc = load64(entry + TBL_NROWS);
+    store64(entry + TBL_NROWS, rc - deleted);
+
+    fl_free(buf);
+    return PATRA_OK;
 }

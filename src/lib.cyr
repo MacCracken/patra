@@ -14,14 +14,14 @@ include "lib/fmt.cyr"
 include "lib/str.cyr"
 include "lib/vec.cyr"
 
-# ── Modules ─────────────────────────────────────────────────
+# ── Modules (order matters: sql before where before table) ──
 
 include "src/file.cyr"
 include "src/page.cyr"
 include "src/row.cyr"
-include "src/table.cyr"
 include "src/sql.cyr"
 include "src/where.cyr"
+include "src/table.cyr"
 include "src/btree.cyr"
 include "src/jsonl.cyr"
 
@@ -89,6 +89,7 @@ fn patra_close(db) {
     fl_free(load64(db + DB_HDR));
     syscall(SYS_CLOSE, fd);
     fl_free(db);
+    return 0;
 }
 
 fn _db_fd(db)  { return load64(db + DB_FD); }
@@ -192,6 +193,70 @@ fn _exec_insert(db) {
     return r;
 }
 
+# ── Exec: UPDATE ─────────────────────────────────────────────
+
+fn _exec_update(db) {
+    var fd = _db_fd(db);
+    var hdr = _db_hdr(db);
+
+    patra_lock_ex(fd);
+    patra_hdr_read(fd, hdr);
+
+    var tname = load64(_sql_pr + PR_TNAME);
+    var tnlen = load64(_sql_pr + PR_TNLEN);
+    var idx = tbl_find(hdr, tname, tnlen);
+    if (idx < 0) {
+        patra_unlock(fd);
+        return PATRA_ERR_NOTFOUND;
+    }
+
+    var entry = _tbl_entry(hdr, idx);
+    var spg = load64(entry + TBL_SCHEMA);
+    var schema = fl_alloc(PAGE_SIZE);
+    page_read(fd, spg, schema);
+    var ncols = load64(schema + SCH_NCOLS);
+    var rsz = row_compute_size(schema, ncols);
+
+    var r = tbl_update(fd, hdr, idx, rsz, schema, ncols, _sql_pr);
+    fl_free(schema);
+
+    patra_hdr_write(fd, hdr);
+    patra_unlock(fd);
+    return r;
+}
+
+# ── Exec: DELETE ─────────────────────────────────────────────
+
+fn _exec_delete(db) {
+    var fd = _db_fd(db);
+    var hdr = _db_hdr(db);
+
+    patra_lock_ex(fd);
+    patra_hdr_read(fd, hdr);
+
+    var tname = load64(_sql_pr + PR_TNAME);
+    var tnlen = load64(_sql_pr + PR_TNLEN);
+    var idx = tbl_find(hdr, tname, tnlen);
+    if (idx < 0) {
+        patra_unlock(fd);
+        return PATRA_ERR_NOTFOUND;
+    }
+
+    var entry = _tbl_entry(hdr, idx);
+    var spg = load64(entry + TBL_SCHEMA);
+    var schema = fl_alloc(PAGE_SIZE);
+    page_read(fd, spg, schema);
+    var ncols = load64(schema + SCH_NCOLS);
+    var rsz = row_compute_size(schema, ncols);
+
+    var r = tbl_delete(fd, hdr, idx, rsz, schema, ncols, _sql_pr);
+    fl_free(schema);
+
+    patra_hdr_write(fd, hdr);
+    patra_unlock(fd);
+    return r;
+}
+
 # ── patra_exec ───────────────────────────────────────────────
 
 fn patra_exec(db, sql) {
@@ -203,10 +268,70 @@ fn patra_exec(db, sql) {
     var stmt = load64(_sql_pr + PR_STMT);
     if (stmt == STMT_CREATE) { return _exec_create(db); }
     if (stmt == STMT_INSERT) { return _exec_insert(db); }
+    if (stmt == STMT_UPDATE) { return _exec_update(db); }
+    if (stmt == STMT_DELETE) { return _exec_delete(db); }
     return PATRA_ERR_SYNTAX;
 }
 
-# ── patra_query (SELECT) ────────────────────────────────────
+# ── Sorting for ORDER BY ────────────────────────────────────
+
+fn _strcmp_nn(a, b) {
+    var i = 0;
+    while (1) {
+        var ca = load8(a + i);
+        var cb = load8(b + i);
+        if (ca != cb) { return ca - cb; }
+        if (ca == 0) { return 0; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _rs_field_off(rs, col) {
+    var types = load64(rs + RS_TYPES);
+    var off = 0;
+    for (var i = 0; i < col; i = i + 1) {
+        if (load64(types + i * 8) == COL_INT) { off = off + COL_INT_SZ; }
+        else { off = off + COL_STR_SZ; }
+    }
+    return off;
+}
+
+fn _sort_result(rs, col_idx, col_type) {
+    var data = load64(rs + RS_DATA);
+    var rsz = load64(rs + RS_ROWSZ);
+    var nrows = load64(rs + RS_NROWS);
+    if (nrows <= 1) { return 0; }
+
+    var off = _rs_field_off(rs, col_idx);
+    var tmp = fl_alloc(rsz);
+
+    for (var i = 1; i < nrows; i = i + 1) {
+        memcpy(tmp, data + i * rsz, rsz);
+        var j = i - 1;
+        while (j >= 0) {
+            var should_shift = 0;
+            if (col_type == COL_INT) {
+                if (load64(data + j * rsz + off) > load64(tmp + off)) {
+                    should_shift = 1;
+                }
+            } else {
+                if (_strcmp_nn(data + j * rsz + off, tmp + off) > 0) {
+                    should_shift = 1;
+                }
+            }
+            if (should_shift == 0) { break; }
+            memcpy(data + (j + 1) * rsz, data + j * rsz, rsz);
+            j = j - 1;
+        }
+        memcpy(data + (j + 1) * rsz, tmp, rsz);
+    }
+
+    fl_free(tmp);
+    return 0;
+}
+
+# ── patra_query (SELECT with WHERE, ORDER BY, LIMIT) ────────
 
 fn patra_query(db, sql) {
     if (db == 0) { return 0; }
@@ -234,12 +359,11 @@ fn patra_query(db, sql) {
     var nrows = load64(entry + TBL_NROWS);
     var spg = load64(entry + TBL_SCHEMA);
 
-    # Read schema for column types and names
     var schema = fl_alloc(PAGE_SIZE);
     page_read(fd, spg, schema);
     var rsz = row_compute_size(schema, ncols);
 
-    # Single allocation: header + col_types + col_names + row data
+    # Allocate result for worst case (all rows)
     var total = RS_HDR_SZ + ncols * 8 + ncols * SCH_CNAME_MAX + nrows * rsz;
     if (total < RS_HDR_SZ + 64) { total = RS_HDR_SZ + 64; }
     var rs = fl_alloc(total);
@@ -250,24 +374,54 @@ fn patra_query(db, sql) {
     var data_ptr  = names_ptr + ncols * SCH_CNAME_MAX;
 
     store64(rs + RS_NCOLS, ncols);
-    store64(rs + RS_NROWS, nrows);
     store64(rs + RS_TYPES, types_ptr);
     store64(rs + RS_NAMES, names_ptr);
     store64(rs + RS_ROWSZ, rsz);
     store64(rs + RS_DATA, data_ptr);
 
-    # Copy schema info into result set
+    # Copy schema info
     for (var i = 0; i < ncols; i = i + 1) {
         var soff = SCH_START + i * SCH_ENTRY_SZ;
         store64(types_ptr + i * 8, load64(schema + soff + SCH_CTYPE));
         memcpy(names_ptr + i * SCH_CNAME_MAX, schema + soff + SCH_CNAME, SCH_CNAME_MAX);
     }
 
-    # Scan data into result
-    tbl_scan(fd, hdr, idx, data_ptr, rsz);
+    # Scan with WHERE filter
+    var actual = tbl_scan_where(fd, hdr, idx, data_ptr, rsz, schema, ncols, _sql_pr);
+    store64(rs + RS_NROWS, actual);
 
     fl_free(schema);
     patra_unlock(fd);
+
+    # ORDER BY
+    var ob_ptr = load64(_sql_pr + PR_ORDERBY_PTR);
+    if (ob_ptr != 0) {
+        var ob_len = load64(_sql_pr + PR_ORDERBY_LEN);
+        # Need schema again for column resolution — read from result types
+        var ob_idx = 0 - 1;
+        var np = load64(rs + RS_NAMES);
+        for (var c = 0; c < ncols; c = c + 1) {
+            var cn = np + c * SCH_CNAME_MAX;
+            if (strlen(cn) == ob_len) {
+                if (memeq(cn, ob_ptr, ob_len)) {
+                    ob_idx = c;
+                }
+            }
+        }
+        if (ob_idx >= 0) {
+            var ob_type = load64(types_ptr + ob_idx * 8);
+            _sort_result(rs, ob_idx, ob_type);
+        }
+    }
+
+    # LIMIT
+    var lim = load64(_sql_pr + PR_LIMIT);
+    if (lim > 0) {
+        if (actual > lim) {
+            store64(rs + RS_NROWS, lim);
+        }
+    }
+
     return rs;
 }
 
@@ -275,16 +429,6 @@ fn patra_query(db, sql) {
 
 fn patra_result_count(rs) { return load64(rs + RS_NROWS); }
 fn patra_result_cols(rs)  { return load64(rs + RS_NCOLS); }
-
-fn _rs_field_off(rs, col) {
-    var types = load64(rs + RS_TYPES);
-    var off = 0;
-    for (var i = 0; i < col; i = i + 1) {
-        if (load64(types + i * 8) == COL_INT) { off = off + COL_INT_SZ; }
-        else { off = off + COL_STR_SZ; }
-    }
-    return off;
-}
 
 fn patra_result_get_int(rs, row, col) {
     var data = load64(rs + RS_DATA);
@@ -310,4 +454,5 @@ fn patra_result_col_type(rs, col) {
 
 fn patra_result_free(rs) {
     if (rs != 0) { fl_free(rs); }
+    return 0;
 }

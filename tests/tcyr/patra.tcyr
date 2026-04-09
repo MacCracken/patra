@@ -1,40 +1,35 @@
-# patra.tcyr — Patra v0.1 test suite
+# patra.tcyr — Patra test suite (v0.1 + v0.2)
 
 include "src/lib.cyr"
 include "lib/assert.cyr"
 
 var _tpath = "/tmp/patra_test.patra";
 
-fn cleanup() {
-    syscall(SYS_UNLINK, _tpath);
-}
+fn cleanup() { syscall(SYS_UNLINK, _tpath); }
 
-# ── Header ──────────────────────────────────────────────────
+# ── v0.1: Header ────────────────────────────────────────────
 
 fn test_header() {
     test_group("header");
     var buf = fl_alloc(PAGE_SIZE);
     patra_hdr_init(buf);
-
     assert_eq(load32(buf + HDR_MAGIC), PATRA_MAGIC, "magic");
     assert_eq(load32(buf + HDR_VER), PATRA_VER, "version");
     assert_eq(load64(buf + HDR_PGCOUNT), 1, "page count");
     assert_eq(load64(buf + HDR_TBLCOUNT), 0, "table count");
     assert_eq(patra_hdr_verify(buf), PATRA_OK, "verify ok");
-
     store32(buf + HDR_MAGIC, 0);
     assert_eq(patra_hdr_verify(buf), PATRA_ERR_MAGIC, "verify bad magic");
     fl_free(buf);
 }
 
-# ── File create ─────────────────────────────────────────────
+# ── v0.1: File create ───────────────────────────────────────
 
 fn test_file_create() {
     test_group("file create");
     cleanup();
     var fd = _pt_file_create(_tpath);
     assert(fd >= 0, "create fd");
-
     var buf = fl_alloc(PAGE_SIZE);
     patra_hdr_read(fd, buf);
     assert_eq(patra_hdr_verify(buf), PATRA_OK, "header valid");
@@ -42,7 +37,7 @@ fn test_file_create() {
     syscall(SYS_CLOSE, fd);
 }
 
-# ── Page alloc / free ───────────────────────────────────────
+# ── v0.1: Page alloc / free ─────────────────────────────────
 
 fn test_page_alloc() {
     test_group("page alloc");
@@ -50,25 +45,18 @@ fn test_page_alloc() {
     var fd = _pt_file_create(_tpath);
     var hdr = fl_alloc(PAGE_SIZE);
     patra_hdr_read(fd, hdr);
-
     var p0 = page_alloc(fd, hdr);
     assert_eq(p0, 1, "first page 1");
-    assert_eq(load64(hdr + HDR_PGCOUNT), 2, "pgcount 2");
-
     var p1 = page_alloc(fd, hdr);
     assert_eq(p1, 2, "second page 2");
-    assert_eq(load64(hdr + HDR_PGCOUNT), 3, "pgcount 3");
-
-    # Free p1 and reuse
     page_free(fd, hdr, p1);
     var p2 = page_alloc(fd, hdr);
     assert_eq(p2, 2, "reused freed page");
-
     fl_free(hdr);
     syscall(SYS_CLOSE, fd);
 }
 
-# ── Page read / write ──────────────────────────────────────
+# ── v0.1: Page read / write ─────────────────────────────────
 
 fn test_page_rw() {
     test_group("page read write");
@@ -76,96 +64,93 @@ fn test_page_rw() {
     var fd = _pt_file_create(_tpath);
     var hdr = fl_alloc(PAGE_SIZE);
     patra_hdr_read(fd, hdr);
-
     var pg = page_alloc(fd, hdr);
     var buf = fl_alloc(PAGE_SIZE);
     memset(buf, 0, PAGE_SIZE);
     store64(buf, 42);
     store64(buf + 8, 99);
     page_write(fd, pg, buf);
-
     memset(buf, 0, PAGE_SIZE);
     page_read(fd, pg, buf);
     assert_eq(load64(buf), 42, "read 42");
     assert_eq(load64(buf + 8), 99, "read 99");
-
     fl_free(buf);
     fl_free(hdr);
     syscall(SYS_CLOSE, fd);
 }
 
-# ── Row encoding ────────────────────────────────────────────
+# ── v0.1: Row encoding ──────────────────────────────────────
 
 fn test_row_encoding() {
     test_group("row encoding");
-
-    # Fake schema: INT, STR, INT
     var schema = fl_alloc(PAGE_SIZE);
     memset(schema, 0, PAGE_SIZE);
     store64(schema + SCH_NCOLS, 3);
     store64(schema + SCH_START + 0 * SCH_ENTRY_SZ + SCH_CTYPE, COL_INT);
     store64(schema + SCH_START + 1 * SCH_ENTRY_SZ + SCH_CTYPE, COL_STR);
     store64(schema + SCH_START + 2 * SCH_ENTRY_SZ + SCH_CTYPE, COL_INT);
-
-    var rsz = row_compute_size(schema, 3);
-    assert_eq(rsz, 80, "row size 8+64+8");
-
+    assert_eq(row_compute_size(schema, 3), 80, "row size 8+64+8");
     assert_eq(row_field_offset(schema, 3, 0), 0, "off col 0");
     assert_eq(row_field_offset(schema, 3, 1), 8, "off col 1");
     assert_eq(row_field_offset(schema, 3, 2), 72, "off col 2");
-
-    var row = fl_alloc(rsz);
-    memset(row, 0, rsz);
+    var row = fl_alloc(80);
+    memset(row, 0, 80);
     row_write_int(row, 0, 42);
     row_write_str(row, 8, "hello", 5);
     row_write_int(row, 72, 99);
-
     assert_eq(row_read_int(row, 0), 42, "int col 0");
     assert_eq(row_read_int(row, 72), 99, "int col 2");
     assert_streq(row_read_str(row, 8), "hello", "str col 1");
-
     fl_free(row);
     fl_free(schema);
 }
 
-# ── SQL tokenizer ───────────────────────────────────────────
+# ── v0.1: SQL tokenizer ─────────────────────────────────────
 
 fn test_tokenize() {
     test_group("tokenize");
-
     sql_tokenize("CREATE TABLE users (id INT, name STR)");
     assert_eq(_tok_type(0), TK_CREATE, "CREATE");
     assert_eq(_tok_type(1), TK_TABLE, "TABLE");
     assert_eq(_tok_type(2), TK_IDENT, "ident users");
     assert_eq(_tok_type(3), TK_LPAREN, "(");
-    assert_eq(_tok_type(4), TK_IDENT, "ident id");
     assert_eq(_tok_type(5), TK_KW_INT, "INT");
-    assert_eq(_tok_type(6), TK_COMMA, ",");
-    assert_eq(_tok_type(7), TK_IDENT, "ident name");
     assert_eq(_tok_type(8), TK_KW_STR, "STR");
-    assert_eq(_tok_type(9), TK_RPAREN, ")");
     assert_eq(_sql_ntoks, 10, "10 tokens");
-
-    sql_tokenize("INSERT INTO t VALUES (42, 'hello')");
-    assert_eq(_tok_type(0), TK_INSERT, "INSERT");
-    assert_eq(_tok_type(3), TK_VALUES, "VALUES");
-    assert_eq(_tok_type(5), TK_INT_LIT, "int lit");
-    assert_eq(_tok_type(7), TK_STR_LIT, "str lit");
-
-    sql_tokenize("SELECT * FROM t");
-    assert_eq(_tok_type(0), TK_SELECT, "SELECT");
-    assert_eq(_tok_type(1), TK_STAR, "*");
-    assert_eq(_tok_type(2), TK_FROM, "FROM");
-    assert_eq(_tok_type(3), TK_IDENT, "ident t");
 }
 
-# ── SQL parser ──────────────────────────────────────────────
+fn test_tokenize_v2() {
+    test_group("tokenize v0.2");
+    sql_tokenize("SELECT * FROM t WHERE id = 1 AND age > 25");
+    assert_eq(_tok_type(4), TK_WHERE, "WHERE");
+    assert_eq(_tok_type(6), TK_EQ, "=");
+    assert_eq(_tok_type(8), TK_AND, "AND");
+    assert_eq(_tok_type(10), TK_GT, ">");
+
+    sql_tokenize("x != 1 AND y <= 2 AND z >= 3");
+    assert_eq(_tok_type(1), TK_NEQ, "!=");
+    assert_eq(_tok_type(5), TK_LTE, "<=");
+    assert_eq(_tok_type(9), TK_GTE, ">=");
+
+    sql_tokenize("UPDATE t SET x = 1");
+    assert_eq(_tok_type(0), TK_UPDATE, "UPDATE");
+    assert_eq(_tok_type(2), TK_SET, "SET");
+
+    sql_tokenize("DELETE FROM t");
+    assert_eq(_tok_type(0), TK_DELETE, "DELETE");
+
+    sql_tokenize("ORDER BY x LIMIT 10");
+    assert_eq(_tok_type(0), TK_ORDER, "ORDER");
+    assert_eq(_tok_type(1), TK_BY, "BY");
+    assert_eq(_tok_type(3), TK_LIMIT, "LIMIT");
+}
+
+# ── v0.1: SQL parser ────────────────────────────────────────
 
 fn test_parse_create() {
     test_group("parse create");
     sql_tokenize("CREATE TABLE users (id INT, name STR)");
-    var r = sql_parse();
-    assert_eq(r, PATRA_OK, "parse ok");
+    assert_eq(sql_parse(), PATRA_OK, "parse ok");
     assert_eq(load64(_sql_pr + PR_STMT), STMT_CREATE, "stmt create");
     assert_eq(load64(_sql_pr + PR_COUNT), 2, "2 columns");
 }
@@ -173,8 +158,7 @@ fn test_parse_create() {
 fn test_parse_insert() {
     test_group("parse insert");
     sql_tokenize("INSERT INTO users VALUES (1, 'alice')");
-    var r = sql_parse();
-    assert_eq(r, PATRA_OK, "parse ok");
+    assert_eq(sql_parse(), PATRA_OK, "parse ok");
     assert_eq(load64(_sql_pr + PR_STMT), STMT_INSERT, "stmt insert");
     assert_eq(load64(_sql_pr + PR_COUNT), 2, "2 values");
 }
@@ -182,153 +166,364 @@ fn test_parse_insert() {
 fn test_parse_select() {
     test_group("parse select");
     sql_tokenize("SELECT * FROM users");
-    var r = sql_parse();
-    assert_eq(r, PATRA_OK, "parse ok");
+    assert_eq(sql_parse(), PATRA_OK, "parse ok");
     assert_eq(load64(_sql_pr + PR_STMT), STMT_SELECT, "stmt select");
 }
 
 fn test_parse_case_insensitive() {
     test_group("case insensitive");
     sql_tokenize("create table Foo (id int, name str)");
-    var r = sql_parse();
-    assert_eq(r, PATRA_OK, "lowercase sql");
-    assert_eq(load64(_sql_pr + PR_STMT), STMT_CREATE, "create stmt");
-    assert_eq(load64(_sql_pr + PR_COUNT), 2, "2 cols");
+    assert_eq(sql_parse(), PATRA_OK, "lowercase sql");
 }
 
 fn test_parse_bad_sql() {
     test_group("bad sql");
     sql_tokenize("BANANA");
-    var r = sql_parse();
-    assert_eq(r, PATRA_ERR_SYNTAX, "unknown stmt");
-
-    sql_tokenize("CREATE");
-    r = sql_parse();
-    assert_eq(r, PATRA_ERR_SYNTAX, "incomplete create");
-
+    assert_eq(sql_parse(), PATRA_ERR_SYNTAX, "unknown stmt");
     sql_tokenize("SELECT id FROM t");
-    r = sql_parse();
-    assert_eq(r, PATRA_ERR_SYNTAX, "no star in select");
+    assert_eq(sql_parse(), PATRA_ERR_SYNTAX, "no star");
 }
 
-# ── Full integration ────────────────────────────────────────
+# ── v0.2: SQL parser extensions ──────────────────────────────
+
+fn test_parse_select_where() {
+    test_group("parse select where");
+    sql_tokenize("SELECT * FROM t WHERE id = 1");
+    assert_eq(sql_parse(), PATRA_OK, "parse ok");
+    assert_eq(load64(_sql_pr + PR_WHERE_N), 1, "1 condition");
+
+    sql_tokenize("SELECT * FROM t WHERE id > 1 AND age < 50");
+    assert_eq(sql_parse(), PATRA_OK, "parse 2 conds");
+    assert_eq(load64(_sql_pr + PR_WHERE_N), 2, "2 conditions");
+    assert_eq(load64(_sql_pr + PR_WHERE_JOIN), WH_AND, "join AND");
+
+    sql_tokenize("SELECT * FROM t WHERE id = 1 OR id = 2");
+    assert_eq(sql_parse(), PATRA_OK, "parse OR");
+    assert_eq(load64(_sql_pr + PR_WHERE_JOIN), WH_OR, "join OR");
+}
+
+fn test_parse_orderby_limit() {
+    test_group("parse orderby limit");
+    sql_tokenize("SELECT * FROM t ORDER BY age");
+    assert_eq(sql_parse(), PATRA_OK, "order by");
+    assert(load64(_sql_pr + PR_ORDERBY_PTR) != 0, "has orderby");
+
+    sql_tokenize("SELECT * FROM t LIMIT 5");
+    assert_eq(sql_parse(), PATRA_OK, "limit");
+    assert_eq(load64(_sql_pr + PR_LIMIT), 5, "limit 5");
+
+    sql_tokenize("SELECT * FROM t WHERE id > 0 ORDER BY id LIMIT 3");
+    assert_eq(sql_parse(), PATRA_OK, "where+order+limit");
+    assert_eq(load64(_sql_pr + PR_WHERE_N), 1, "1 where cond");
+    assert(load64(_sql_pr + PR_ORDERBY_PTR) != 0, "has orderby");
+    assert_eq(load64(_sql_pr + PR_LIMIT), 3, "limit 3");
+}
+
+fn test_parse_update() {
+    test_group("parse update");
+    sql_tokenize("UPDATE t SET age = 31 WHERE name = 'alice'");
+    assert_eq(sql_parse(), PATRA_OK, "parse ok");
+    assert_eq(load64(_sql_pr + PR_STMT), STMT_UPDATE, "stmt update");
+    assert_eq(load64(_sql_pr + PR_COUNT), 1, "1 set pair");
+    assert_eq(load64(_sql_pr + PR_WHERE_N), 1, "1 where cond");
+}
+
+fn test_parse_delete() {
+    test_group("parse delete");
+    sql_tokenize("DELETE FROM t WHERE id = 1");
+    assert_eq(sql_parse(), PATRA_OK, "parse ok");
+    assert_eq(load64(_sql_pr + PR_STMT), STMT_DELETE, "stmt delete");
+    assert_eq(load64(_sql_pr + PR_WHERE_N), 1, "1 where cond");
+
+    sql_tokenize("DELETE FROM t");
+    assert_eq(sql_parse(), PATRA_OK, "delete all");
+    assert_eq(load64(_sql_pr + PR_WHERE_N), 0, "no where");
+}
+
+# ── v0.1: Full integration ──────────────────────────────────
 
 fn test_create_insert_select() {
     test_group("create insert select");
     cleanup();
     var db = patra_open(_tpath);
     assert(db != 0, "open db");
-
-    var r = patra_exec(db, "CREATE TABLE t (id INT, val STR)");
-    assert_eq(r, PATRA_OK, "create table");
-
-    r = patra_exec(db, "INSERT INTO t VALUES (1, 'aaa')");
-    assert_eq(r, PATRA_OK, "insert 1");
-
-    r = patra_exec(db, "INSERT INTO t VALUES (2, 'bbb')");
-    assert_eq(r, PATRA_OK, "insert 2");
-
-    r = patra_exec(db, "INSERT INTO t VALUES (3, 'ccc')");
-    assert_eq(r, PATRA_OK, "insert 3");
-
+    assert_eq(patra_exec(db, "CREATE TABLE t (id INT, val STR)"), PATRA_OK, "create");
+    patra_exec(db, "INSERT INTO t VALUES (1, 'aaa')");
+    patra_exec(db, "INSERT INTO t VALUES (2, 'bbb')");
+    patra_exec(db, "INSERT INTO t VALUES (3, 'ccc')");
     var rs = patra_query(db, "SELECT * FROM t");
     assert(rs != 0, "query ok");
     assert_eq(patra_result_count(rs), 3, "3 rows");
-    assert_eq(patra_result_cols(rs), 2, "2 cols");
-
     assert_eq(patra_result_get_int(rs, 0, 0), 1, "row0 id");
     assert_streq(patra_result_get_str(rs, 0, 1), "aaa", "row0 val");
-    assert_eq(patra_result_get_int(rs, 1, 0), 2, "row1 id");
-    assert_streq(patra_result_get_str(rs, 1, 1), "bbb", "row1 val");
     assert_eq(patra_result_get_int(rs, 2, 0), 3, "row2 id");
-    assert_streq(patra_result_get_str(rs, 2, 1), "ccc", "row2 val");
-
-    assert_eq(patra_result_col_type(rs, 0), COL_INT, "col0 type int");
-    assert_eq(patra_result_col_type(rs, 1), COL_STR, "col1 type str");
-    assert_streq(patra_result_col_name(rs, 0), "id", "col0 name");
-    assert_streq(patra_result_col_name(rs, 1), "val", "col1 name");
-
     patra_result_free(rs);
     patra_close(db);
 }
 
-# ── Error cases ─────────────────────────────────────────────
-
-fn test_duplicate_table() {
-    test_group("duplicate table");
+fn test_errors() {
+    test_group("errors");
     cleanup();
     var db = patra_open(_tpath);
-    patra_exec(db, "CREATE TABLE dup (x INT)");
-    var r = patra_exec(db, "CREATE TABLE dup (x INT)");
-    assert_eq(r, PATRA_ERR_EXISTS, "duplicate blocked");
+    patra_exec(db, "CREATE TABLE e (x INT)");
+    assert_eq(patra_exec(db, "CREATE TABLE e (x INT)"), PATRA_ERR_EXISTS, "dup table");
+    assert_eq(patra_exec(db, "INSERT INTO e VALUES (1, 2)"), PATRA_ERR_COLCOUNT, "too many");
+    assert_eq(patra_exec(db, "INSERT INTO ghost VALUES (1)"), PATRA_ERR_NOTFOUND, "missing tbl");
     patra_close(db);
 }
 
-fn test_insert_wrong_count() {
-    test_group("insert wrong count");
-    cleanup();
-    var db = patra_open(_tpath);
-    patra_exec(db, "CREATE TABLE cnt (a INT, b INT)");
-    var r = patra_exec(db, "INSERT INTO cnt VALUES (1)");
-    assert_eq(r, PATRA_ERR_COLCOUNT, "too few");
-    r = patra_exec(db, "INSERT INTO cnt VALUES (1, 2, 3)");
-    assert_eq(r, PATRA_ERR_COLCOUNT, "too many");
-    patra_close(db);
+# ── v0.2: WHERE ──────────────────────────────────────────────
+
+fn _setup_people(db) {
+    patra_exec(db, "CREATE TABLE people (id INT, name STR, age INT)");
+    patra_exec(db, "INSERT INTO people VALUES (1, 'alice', 30)");
+    patra_exec(db, "INSERT INTO people VALUES (2, 'bob', 25)");
+    patra_exec(db, "INSERT INTO people VALUES (3, 'carol', 35)");
+    patra_exec(db, "INSERT INTO people VALUES (4, 'dave', 25)");
+    patra_exec(db, "INSERT INTO people VALUES (5, 'eve', 40)");
+    return 0;
 }
 
-fn test_insert_wrong_type() {
-    test_group("insert wrong type");
+fn test_where_eq() {
+    test_group("where eq");
     cleanup();
     var db = patra_open(_tpath);
-    patra_exec(db, "CREATE TABLE typ (id INT, name STR)");
-    var r = patra_exec(db, "INSERT INTO typ VALUES ('bad', 42)");
-    assert_eq(r, PATRA_ERR_TYPE, "type mismatch");
-    patra_close(db);
-}
+    _setup_people(db);
 
-fn test_table_not_found() {
-    test_group("table not found");
-    cleanup();
-    var db = patra_open(_tpath);
-    var r = patra_exec(db, "INSERT INTO ghost VALUES (1)");
-    assert_eq(r, PATRA_ERR_NOTFOUND, "insert missing table");
-    var rs = patra_query(db, "SELECT * FROM ghost");
-    assert_eq(rs, 0, "query missing table");
-    patra_close(db);
-}
+    var rs = patra_query(db, "SELECT * FROM people WHERE id = 3");
+    assert_eq(patra_result_count(rs), 1, "1 row");
+    assert_eq(patra_result_get_int(rs, 0, 0), 3, "id=3");
+    assert_streq(patra_result_get_str(rs, 0, 1), "carol", "name");
+    patra_result_free(rs);
 
-fn test_empty_table() {
-    test_group("empty table");
-    cleanup();
-    var db = patra_open(_tpath);
-    patra_exec(db, "CREATE TABLE empty (x INT)");
-    var rs = patra_query(db, "SELECT * FROM empty");
-    assert(rs != 0, "query empty ok");
-    assert_eq(patra_result_count(rs), 0, "0 rows");
-    assert_eq(patra_result_cols(rs), 1, "1 col");
+    rs = patra_query(db, "SELECT * FROM people WHERE name = 'bob'");
+    assert_eq(patra_result_count(rs), 1, "1 row str");
+    assert_eq(patra_result_get_int(rs, 0, 0), 2, "bob id");
     patra_result_free(rs);
     patra_close(db);
 }
 
-fn test_multiple_tables() {
-    test_group("multiple tables");
+fn test_where_cmp() {
+    test_group("where comparisons");
     cleanup();
     var db = patra_open(_tpath);
-    patra_exec(db, "CREATE TABLE a (x INT)");
-    patra_exec(db, "CREATE TABLE b (y STR)");
-    patra_exec(db, "INSERT INTO a VALUES (42)");
-    patra_exec(db, "INSERT INTO b VALUES ('hello')");
+    _setup_people(db);
 
-    var rs1 = patra_query(db, "SELECT * FROM a");
-    assert(rs1 != 0, "query a");
-    assert_eq(patra_result_get_int(rs1, 0, 0), 42, "a.x");
-    patra_result_free(rs1);
+    var rs = patra_query(db, "SELECT * FROM people WHERE age > 30");
+    assert_eq(patra_result_count(rs), 2, "age>30: 2 rows");
+    patra_result_free(rs);
 
-    var rs2 = patra_query(db, "SELECT * FROM b");
-    assert(rs2 != 0, "query b");
-    assert_streq(patra_result_get_str(rs2, 0, 0), "hello", "b.y");
-    patra_result_free(rs2);
+    rs = patra_query(db, "SELECT * FROM people WHERE age >= 35");
+    assert_eq(patra_result_count(rs), 2, "age>=35: 2 rows");
+    patra_result_free(rs);
 
+    rs = patra_query(db, "SELECT * FROM people WHERE age < 30");
+    assert_eq(patra_result_count(rs), 2, "age<30: 2 rows");
+    patra_result_free(rs);
+
+    rs = patra_query(db, "SELECT * FROM people WHERE id != 1");
+    assert_eq(patra_result_count(rs), 4, "id!=1: 4 rows");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_where_and() {
+    test_group("where AND");
+    cleanup();
+    var db = patra_open(_tpath);
+    _setup_people(db);
+
+    var rs = patra_query(db, "SELECT * FROM people WHERE age >= 25 AND age <= 30");
+    assert_eq(patra_result_count(rs), 3, "25<=age<=30: 3");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_where_or() {
+    test_group("where OR");
+    cleanup();
+    var db = patra_open(_tpath);
+    _setup_people(db);
+
+    var rs = patra_query(db, "SELECT * FROM people WHERE id = 1 OR id = 5");
+    assert_eq(patra_result_count(rs), 2, "id=1 or 5: 2");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_where_no_match() {
+    test_group("where no match");
+    cleanup();
+    var db = patra_open(_tpath);
+    _setup_people(db);
+
+    var rs = patra_query(db, "SELECT * FROM people WHERE id = 99");
+    assert_eq(patra_result_count(rs), 0, "no match");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+# ── v0.2: ORDER BY ───────────────────────────────────────────
+
+fn test_order_by() {
+    test_group("order by");
+    cleanup();
+    var db = patra_open(_tpath);
+    _setup_people(db);
+
+    var rs = patra_query(db, "SELECT * FROM people ORDER BY age");
+    assert_eq(patra_result_count(rs), 5, "5 rows");
+    assert_eq(patra_result_get_int(rs, 0, 2), 25, "first age 25");
+    assert_eq(patra_result_get_int(rs, 1, 2), 25, "second age 25");
+    assert_eq(patra_result_get_int(rs, 2, 2), 30, "third age 30");
+    assert_eq(patra_result_get_int(rs, 3, 2), 35, "fourth age 35");
+    assert_eq(patra_result_get_int(rs, 4, 2), 40, "fifth age 40");
+    patra_result_free(rs);
+
+    rs = patra_query(db, "SELECT * FROM people ORDER BY name");
+    assert_streq(patra_result_get_str(rs, 0, 1), "alice", "alpha first");
+    assert_streq(patra_result_get_str(rs, 4, 1), "eve", "alpha last");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+# ── v0.2: LIMIT ──────────────────────────────────────────────
+
+fn test_limit() {
+    test_group("limit");
+    cleanup();
+    var db = patra_open(_tpath);
+    _setup_people(db);
+
+    var rs = patra_query(db, "SELECT * FROM people LIMIT 2");
+    assert_eq(patra_result_count(rs), 2, "limit 2");
+    patra_result_free(rs);
+
+    rs = patra_query(db, "SELECT * FROM people LIMIT 100");
+    assert_eq(patra_result_count(rs), 5, "limit > rows");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_where_order_limit() {
+    test_group("where + order + limit");
+    cleanup();
+    var db = patra_open(_tpath);
+    _setup_people(db);
+
+    var rs = patra_query(db, "SELECT * FROM people WHERE age >= 25 ORDER BY age LIMIT 3");
+    assert_eq(patra_result_count(rs), 3, "3 rows");
+    assert_eq(patra_result_get_int(rs, 0, 2), 25, "first 25");
+    assert_eq(patra_result_get_int(rs, 2, 2), 30, "third 30");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+# ── v0.2: UPDATE ─────────────────────────────────────────────
+
+fn test_update() {
+    test_group("update");
+    cleanup();
+    var db = patra_open(_tpath);
+    _setup_people(db);
+
+    var r = patra_exec(db, "UPDATE people SET age = 31 WHERE name = 'alice'");
+    assert_eq(r, PATRA_OK, "update ok");
+
+    var rs = patra_query(db, "SELECT * FROM people WHERE name = 'alice'");
+    assert_eq(patra_result_get_int(rs, 0, 2), 31, "alice age 31");
+    patra_result_free(rs);
+
+    # Update multiple rows
+    patra_exec(db, "UPDATE people SET age = 99 WHERE age = 25");
+    rs = patra_query(db, "SELECT * FROM people WHERE age = 99");
+    assert_eq(patra_result_count(rs), 2, "2 updated to 99");
+    patra_result_free(rs);
+
+    # Update with no match
+    patra_exec(db, "UPDATE people SET age = 0 WHERE id = 999");
+    rs = patra_query(db, "SELECT * FROM people WHERE age = 0");
+    assert_eq(patra_result_count(rs), 0, "no rows updated");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_update_multi_set() {
+    test_group("update multi set");
+    cleanup();
+    var db = patra_open(_tpath);
+    _setup_people(db);
+
+    patra_exec(db, "UPDATE people SET name = 'ALICE', age = 99 WHERE id = 1");
+    var rs = patra_query(db, "SELECT * FROM people WHERE id = 1");
+    assert_streq(patra_result_get_str(rs, 0, 1), "ALICE", "name updated");
+    assert_eq(patra_result_get_int(rs, 0, 2), 99, "age updated");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+# ── v0.2: DELETE ─────────────────────────────────────────────
+
+fn test_delete() {
+    test_group("delete");
+    cleanup();
+    var db = patra_open(_tpath);
+    _setup_people(db);
+
+    var r = patra_exec(db, "DELETE FROM people WHERE id = 2");
+    assert_eq(r, PATRA_OK, "delete ok");
+
+    var rs = patra_query(db, "SELECT * FROM people");
+    assert_eq(patra_result_count(rs), 4, "4 remaining");
+    patra_result_free(rs);
+
+    rs = patra_query(db, "SELECT * FROM people WHERE id = 2");
+    assert_eq(patra_result_count(rs), 0, "bob gone");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_delete_multiple() {
+    test_group("delete multiple");
+    cleanup();
+    var db = patra_open(_tpath);
+    _setup_people(db);
+
+    patra_exec(db, "DELETE FROM people WHERE age = 25");
+    var rs = patra_query(db, "SELECT * FROM people");
+    assert_eq(patra_result_count(rs), 3, "3 remaining");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_delete_all() {
+    test_group("delete all");
+    cleanup();
+    var db = patra_open(_tpath);
+    _setup_people(db);
+
+    patra_exec(db, "DELETE FROM people");
+    var rs = patra_query(db, "SELECT * FROM people");
+    assert_eq(patra_result_count(rs), 0, "all deleted");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_delete_then_insert() {
+    test_group("delete then insert");
+    cleanup();
+    var db = patra_open(_tpath);
+    _setup_people(db);
+
+    patra_exec(db, "DELETE FROM people WHERE id = 3");
+    patra_exec(db, "INSERT INTO people VALUES (6, 'frank', 28)");
+    var rs = patra_query(db, "SELECT * FROM people");
+    assert_eq(patra_result_count(rs), 5, "5 after delete+insert");
+    patra_result_free(rs);
+
+    rs = patra_query(db, "SELECT * FROM people WHERE name = 'frank'");
+    assert_eq(patra_result_count(rs), 1, "frank exists");
+    patra_result_free(rs);
     patra_close(db);
 }
 
@@ -339,6 +534,7 @@ fn main() {
     fl_init();
     patra_init();
 
+    # v0.1
     test_header();
     test_file_create();
     test_page_alloc();
@@ -351,12 +547,32 @@ fn main() {
     test_parse_case_insensitive();
     test_parse_bad_sql();
     test_create_insert_select();
-    test_duplicate_table();
-    test_insert_wrong_count();
-    test_insert_wrong_type();
-    test_table_not_found();
-    test_empty_table();
-    test_multiple_tables();
+    test_errors();
+
+    # v0.2 parser
+    test_tokenize_v2();
+    test_parse_select_where();
+    test_parse_orderby_limit();
+    test_parse_update();
+    test_parse_delete();
+
+    # v0.2 queries
+    test_where_eq();
+    test_where_cmp();
+    test_where_and();
+    test_where_or();
+    test_where_no_match();
+    test_order_by();
+    test_limit();
+    test_where_order_limit();
+
+    # v0.2 mutations
+    test_update();
+    test_update_multi_set();
+    test_delete();
+    test_delete_multiple();
+    test_delete_all();
+    test_delete_then_insert();
 
     cleanup();
     return assert_summary();

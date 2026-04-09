@@ -1,6 +1,103 @@
-# where.cyr — WHERE clause evaluation (v0.2)
-# Stub: all rows match until WHERE is implemented.
+# where.cyr — WHERE clause evaluation
 
-fn where_eval(row, schema, ncols, expr) {
-    return 1;
+# Resolve column name to index in schema. Returns -1 if not found.
+fn _wh_resolve_col(schema, ncols, name, nlen) {
+    for (var i = 0; i < ncols; i = i + 1) {
+        var cname = schema + SCH_START + i * SCH_ENTRY_SZ + SCH_CNAME;
+        if (strlen(cname) == nlen) {
+            if (memeq(cname, name, nlen)) { return i; }
+        }
+    }
+    return 0 - 1;
+}
+
+# Compare two integers with given operator
+fn _cmp_int(a, b, op) {
+    if (op == CMP_EQ)  { if (a == b) { return 1; } return 0; }
+    if (op == CMP_NEQ) { if (a != b) { return 1; } return 0; }
+    if (op == CMP_LT)  { if (a < b)  { return 1; } return 0; }
+    if (op == CMP_GT)  { if (a > b)  { return 1; } return 0; }
+    if (op == CMP_LTE) { if (a <= b) { return 1; } return 0; }
+    if (op == CMP_GTE) { if (a >= b) { return 1; } return 0; }
+    return 0;
+}
+
+# Compare null-terminated string against ptr+len for equality
+fn _streq_pl(ns, ptr, len) {
+    if (strlen(ns) != len) { return 0; }
+    return memeq(ns, ptr, len);
+}
+
+# Lexicographic compare: null-terminated vs ptr+len. Returns <0, 0, >0.
+fn _strcmp_pl(ns, ptr, len) {
+    var slen = strlen(ns);
+    var min = slen;
+    if (len < min) { min = len; }
+    for (var i = 0; i < min; i = i + 1) {
+        var a = load8(ns + i);
+        var b = load8(ptr + i);
+        if (a != b) { return a - b; }
+    }
+    return slen - len;
+}
+
+# Compare string column value against WHERE condition value
+fn _cmp_str(row_str, cmp_ptr, cmp_len, op) {
+    if (op == CMP_EQ)  { return _streq_pl(row_str, cmp_ptr, cmp_len); }
+    if (op == CMP_NEQ) { if (_streq_pl(row_str, cmp_ptr, cmp_len)) { return 0; } return 1; }
+    var c = _strcmp_pl(row_str, cmp_ptr, cmp_len);
+    if (op == CMP_LT)  { if (c < 0)  { return 1; } return 0; }
+    if (op == CMP_GT)  { if (c > 0)  { return 1; } return 0; }
+    if (op == CMP_LTE) { if (c <= 0) { return 1; } return 0; }
+    if (op == CMP_GTE) { if (c >= 0) { return 1; } return 0; }
+    return 0;
+}
+
+# Evaluate WHERE conditions against a single row.
+# Returns 1 if row matches, 0 if not.
+# pr = parse result buffer (_sql_pr).
+fn where_eval(row, schema, ncols, pr) {
+    var wcount = load64(pr + PR_WHERE_N);
+    if (wcount == 0) { return 1; }
+
+    var join = load64(pr + PR_WHERE_JOIN);
+    # AND: start true, any false → false
+    # OR:  start false, any true → true
+    var result = 0;
+    if (join == WH_AND) { result = 1; }
+
+    for (var i = 0; i < wcount; i = i + 1) {
+        var cond = pr + PR_WHERE + i * WH_ENTRY_SZ;
+        var col_idx = _wh_resolve_col(schema, ncols,
+            load64(cond + WH_COL_PTR), load64(cond + WH_COL_LEN));
+        if (col_idx < 0) {
+            if (join == WH_AND) { result = 0; }
+            continue;
+        }
+
+        var col_type = load64(schema + SCH_START + col_idx * SCH_ENTRY_SZ + SCH_CTYPE);
+        var val_type = load64(cond + WH_VAL_TYPE);
+        var off = row_field_offset(schema, ncols, col_idx);
+        var cmp = load64(cond + WH_CMP_OP);
+        var hit = 0;
+
+        if (col_type == COL_INT) {
+            if (val_type == COL_INT) {
+                hit = _cmp_int(row_read_int(row, off), load64(cond + WH_INT_VAL), cmp);
+            }
+        } else {
+            if (val_type == COL_STR) {
+                hit = _cmp_str(row_read_str(row, off),
+                    load64(cond + WH_STR_PTR), load64(cond + WH_STR_LEN), cmp);
+            }
+        }
+
+        if (join == WH_AND) {
+            if (hit == 0) { result = 0; }
+        } else {
+            if (hit != 0) { result = 1; }
+        }
+    }
+
+    return result;
 }
