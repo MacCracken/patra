@@ -240,9 +240,13 @@ fn _exec_update(db) {
     var rsz = row_compute_size(schema, ncols);
 
     var r = tbl_update(fd, hdr, idx, rsz, schema, ncols, _sql_pr);
-    fl_free(schema);
 
-    if (r == PATRA_OK) { patra_hdr_write(fd, hdr); }
+    # Write schema page if index root may have changed
+    if (r == PATRA_OK) {
+        page_write(fd, spg, schema);
+        patra_hdr_write(fd, hdr);
+    }
+    fl_free(schema);
     patra_unlock(fd);
     return r;
 }
@@ -319,37 +323,46 @@ fn _rs_field_off(rs, col) {
     return off;
 }
 
-fn _sort_result(rs, col_idx, col_type, desc) {
+# Compare two rows on multiple ORDER BY columns. Returns >0 if a should come after b.
+fn _cmp_rows(rs, ra, rb, ob_idxs, ob_types, ob_dirs, obn) {
+    for (var k = 0; k < obn; k = k + 1) {
+        var ci = load64(ob_idxs + k * 8);
+        var ct = load64(ob_types + k * 8);
+        var dr = load64(ob_dirs + k * 8);
+        var off = _rs_field_off(rs, ci);
+        var c = 0;
+        if (ct == COL_INT) {
+            var a = load64(ra + off);
+            var b = load64(rb + off);
+            if (a > b) { c = 1; }
+            elif (a < b) { c = 0 - 1; }
+        } else {
+            c = _strcmp_nn(ra + off, rb + off);
+        }
+        if (dr != 0) { c = 0 - c; }
+        if (c != 0) { return c; }
+    }
+    return 0;
+}
+
+fn _sort_result_multi(rs, ob_idxs, ob_types, ob_dirs, obn) {
     var data = load64(rs + RS_DATA);
     var rsz = load64(rs + RS_ROWSZ);
     var nrows = load64(rs + RS_NROWS);
     if (nrows <= 1) { return 0; }
 
-    var off = _rs_field_off(rs, col_idx);
     var tmp = fl_alloc(rsz);
-
     for (var i = 1; i < nrows; i = i + 1) {
         memcpy(tmp, data + i * rsz, rsz);
         var j = i - 1;
         while (j >= 0) {
-            var should_shift = 0;
-            if (col_type == COL_INT) {
-                var a = load64(data + j * rsz + off);
-                var b = load64(tmp + off);
-                if (desc == 0) { if (a > b) { should_shift = 1; } }
-                else { if (a < b) { should_shift = 1; } }
-            } else {
-                var cmp = _strcmp_nn(data + j * rsz + off, tmp + off);
-                if (desc == 0) { if (cmp > 0) { should_shift = 1; } }
-                else { if (cmp < 0) { should_shift = 1; } }
-            }
-            if (should_shift == 0) { break; }
+            var c = _cmp_rows(rs, data + j * rsz, tmp, ob_idxs, ob_types, ob_dirs, obn);
+            if (c <= 0) { break; }
             memcpy(data + (j + 1) * rsz, data + j * rsz, rsz);
             j = j - 1;
         }
         memcpy(data + (j + 1) * rsz, tmp, rsz);
     }
-
     fl_free(tmp);
     return 0;
 }
@@ -485,26 +498,37 @@ fn patra_query(db, sql) {
     fl_free(schema);
     patra_unlock(fd);
 
-    # ORDER BY
-    var ob_ptr = load64(_sql_pr + PR_ORDERBY_PTR);
-    if (ob_ptr != 0) {
-        var ob_len = load64(_sql_pr + PR_ORDERBY_LEN);
-        # Need schema again for column resolution — read from result types
-        var ob_idx = 0 - 1;
+    # ORDER BY (multi-column)
+    var obn = load64(_sql_pr + PR_ORDERBY_N);
+    if (obn > 0) {
+        var ob_idxs = fl_alloc(obn * 8);
+        var ob_types = fl_alloc(obn * 8);
+        var ob_dirs = fl_alloc(obn * 8);
         var np = load64(rs + RS_NAMES);
-        for (var c = 0; c < ncols; c = c + 1) {
-            var cn = np + c * SCH_CNAME_MAX;
-            if (strlen(cn) == ob_len) {
-                if (memeq(cn, ob_ptr, ob_len)) {
-                    ob_idx = c;
+        var ob_valid = 1;
+        for (var oi = 0; oi < obn; oi = oi + 1) {
+            var ob = _sql_pr + PR_ORDERBY_COLS + oi * OB_SZ;
+            var ob_p = load64(ob + OB_PTR);
+            var ob_l = load64(ob + OB_LEN);
+            var ob_d = load64(ob + OB_DIR);
+            var ci = 0 - 1;
+            for (var c = 0; c < ncols; c = c + 1) {
+                var cn = np + c * SCH_CNAME_MAX;
+                if (strlen(cn) == ob_l) {
+                    if (memeq(cn, ob_p, ob_l)) { ci = c; }
                 }
             }
+            if (ci < 0) { ob_valid = 0; }
+            store64(ob_idxs + oi * 8, ci);
+            store64(ob_types + oi * 8, load64(types_ptr + ci * 8));
+            store64(ob_dirs + oi * 8, ob_d);
         }
-        if (ob_idx >= 0) {
-            var ob_type = load64(types_ptr + ob_idx * 8);
-            var ob_dir = load64(_sql_pr + PR_ORDERBY_DIR);
-            _sort_result(rs, ob_idx, ob_type, ob_dir);
+        if (ob_valid != 0) {
+            _sort_result_multi(rs, ob_idxs, ob_types, ob_dirs, obn);
         }
+        fl_free(ob_idxs);
+        fl_free(ob_types);
+        fl_free(ob_dirs);
     }
 
     # LIMIT

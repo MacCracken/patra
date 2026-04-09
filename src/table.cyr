@@ -180,6 +180,27 @@ fn tbl_update(fd, hdr, idx, row_sz, schema, ncols, pr) {
     var buf = fl_alloc(PAGE_SIZE);
     var nsets = load64(pr + PR_COUNT);
 
+    # Check if indexed column is being updated
+    var uic = load64(schema + SCH_IDX_COL);
+    var uir = load64(schema + SCH_IDX_ROOT);
+    var uioff = 0;
+    var ui_updating = 0;
+    if (uic >= 0) {
+        if (uic < ncols) {
+            uioff = row_field_offset(schema, ncols, uic);
+            var icn = schema + SCH_START + uic * SCH_ENTRY_SZ + SCH_CNAME;
+            var icnl = strlen(icn);
+            for (var s = 0; s < nsets; s = s + 1) {
+                var set = pr + PR_ITEMS + s * SET_SZ;
+                if (load64(set + SET_CLEN) == icnl) {
+                    if (memeq(load64(set + SET_CPTR), icn, icnl)) {
+                        ui_updating = 1;
+                    }
+                }
+            }
+        } else { uic = 0 - 1; }
+    }
+
     while (cur != 0) {
         page_read(fd, cur, buf);
         var nrows = load64(buf + DP_NROWS);
@@ -188,6 +209,13 @@ fn tbl_update(fd, hdr, idx, row_sz, schema, ncols, pr) {
         for (var i = 0; i < nrows; i = i + 1) {
             var rptr = buf + DP_DATA + i * row_sz;
             if (where_eval(rptr, schema, ncols, pr)) {
+                # Remove old index entry if indexed col is being updated
+                if (ui_updating != 0) {
+                    if (uir != 0) {
+                        var old_key = row_read_int(rptr, uioff);
+                        btree_remove_ref(fd, uir, old_key, _bt_mkref(cur, i));
+                    }
+                }
                 for (var s = 0; s < nsets; s = s + 1) {
                     var set = pr + PR_ITEMS + s * SET_SZ;
                     var cidx = _wh_resolve_col(schema, ncols,
@@ -201,6 +229,14 @@ fn tbl_update(fd, hdr, idx, row_sz, schema, ncols, pr) {
                         row_write_int(rptr, coff, load64(set + SET_IVAL));
                     } else {
                         row_write_str(rptr, coff, load64(set + SET_SPTR), load64(set + SET_SLEN));
+                    }
+                }
+                # Insert new index entry if indexed col was updated
+                if (ui_updating != 0) {
+                    if (uir != 0) {
+                        var new_key = row_read_int(rptr, uioff);
+                        uir = btree_insert(fd, hdr, uir, new_key, _bt_mkref(cur, i));
+                        store64(schema + SCH_IDX_ROOT, uir);
                     }
                 }
                 modified = 1;

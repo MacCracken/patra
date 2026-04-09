@@ -63,16 +63,19 @@ enum PROff {
     PR_COUNT = 24;
     PR_WHERE_N = 32;
     PR_WHERE_JOIN = 40;
-    PR_ORDERBY_PTR = 48;
-    PR_ORDERBY_LEN = 56;
-    PR_LIMIT = 64;
-    PR_ITEMS = 72;
-    PR_ORDERBY_DIR = 1016;
+    PR_ORDERBY_N = 48;
+    PR_LIMIT = 56;
+    PR_ITEMS = 64;
+    PR_ORDERBY_COLS = 800;
     PR_WHERE = 1024;
 }
 
 # CREATE column item: 24 bytes
 enum CROff { CR_NPTR = 0; CR_NLEN = 8; CR_TYPE = 16; CR_SZ = 24; }
+
+# ORDER BY column: 24 bytes (ptr, len, dir)
+enum ObOff { OB_PTR = 0; OB_LEN = 8; OB_DIR = 16; OB_SZ = 24; }
+enum ObLim { OB_MAX = 8; }
 
 # INSERT value item: 32 bytes
 enum IROff { IR_TYPE = 0; IR_IVAL = 8; IR_SPTR = 16; IR_SLEN = 24; IR_SZ = 32; }
@@ -516,22 +519,31 @@ fn _parse_select() {
     pos = _parse_where(pos);
     if (pos < 0) { return PATRA_ERR_SYNTAX; }
 
-    # Optional ORDER BY
+    # Optional ORDER BY col [ASC|DESC] [, col [ASC|DESC] ...]
     if (_tok_type(pos) == TK_ORDER) {
         pos = pos + 1;
         if (_tok_type(pos) != TK_BY) { return PATRA_ERR_SYNTAX; }
         pos = pos + 1;
-        if (_tok_type(pos) != TK_IDENT) { return PATRA_ERR_SYNTAX; }
-        store64(_sql_pr + PR_ORDERBY_PTR, _tok_ptr(pos));
-        store64(_sql_pr + PR_ORDERBY_LEN, _tok_len(pos));
-        pos = pos + 1;
-        # Optional ASC/DESC
-        if (_tok_type(pos) == TK_DESC) {
-            store64(_sql_pr + PR_ORDERBY_DIR, 1);
+        var obn = 0;
+        var ob_done = 0;
+        while (ob_done == 0) {
+            if (_tok_type(pos) != TK_IDENT) { return PATRA_ERR_SYNTAX; }
+            if (obn >= OB_MAX) { return PATRA_ERR_SYNTAX; }
+            var ob = _sql_pr + PR_ORDERBY_COLS + obn * OB_SZ;
+            store64(ob + OB_PTR, _tok_ptr(pos));
+            store64(ob + OB_LEN, _tok_len(pos));
             pos = pos + 1;
-        } elif (_tok_type(pos) == TK_ASC) {
-            pos = pos + 1;
+            if (_tok_type(pos) == TK_DESC) {
+                store64(ob + OB_DIR, 1);
+                pos = pos + 1;
+            } elif (_tok_type(pos) == TK_ASC) {
+                pos = pos + 1;
+            }
+            obn = obn + 1;
+            if (_tok_type(pos) == TK_COMMA) { pos = pos + 1; }
+            else { ob_done = 1; }
         }
+        store64(_sql_pr + PR_ORDERBY_N, obn);
     }
 
     # Optional LIMIT

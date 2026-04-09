@@ -206,7 +206,7 @@ fn test_parse_orderby_limit() {
     test_group("parse orderby limit");
     sql_tokenize("SELECT * FROM t ORDER BY age");
     assert_eq(sql_parse(), PATRA_OK, "order by");
-    assert(load64(_sql_pr + PR_ORDERBY_PTR) != 0, "has orderby");
+    assert_eq(load64(_sql_pr + PR_ORDERBY_N), 1, "has orderby");
 
     sql_tokenize("SELECT * FROM t LIMIT 5");
     assert_eq(sql_parse(), PATRA_OK, "limit");
@@ -215,7 +215,7 @@ fn test_parse_orderby_limit() {
     sql_tokenize("SELECT * FROM t WHERE id > 0 ORDER BY id LIMIT 3");
     assert_eq(sql_parse(), PATRA_OK, "where+order+limit");
     assert_eq(load64(_sql_pr + PR_WHERE_N), 1, "1 where cond");
-    assert(load64(_sql_pr + PR_ORDERBY_PTR) != 0, "has orderby");
+    assert_eq(load64(_sql_pr + PR_ORDERBY_N), 1, "has orderby");
     assert_eq(load64(_sql_pr + PR_LIMIT), 3, "limit 3");
 }
 
@@ -1030,6 +1030,32 @@ fn test_multi_table_isolation() {
 
 # ── Coverage: SQL edge cases ─────────────────────────────────
 
+fn test_order_by_multi() {
+    test_group("order by multi");
+    cleanup();
+    var db = patra_open(_tpath);
+    _setup_people(db);
+
+    # ORDER BY age ASC, name ASC — age 25 has bob and dave
+    var rs = patra_query(db, "SELECT * FROM people ORDER BY age, name");
+    assert_eq(patra_result_get_int(rs, 0, 2), 25, "first age 25");
+    assert_streq(patra_result_get_str(rs, 0, 1), "bob", "bob before dave");
+    assert_streq(patra_result_get_str(rs, 1, 1), "dave", "dave second");
+    assert_eq(patra_result_get_int(rs, 4, 2), 40, "last age 40");
+    patra_result_free(rs);
+
+    # ORDER BY age DESC, name ASC
+    rs = patra_query(db, "SELECT * FROM people ORDER BY age DESC, name");
+    assert_eq(patra_result_get_int(rs, 0, 2), 40, "desc first 40");
+    assert_streq(patra_result_get_str(rs, 0, 1), "eve", "eve");
+    # age 25 group at end, sorted by name ASC
+    assert_streq(patra_result_get_str(rs, 3, 1), "bob", "age25 bob");
+    assert_streq(patra_result_get_str(rs, 4, 1), "dave", "age25 dave");
+    patra_result_free(rs);
+
+    patra_close(db);
+}
+
 fn test_order_by_desc() {
     test_group("order by desc");
     cleanup();
@@ -1181,6 +1207,7 @@ fn main() {
     test_string_edges();
     test_neq_and_str_cmp();
     test_multi_table_isolation();
+    test_order_by_multi();
     test_order_by_desc();
     test_sql_semicolons();
     test_jsonl_special_chars();

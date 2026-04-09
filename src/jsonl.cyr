@@ -23,6 +23,7 @@ fn jsonl_append(fd, data, len) {
     var w = syscall(SYS_WRITE, fd, data, len);
     if (w < 0) { patra_unlock(fd); return PATRA_ERR_IO; }
     syscall(SYS_WRITE, fd, "\n", 1);
+    syscall(SYS_FDATASYNC, fd);
     patra_unlock(fd);
     return PATRA_OK;
 }

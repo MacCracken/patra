@@ -66,8 +66,9 @@ enum DPOff {
 # Free page layout
 enum FPOff { FP_TYPE = 0; FP_NEXT = 8; }
 
-# flock syscall
+# flock + fsync syscalls
 enum Flock { LOCK_SH = 1; LOCK_EX = 2; LOCK_UN = 8; SYS_FLOCK = 73; }
+enum Sync { SYS_FDATASYNC = 75; }
 
 # ── Low-level operations ────────────────────────────────────
 
@@ -101,6 +102,7 @@ fn patra_hdr_read(fd, buf) {
 fn patra_hdr_write(fd, buf) {
     if (_pt_seek(fd, 0) < 0) { return PATRA_ERR_IO; }
     if (syscall(SYS_WRITE, fd, buf, PAGE_SIZE) != PAGE_SIZE) { return PATRA_ERR_IO; }
+    syscall(SYS_FDATASYNC, fd);
     return PATRA_OK;
 }
 

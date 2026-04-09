@@ -5,6 +5,20 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-04-09
+
+### Added
+
+- Multi-column ORDER BY: `ORDER BY age DESC, name ASC`
+- ASC/DESC per column in ORDER BY
+- B-tree index maintenance on UPDATE (remove old ref, insert new ref when indexed column changes)
+- fdatasync after header writes and JSONL appends (durability guarantee)
+
+### Testing
+
+- 212 unit tests across 54 test groups
+- Multi-column sort tests with mixed ASC/DESC
+
 ## [0.8.0] - 2026-04-09
 
 ### Added
