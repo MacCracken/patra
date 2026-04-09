@@ -527,6 +527,120 @@ fn test_delete_then_insert() {
     patra_close(db);
 }
 
+# ── v0.4: JSONL ──────────────────────────────────────────────
+
+var _jpath = "/tmp/patra_test.jsonl";
+fn jcleanup() { syscall(SYS_UNLINK, _jpath); return 0; }
+
+fn test_json_build() {
+    test_group("json build");
+    var buf = fl_alloc(256);
+    var keys = fl_alloc(24);
+    var vals = fl_alloc(24);
+    var types = fl_alloc(24);
+
+    store64(keys, "id");
+    store64(keys + 8, "name");
+    store64(keys + 16, "age");
+    store64(vals, 42);
+    store64(vals + 8, "alice");
+    store64(vals + 16, 30);
+    store64(types, COL_INT);
+    store64(types + 8, COL_STR);
+    store64(types + 16, COL_INT);
+
+    var len = json_build(buf, 256, keys, vals, types, 3);
+    assert(len > 0, "len > 0");
+    assert_streq(buf, "{\"id\": 42, \"name\": \"alice\", \"age\": 30}", "json fmt");
+
+    fl_free(keys);
+    fl_free(vals);
+    fl_free(types);
+    fl_free(buf);
+}
+
+fn test_json_escape() {
+    test_group("json escape");
+    var dst = fl_alloc(64);
+    var n = _json_escape(dst, "a\"b\\c", 5);
+    store8(dst + n, 0);
+    assert_eq(n, 7, "escape len");
+    assert_streq(dst, "a\\\"b\\\\c", "escaped");
+
+    n = _json_escape(dst, "line\n", 5);
+    store8(dst + n, 0);
+    assert_streq(dst, "line\\n", "newline esc");
+    fl_free(dst);
+}
+
+fn test_jsonl_append_read() {
+    test_group("jsonl append read");
+    jcleanup();
+    var fd = jsonl_open(_jpath);
+    assert(fd >= 0, "open");
+
+    jsonl_append(fd, "{\"x\": 1}", 8);
+    jsonl_append(fd, "{\"x\": 2}", 8);
+    jsonl_append(fd, "{\"x\": 3}", 8);
+
+    assert_eq(jsonl_count(fd), 3, "count 3");
+
+    var lr = jsonl_read(fd);
+    assert_eq(jsonl_lines_count(lr), 3, "read 3 lines");
+    assert_eq(jsonl_lines_len(lr, 0), 8, "line0 len");
+
+    # Verify first line content
+    var p = jsonl_lines_get(lr, 0);
+    assert(memeq(p, "{\"x\": 1}", 8), "line0 content");
+
+    jsonl_lines_free(lr);
+    jsonl_close(fd);
+    jcleanup();
+}
+
+fn test_jsonl_append_obj() {
+    test_group("jsonl append obj");
+    jcleanup();
+    var fd = jsonl_open(_jpath);
+
+    var keys = fl_alloc(16);
+    var vals = fl_alloc(16);
+    var types = fl_alloc(16);
+    store64(keys, "action");
+    store64(keys + 8, "count");
+    store64(vals, "login");
+    store64(vals + 8, 5);
+    store64(types, COL_STR);
+    store64(types + 8, COL_INT);
+
+    jsonl_append_obj(fd, keys, vals, types, 2);
+    jsonl_append_obj(fd, keys, vals, types, 2);
+
+    assert_eq(jsonl_count(fd), 2, "2 objects");
+
+    var lr = jsonl_read(fd);
+    assert_eq(jsonl_lines_count(lr), 2, "read 2");
+    jsonl_lines_free(lr);
+
+    fl_free(keys);
+    fl_free(vals);
+    fl_free(types);
+    jsonl_close(fd);
+    jcleanup();
+}
+
+fn test_jsonl_empty() {
+    test_group("jsonl empty");
+    jcleanup();
+    var fd = jsonl_open(_jpath);
+    assert_eq(jsonl_count(fd), 0, "empty count");
+    var lr = jsonl_read(fd);
+    assert_eq(jsonl_lines_count(lr), 0, "empty read");
+    jsonl_lines_free(lr);
+    jsonl_close(fd);
+    jcleanup();
+}
+
 # ── v0.3: B-tree ─────────────────────────────────────────────
 
 fn test_btree_basic() {
@@ -747,6 +861,13 @@ fn main() {
     test_delete_multiple();
     test_delete_all();
     test_delete_then_insert();
+
+    # v0.4 JSONL
+    test_json_build();
+    test_json_escape();
+    test_jsonl_append_read();
+    test_jsonl_append_obj();
+    test_jsonl_empty();
 
     # v0.3 B-tree
     test_btree_basic();

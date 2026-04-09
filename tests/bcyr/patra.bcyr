@@ -180,6 +180,34 @@ fn main() {
     vec_push(benches, b13);
     _bcleanup();
 
+    # --- JSONL append ---
+
+    var _jbpath = "/tmp/patra_bench.jsonl";
+    syscall(SYS_UNLINK, _jbpath);
+    var b14 = bench_new("jsonl_append_1k");
+    var jfd = jsonl_open(_jbpath);
+    bench_batch_start(b14);
+    for (var ji = 0; ji < 1000; ji = ji + 1) {
+        jsonl_append(jfd, "{\"i\": 1}", 8);
+    }
+    bench_batch_stop(b14, 1000);
+    vec_push(benches, b14);
+
+    # --- JSONL read 1K ---
+
+    var b15 = bench_new("jsonl_read_1k");
+    ri = 0;
+    while (ri < 100) {
+        bench_batch_start(b15);
+        var lr = jsonl_read(jfd);
+        bench_batch_stop(b15, 1);
+        jsonl_lines_free(lr);
+        ri = ri + 1;
+    }
+    vec_push(benches, b15);
+    jsonl_close(jfd);
+    syscall(SYS_UNLINK, _jbpath);
+
     bench_report_all(benches);
     return 0;
 }

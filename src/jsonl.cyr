@@ -1,4 +1,210 @@
-# jsonl.cyr — JSON Lines append-only mode (v0.4)
-# Stub: JSONL mode for libro compatibility comes in v0.4.
+# jsonl.cyr — JSON Lines append-only mode (libro compatibility)
+#
+# JSONL files: one JSON object per line, newline-delimited.
+# flock for concurrent access, O_APPEND for atomic appends.
 
-fn jsonl_stub() { return 0; }
+# ── Open / Close ────────────────────────────────────────────
+
+# O_RDWR | O_CREAT | O_APPEND = 2 + 64 + 1024 = 1090
+fn jsonl_open(path) {
+    return syscall(SYS_OPEN, path, 1090, 420);
+}
+
+fn jsonl_close(fd) {
+    syscall(SYS_CLOSE, fd);
+    return 0;
+}
+
+# ── Append ──────────────────────────────────────────────────
+
+# Append raw data + newline with exclusive lock
+fn jsonl_append(fd, data, len) {
+    patra_lock_ex(fd);
+    syscall(SYS_WRITE, fd, data, len);
+    syscall(SYS_WRITE, fd, "\n", 1);
+    patra_unlock(fd);
+    return 0;
+}
+
+# ── JSON string escaping ───────────────────────────────────
+
+fn _json_escape(dst, src, slen) {
+    var w = 0;
+    for (var i = 0; i < slen; i = i + 1) {
+        var c = load8(src + i);
+        if (c == 34) {
+            store8(dst + w, 92); store8(dst + w + 1, 34); w = w + 2;
+        } elif (c == 92) {
+            store8(dst + w, 92); store8(dst + w + 1, 92); w = w + 2;
+        } elif (c == 10) {
+            store8(dst + w, 92); store8(dst + w + 1, 110); w = w + 2;
+        } elif (c == 9) {
+            store8(dst + w, 92); store8(dst + w + 1, 116); w = w + 2;
+        } elif (c == 13) {
+            store8(dst + w, 92); store8(dst + w + 1, 114); w = w + 2;
+        } else {
+            store8(dst + w, c); w = w + 1;
+        }
+    }
+    return w;
+}
+
+# ── JSON object builder ────────────────────────────────────
+
+# Build JSON: {"key1": val1, "key2": "str_val", ...}
+# keys: array of n pointers to null-terminated strings
+# vals: array of n i64 (int values) or pointers (string values)
+# types: array of n COL_INT/COL_STR
+# Returns length written (null-terminated).
+fn json_build(buf, max, keys, vals, types, n) {
+    var pos = 0;
+    store8(buf + pos, 123); pos = pos + 1;
+
+    for (var i = 0; i < n; i = i + 1) {
+        if (i > 0) {
+            store8(buf + pos, 44); pos = pos + 1;
+            store8(buf + pos, 32); pos = pos + 1;
+        }
+        # Key
+        store8(buf + pos, 34); pos = pos + 1;
+        var kp = load64(keys + i * 8);
+        var kl = strlen(kp);
+        memcpy(buf + pos, kp, kl); pos = pos + kl;
+        store8(buf + pos, 34); pos = pos + 1;
+        store8(buf + pos, 58); pos = pos + 1;
+        store8(buf + pos, 32); pos = pos + 1;
+
+        # Value
+        var vt = load64(types + i * 8);
+        if (vt == COL_INT) {
+            pos = pos + fmt_int_buf(load64(vals + i * 8), buf + pos);
+        } else {
+            store8(buf + pos, 34); pos = pos + 1;
+            var sp = load64(vals + i * 8);
+            var sl = strlen(sp);
+            pos = pos + _json_escape(buf + pos, sp, sl);
+            store8(buf + pos, 34); pos = pos + 1;
+        }
+    }
+
+    store8(buf + pos, 125); pos = pos + 1;
+    store8(buf + pos, 0);
+    return pos;
+}
+
+# Append a JSON object built from key-value pairs
+fn jsonl_append_obj(fd, keys, vals, types, n) {
+    var buf = fl_alloc(4096);
+    var len = json_build(buf, 4096, keys, vals, types, n);
+    jsonl_append(fd, buf, len);
+    fl_free(buf);
+    return 0;
+}
+
+# ── Read ────────────────────────────────────────────────────
+
+# Read result layout: { count(8), data_ptr(8), lines_ptr(8) }
+# lines: array of (ptr, len) pairs — 16 bytes each
+enum JlrOff { JLR_COUNT = 0; JLR_DATA = 8; JLR_LINES = 16; JLR_SZ = 24; }
+
+fn jsonl_read(fd) {
+    patra_lock_sh(fd);
+    var size = syscall(SYS_LSEEK, fd, 0, 2);
+    syscall(SYS_LSEEK, fd, 0, 0);
+
+    if (size <= 0) {
+        patra_unlock(fd);
+        var lr = fl_alloc(JLR_SZ);
+        memset(lr, 0, JLR_SZ);
+        return lr;
+    }
+
+    var data = fl_alloc(size + 1);
+    var rd = 0;
+    var eof = 0;
+    while (eof == 0) {
+        if (rd >= size) { eof = 1; continue; }
+        var n = syscall(SYS_READ, fd, data + rd, size - rd);
+        if (n <= 0) { eof = 1; continue; }
+        rd = rd + n;
+    }
+    store8(data + size, 0);
+    patra_unlock(fd);
+
+    # Count newlines
+    var nlc = 0;
+    for (var i = 0; i < size; i = i + 1) {
+        if (load8(data + i) == 10) { nlc = nlc + 1; }
+    }
+    # Handle last line without trailing newline
+    if (size > 0) {
+        if (load8(data + size - 1) != 10) { nlc = nlc + 1; }
+    }
+
+    var lines = fl_alloc(nlc * 16 + 16);
+    var li = 0;
+    var start = 0;
+    for (var i = 0; i <= size; i = i + 1) {
+        var at_end = 0;
+        if (i == size) { at_end = 1; }
+        elif (load8(data + i) == 10) { at_end = 1; }
+
+        if (at_end != 0) {
+            var llen = i - start;
+            if (llen > 0) {
+                store64(lines + li * 16, data + start);
+                store64(lines + li * 16 + 8, llen);
+                li = li + 1;
+            }
+            start = i + 1;
+        }
+    }
+
+    var lr = fl_alloc(JLR_SZ);
+    store64(lr + JLR_COUNT, li);
+    store64(lr + JLR_DATA, data);
+    store64(lr + JLR_LINES, lines);
+    return lr;
+}
+
+fn jsonl_lines_count(lr) { return load64(lr + JLR_COUNT); }
+
+fn jsonl_lines_get(lr, idx) {
+    var lines = load64(lr + JLR_LINES);
+    return load64(lines + idx * 16);
+}
+
+fn jsonl_lines_len(lr, idx) {
+    var lines = load64(lr + JLR_LINES);
+    return load64(lines + idx * 16 + 8);
+}
+
+fn jsonl_lines_free(lr) {
+    if (lr == 0) { return 0; }
+    var d = load64(lr + JLR_DATA);
+    var l = load64(lr + JLR_LINES);
+    if (d != 0) { fl_free(d); }
+    if (l != 0) { fl_free(l); }
+    fl_free(lr);
+    return 0;
+}
+
+# ── Count lines ─────────────────────────────────────────────
+
+fn jsonl_count(fd) {
+    patra_lock_sh(fd);
+    syscall(SYS_LSEEK, fd, 0, 0);
+    var buf = fl_alloc(4096);
+    var count = 0;
+    var eof = 0;
+    while (eof == 0) {
+        var n = syscall(SYS_READ, fd, buf, 4096);
+        if (n <= 0) { eof = 1; continue; }
+        for (var i = 0; i < n; i = i + 1) {
+            if (load8(buf + i) == 10) { count = count + 1; }
+        }
+    }
+    fl_free(buf);
+    patra_unlock(fd);
+    return count;
+}
