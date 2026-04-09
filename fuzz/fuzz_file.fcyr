@@ -1,0 +1,138 @@
+# fuzz_file.fcyr — Malformed .patra file invariant checks
+# Tests that corrupt/truncated files are rejected gracefully.
+# Exit 0 = all pass. Non-zero = invariant ID that failed.
+
+include "src/lib.cyr"
+
+alloc_init();
+fl_init();
+patra_init();
+
+var fpath = "/tmp/patra_fuzz_file.patra";
+
+# ── Wrong magic ─────────────────────────────────────────────
+
+# Write a file with garbage magic
+syscall(SYS_UNLINK, fpath);
+var fd = syscall(SYS_OPEN, fpath, 194, 420);
+var buf = fl_alloc(PAGE_SIZE);
+memset(buf, 0, PAGE_SIZE);
+store32(buf, 0xDEADBEEF);
+syscall(SYS_WRITE, fd, buf, PAGE_SIZE);
+syscall(SYS_CLOSE, fd);
+
+# patra_open should reject it
+var db = patra_open(fpath);
+if (db != 0) { syscall(SYS_EXIT, 1); }
+
+# ── Truncated file (< 4096 bytes) ───────────────────────────
+
+syscall(SYS_UNLINK, fpath);
+fd = syscall(SYS_OPEN, fpath, 194, 420);
+syscall(SYS_WRITE, fd, "PTRA", 4);
+syscall(SYS_CLOSE, fd);
+
+db = patra_open(fpath);
+if (db != 0) { syscall(SYS_EXIT, 2); }
+
+# ── Zero-length file ────────────────────────────────────────
+
+syscall(SYS_UNLINK, fpath);
+fd = syscall(SYS_OPEN, fpath, 194, 420);
+syscall(SYS_CLOSE, fd);
+
+# patra_open on empty existing file rejects (can't read header)
+db = patra_open(fpath);
+if (db != 0) { patra_close(db); syscall(SYS_EXIT, 3); }
+syscall(SYS_UNLINK, fpath);
+
+# ── Valid file — basic operations must work ──────────────────
+
+syscall(SYS_UNLINK, fpath);
+db = patra_open(fpath);
+if (db == 0) { syscall(SYS_EXIT, 10); }
+if (patra_exec(db, "CREATE TABLE t (id INT, v STR)") != PATRA_OK) { syscall(SYS_EXIT, 11); }
+if (patra_exec(db, "INSERT INTO t VALUES (1, 'a')") != PATRA_OK) { syscall(SYS_EXIT, 12); }
+if (patra_exec(db, "INSERT INTO t VALUES (2, 'b')") != PATRA_OK) { syscall(SYS_EXIT, 13); }
+
+var rs = patra_query(db, "SELECT * FROM t");
+if (rs == 0) { syscall(SYS_EXIT, 14); }
+if (patra_result_count(rs) != 2) { syscall(SYS_EXIT, 15); }
+patra_result_free(rs);
+
+# WHERE on indexed column
+rs = patra_query(db, "SELECT * FROM t WHERE id = 1");
+if (patra_result_count(rs) != 1) { syscall(SYS_EXIT, 16); }
+patra_result_free(rs);
+
+# UPDATE
+if (patra_exec(db, "UPDATE t SET v = 'A' WHERE id = 1") != PATRA_OK) { syscall(SYS_EXIT, 17); }
+rs = patra_query(db, "SELECT * FROM t WHERE id = 1");
+if (streq(patra_result_get_str(rs, 0, 1), "A") != 1) { syscall(SYS_EXIT, 18); }
+patra_result_free(rs);
+
+# DELETE
+if (patra_exec(db, "DELETE FROM t WHERE id = 2") != PATRA_OK) { syscall(SYS_EXIT, 19); }
+rs = patra_query(db, "SELECT * FROM t");
+if (patra_result_count(rs) != 1) { syscall(SYS_EXIT, 20); }
+patra_result_free(rs);
+
+# ORDER BY + LIMIT
+patra_exec(db, "INSERT INTO t VALUES (5, 'e')");
+patra_exec(db, "INSERT INTO t VALUES (3, 'c')");
+rs = patra_query(db, "SELECT * FROM t ORDER BY id LIMIT 1");
+if (patra_result_count(rs) != 1) { syscall(SYS_EXIT, 21); }
+if (patra_result_get_int(rs, 0, 0) != 1) { syscall(SYS_EXIT, 22); }
+patra_result_free(rs);
+
+patra_close(db);
+
+# ── Reopen and verify persistence ────────────────────────────
+
+db = patra_open(fpath);
+if (db == 0) { syscall(SYS_EXIT, 30); }
+rs = patra_query(db, "SELECT * FROM t");
+if (patra_result_count(rs) != 3) { syscall(SYS_EXIT, 31); }
+patra_result_free(rs);
+patra_close(db);
+
+# ── JSONL round-trip ─────────────────────────────────────────
+
+var jpath = "/tmp/patra_fuzz_file.jsonl";
+syscall(SYS_UNLINK, jpath);
+var jfd = jsonl_open(jpath);
+if (jfd < 0) { syscall(SYS_EXIT, 40); }
+
+jsonl_append(jfd, "{\"a\": 1}", 8);
+jsonl_append(jfd, "{\"b\": 2}", 8);
+if (jsonl_count(jfd) != 2) { syscall(SYS_EXIT, 41); }
+
+var lr = jsonl_read(jfd);
+if (jsonl_lines_count(lr) != 2) { syscall(SYS_EXIT, 42); }
+if (jsonl_lines_len(lr, 0) != 8) { syscall(SYS_EXIT, 43); }
+jsonl_lines_free(lr);
+jsonl_close(jfd);
+
+# Read back after close/reopen
+jfd = jsonl_open(jpath);
+lr = jsonl_read(jfd);
+if (jsonl_lines_count(lr) != 2) { syscall(SYS_EXIT, 44); }
+jsonl_lines_free(lr);
+jsonl_close(jfd);
+syscall(SYS_UNLINK, jpath);
+
+# ── Header verify edge cases ────────────────────────────────
+
+# All 0xFF
+memset(buf, 255, PAGE_SIZE);
+if (patra_hdr_verify(buf) == PATRA_OK) { syscall(SYS_EXIT, 50); }
+
+# Correct magic but wrong version (still passes verify — verify only checks magic)
+patra_hdr_init(buf);
+store32(buf + 4, 99);
+if (patra_hdr_verify(buf) != PATRA_OK) { syscall(SYS_EXIT, 51); }
+
+fl_free(buf);
+syscall(SYS_UNLINK, fpath);
+
+syscall(SYS_EXIT, 0);

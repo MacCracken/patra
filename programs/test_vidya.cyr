@@ -1,0 +1,107 @@
+# test_vidya.cyr — vidya-style knowledge index integration test
+#
+# Simulates vidya's usage: store knowledge entries with topics,
+# query by topic, update entries, use ORDER BY and LIMIT.
+
+include "src/lib.cyr"
+include "lib/assert.cyr"
+
+fn main() {
+    alloc_init();
+    fl_init();
+    patra_init();
+
+    var dbpath = "/tmp/patra_vidya_test.patra";
+    syscall(SYS_UNLINK, dbpath);
+
+    test_group("vidya knowledge index");
+
+    var db = patra_open(dbpath);
+    assert(db != 0, "open db");
+
+    # Create knowledge table
+    patra_exec(db, "CREATE TABLE entries (id INT, topic STR, title STR, priority INT)");
+
+    # Insert knowledge entries
+    patra_exec(db, "INSERT INTO entries VALUES (1, 'btree', 'B-tree basics', 10)");
+    patra_exec(db, "INSERT INTO entries VALUES (2, 'sql', 'SQL parsing', 20)");
+    patra_exec(db, "INSERT INTO entries VALUES (3, 'btree', 'B-tree splits', 15)");
+    patra_exec(db, "INSERT INTO entries VALUES (4, 'io', 'File I/O', 5)");
+    patra_exec(db, "INSERT INTO entries VALUES (5, 'sql', 'WHERE clauses', 25)");
+    patra_exec(db, "INSERT INTO entries VALUES (6, 'btree', 'B-tree range scan', 12)");
+    patra_exec(db, "INSERT INTO entries VALUES (7, 'alloc', 'Memory allocators', 8)");
+
+    # Query by id (B-tree indexed)
+    var rs = patra_query(db, "SELECT * FROM entries WHERE id = 3");
+    assert_eq(patra_result_count(rs), 1, "find id=3");
+    assert_streq(patra_result_get_str(rs, 0, 2), "B-tree splits", "title");
+    patra_result_free(rs);
+
+    # Query by topic (linear scan — topic is STR, not indexed)
+    rs = patra_query(db, "SELECT * FROM entries WHERE topic = 'btree'");
+    assert_eq(patra_result_count(rs), 3, "3 btree entries");
+    patra_result_free(rs);
+
+    rs = patra_query(db, "SELECT * FROM entries WHERE topic = 'sql'");
+    assert_eq(patra_result_count(rs), 2, "2 sql entries");
+    patra_result_free(rs);
+
+    # ORDER BY priority (highest first needs DESC — not supported, so ascending)
+    rs = patra_query(db, "SELECT * FROM entries ORDER BY priority");
+    assert_eq(patra_result_count(rs), 7, "all 7");
+    assert_eq(patra_result_get_int(rs, 0, 3), 5, "lowest prio first");
+    assert_eq(patra_result_get_int(rs, 6, 3), 25, "highest prio last");
+    patra_result_free(rs);
+
+    # ORDER BY + LIMIT — top 3 by priority (ascending, so lowest 3)
+    rs = patra_query(db, "SELECT * FROM entries ORDER BY priority LIMIT 3");
+    assert_eq(patra_result_count(rs), 3, "limit 3");
+    assert_eq(patra_result_get_int(rs, 0, 3), 5, "prio 5");
+    assert_eq(patra_result_get_int(rs, 1, 3), 8, "prio 8");
+    assert_eq(patra_result_get_int(rs, 2, 3), 10, "prio 10");
+    patra_result_free(rs);
+
+    # WHERE + ORDER BY + LIMIT
+    rs = patra_query(db, "SELECT * FROM entries WHERE topic = 'btree' ORDER BY priority LIMIT 2");
+    assert_eq(patra_result_count(rs), 2, "btree limit 2");
+    assert_eq(patra_result_get_int(rs, 0, 3), 10, "btree prio 10");
+    assert_eq(patra_result_get_int(rs, 1, 3), 12, "btree prio 12");
+    patra_result_free(rs);
+
+    # Update entry
+    patra_exec(db, "UPDATE entries SET priority = 30 WHERE id = 1");
+    rs = patra_query(db, "SELECT * FROM entries WHERE id = 1");
+    assert_eq(patra_result_get_int(rs, 0, 3), 30, "updated priority");
+    patra_result_free(rs);
+
+    # Delete entry
+    patra_exec(db, "DELETE FROM entries WHERE id = 4");
+    rs = patra_query(db, "SELECT * FROM entries");
+    assert_eq(patra_result_count(rs), 6, "6 after delete");
+    patra_result_free(rs);
+
+    # Verify persistence: close and reopen
+    patra_close(db);
+    db = patra_open(dbpath);
+    rs = patra_query(db, "SELECT * FROM entries");
+    assert_eq(patra_result_count(rs), 6, "persisted 6");
+    patra_result_free(rs);
+
+    # Multiple tables
+    patra_exec(db, "CREATE TABLE tags (entry_id INT, tag STR)");
+    patra_exec(db, "INSERT INTO tags VALUES (1, 'core')");
+    patra_exec(db, "INSERT INTO tags VALUES (1, 'index')");
+    patra_exec(db, "INSERT INTO tags VALUES (2, 'parser')");
+
+    rs = patra_query(db, "SELECT * FROM tags WHERE entry_id = 1");
+    assert_eq(patra_result_count(rs), 2, "2 tags for entry 1");
+    patra_result_free(rs);
+
+    patra_close(db);
+    syscall(SYS_UNLINK, dbpath);
+
+    return assert_summary();
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

@@ -1,0 +1,134 @@
+# test_libro.cyr — libro-style audit log integration test
+#
+# Simulates libro's usage: append audit entries as JSONL,
+# read them back, verify count and content.
+
+include "src/lib.cyr"
+include "lib/assert.cyr"
+
+var _lpath = "/tmp/patra_libro_test.jsonl";
+
+fn main() {
+    alloc_init();
+    fl_init();
+    patra_init();
+
+    syscall(SYS_UNLINK, _lpath);
+
+    test_group("libro audit log");
+
+    # Open JSONL audit log
+    var fd = jsonl_open(_lpath);
+    assert(fd >= 0, "open log");
+
+    # Append audit entries (libro-style)
+    var keys = fl_alloc(48);
+    var vals = fl_alloc(48);
+    var types = fl_alloc(48);
+
+    store64(keys, "action");
+    store64(keys + 8, "source");
+    store64(keys + 16, "severity");
+    store64(keys + 24, "details");
+    store64(keys + 32, "agent_id");
+    store64(keys + 40, "timestamp");
+
+    store64(types, COL_STR);
+    store64(types + 8, COL_STR);
+    store64(types + 16, COL_STR);
+    store64(types + 24, COL_STR);
+    store64(types + 32, COL_STR);
+    store64(types + 40, COL_INT);
+
+    # Entry 1: login
+    store64(vals, "user.login");
+    store64(vals + 8, "auth");
+    store64(vals + 16, "Info");
+    store64(vals + 24, "user alice logged in");
+    store64(vals + 32, "agent-001");
+    store64(vals + 40, 1712620800);
+    jsonl_append_obj(fd, keys, vals, types, 6);
+
+    # Entry 2: access
+    store64(vals, "data.access");
+    store64(vals + 8, "api");
+    store64(vals + 16, "Info");
+    store64(vals + 24, "read /users endpoint");
+    store64(vals + 32, "agent-001");
+    store64(vals + 40, 1712620801);
+    jsonl_append_obj(fd, keys, vals, types, 6);
+
+    # Entry 3: error
+    store64(vals, "auth.failure");
+    store64(vals + 8, "auth");
+    store64(vals + 16, "Warning");
+    store64(vals + 24, "invalid token");
+    store64(vals + 32, "agent-002");
+    store64(vals + 40, 1712620802);
+    jsonl_append_obj(fd, keys, vals, types, 6);
+
+    # Verify count
+    assert_eq(jsonl_count(fd), 3, "3 entries");
+
+    # Read back
+    var lr = jsonl_read(fd);
+    assert_eq(jsonl_lines_count(lr), 3, "read 3 lines");
+
+    # Verify first line contains expected content
+    var line0 = jsonl_lines_get(lr, 0);
+    var len0 = jsonl_lines_len(lr, 0);
+    assert(len0 > 20, "line0 has content");
+
+    # Verify each line starts with { and ends with }
+    for (var i = 0; i < 3; i = i + 1) {
+        var lp = jsonl_lines_get(lr, i);
+        var ll = jsonl_lines_len(lr, i);
+        assert_eq(load8(lp), 123, "starts with {");
+        assert_eq(load8(lp + ll - 1), 125, "ends with }");
+    }
+
+    jsonl_lines_free(lr);
+    jsonl_close(fd);
+
+    # Reopen and verify persistence
+    fd = jsonl_open(_lpath);
+    assert_eq(jsonl_count(fd), 3, "persisted 3");
+    jsonl_close(fd);
+
+    fl_free(keys);
+    fl_free(vals);
+    fl_free(types);
+
+    # Also test structured storage alongside JSONL
+    test_group("libro + patra storage");
+
+    var dbpath = "/tmp/patra_libro_test.patra";
+    syscall(SYS_UNLINK, dbpath);
+    var db = patra_open(dbpath);
+    assert(db != 0, "open db");
+
+    patra_exec(db, "CREATE TABLE agents (id INT, name STR, status STR)");
+    patra_exec(db, "INSERT INTO agents VALUES (1, 'agent-001', 'active')");
+    patra_exec(db, "INSERT INTO agents VALUES (2, 'agent-002', 'active')");
+
+    # Query by agent id (uses B-tree index)
+    var rs = patra_query(db, "SELECT * FROM agents WHERE id = 1");
+    assert_eq(patra_result_count(rs), 1, "found agent");
+    assert_streq(patra_result_get_str(rs, 0, 1), "agent-001", "agent name");
+    patra_result_free(rs);
+
+    # Update status
+    patra_exec(db, "UPDATE agents SET status = 'suspended' WHERE id = 2");
+    rs = patra_query(db, "SELECT * FROM agents WHERE id = 2");
+    assert_streq(patra_result_get_str(rs, 0, 2), "suspended", "updated");
+    patra_result_free(rs);
+
+    patra_close(db);
+    syscall(SYS_UNLINK, dbpath);
+    syscall(SYS_UNLINK, _lpath);
+
+    return assert_summary();
+}
+
+var r = main();
+syscall(SYS_EXIT, r);
