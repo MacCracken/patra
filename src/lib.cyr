@@ -21,8 +21,8 @@ include "src/page.cyr"
 include "src/row.cyr"
 include "src/sql.cyr"
 include "src/where.cyr"
-include "src/table.cyr"
 include "src/btree.cyr"
+include "src/table.cyr"
 include "src/jsonl.cyr"
 
 # ── DB handle (16 bytes) ────────────────────────────────────
@@ -185,6 +185,23 @@ fn _exec_insert(db) {
     }
 
     var r = tbl_insert(fd, hdr, idx, row, rsz);
+
+    # Maintain B-tree index
+    if (r == PATRA_OK) {
+        var ic = load64(schema + SCH_IDX_COL);
+        if (ic >= 0) {
+            var ir = load64(schema + SCH_IDX_ROOT);
+            if (ir != 0) {
+                var ikey = row_read_int(row, row_field_offset(schema, ncols, ic));
+                var nr = btree_insert(fd, hdr, ir, ikey, _tbl_last_ref);
+                if (nr != ir) {
+                    store64(schema + SCH_IDX_ROOT, nr);
+                    page_write(fd, spg, schema);
+                }
+            }
+        }
+    }
+
     fl_free(row);
     fl_free(schema);
 
@@ -386,8 +403,61 @@ fn patra_query(db, sql) {
         memcpy(names_ptr + i * SCH_CNAME_MAX, schema + soff + SCH_CNAME, SCH_CNAME_MAX);
     }
 
-    # Scan with WHERE filter
-    var actual = tbl_scan_where(fd, hdr, idx, data_ptr, rsz, schema, ncols, _sql_pr);
+    # Try B-tree index for equality on indexed column
+    var actual = 0;
+    var used_index = 0;
+    var ic = load64(schema + SCH_IDX_COL);
+    if (ic >= 0) {
+        var ir = load64(schema + SCH_IDX_ROOT);
+        if (ir != 0) {
+            var wn = load64(_sql_pr + PR_WHERE_N);
+            var wjoin_ok = 0;
+            if (wn == 1) { wjoin_ok = 1; }
+            elif (load64(_sql_pr + PR_WHERE_JOIN) == WH_AND) { wjoin_ok = 1; }
+            if (wjoin_ok != 0) {
+                # Check first WHERE condition for EQ on indexed column
+                var cond = _sql_pr + PR_WHERE;
+                var icn = schema + SCH_START + ic * SCH_ENTRY_SZ + SCH_CNAME;
+                var icnl = strlen(icn);
+                var cptr = load64(cond + WH_COL_PTR);
+                var clen = load64(cond + WH_COL_LEN);
+                if (clen == icnl) {
+                    if (memeq(cptr, icn, clen)) {
+                        if (load64(cond + WH_CMP_OP) == CMP_EQ) {
+                            if (load64(cond + WH_VAL_TYPE) == COL_INT) {
+                                used_index = 1;
+                                var ikey = load64(cond + WH_INT_VAL);
+                                var refs = fl_alloc(2048);
+                                var nrefs = btree_search(fd, ir, ikey, refs, 256);
+                                var rbuf = fl_alloc(PAGE_SIZE);
+                                var lpg = 0 - 1;
+                                for (var ri = 0; ri < nrefs; ri = ri + 1) {
+                                    var ref = load64(refs + ri * 8);
+                                    var rpg = _bt_ref_pg(ref);
+                                    var rsl = _bt_ref_slot(ref);
+                                    if (rpg != lpg) {
+                                        page_read(fd, rpg, rbuf);
+                                        lpg = rpg;
+                                    }
+                                    var rp = rbuf + DP_DATA + rsl * rsz;
+                                    if (where_eval(rp, schema, ncols, _sql_pr)) {
+                                        memcpy(data_ptr + actual * rsz, rp, rsz);
+                                        actual = actual + 1;
+                                    }
+                                }
+                                fl_free(rbuf);
+                                fl_free(refs);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (used_index == 0) {
+        actual = tbl_scan_where(fd, hdr, idx, data_ptr, rsz, schema, ncols, _sql_pr);
+    }
     store64(rs + RS_NROWS, actual);
 
     fl_free(schema);

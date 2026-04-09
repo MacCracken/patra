@@ -1,5 +1,7 @@
 # table.cyr — table metadata, create, insert, scan, update, delete
 
+var _tbl_last_ref = 0;
+
 fn _tbl_entry(hdr, idx) {
     return hdr + HDR_TBLDIR + idx * TBL_ENTRY_SZ;
 }
@@ -42,6 +44,15 @@ fn tbl_create(fd, hdr, name, nlen, col_names, col_types, ncols) {
         store8(sbuf + soff + SCH_CNAME + cn, 0);
         store64(sbuf + soff + SCH_CTYPE, load64(col_types + i * 8));
     }
+    # Auto-index on first INT column
+    store64(sbuf + SCH_IDX_COL, 0 - 1);
+    if (ncols > 0) {
+        if (load64(col_types) == COL_INT) {
+            var bt = btree_create(fd, hdr);
+            store64(sbuf + SCH_IDX_COL, 0);
+            store64(sbuf + SCH_IDX_ROOT, bt);
+        }
+    }
     page_write(fd, spg, sbuf);
     fl_free(sbuf);
 
@@ -82,6 +93,7 @@ fn tbl_insert(fd, hdr, idx, row_data, row_sz) {
     var used = DP_DATA + nrows * row_sz;
 
     if (used + row_sz <= PAGE_SIZE) {
+        _tbl_last_ref = _bt_mkref(cur, nrows);
         memcpy(buf + used, row_data, row_sz);
         store64(buf + DP_NROWS, nrows + 1);
         page_write(fd, cur, buf);
@@ -90,6 +102,7 @@ fn tbl_insert(fd, hdr, idx, row_data, row_sz) {
         store64(buf + DP_NEXT, npg);
         page_write(fd, cur, buf);
 
+        _tbl_last_ref = _bt_mkref(npg, 0);
         page_init_data(buf);
         memcpy(buf + DP_DATA, row_data, row_sz);
         store64(buf + DP_NROWS, 1);

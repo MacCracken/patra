@@ -527,6 +527,180 @@ fn test_delete_then_insert() {
     patra_close(db);
 }
 
+# ── v0.3: B-tree ─────────────────────────────────────────────
+
+fn test_btree_basic() {
+    test_group("btree basic");
+    cleanup();
+    var fd = _pt_file_create(_tpath);
+    var hdr = fl_alloc(PAGE_SIZE);
+    patra_hdr_read(fd, hdr);
+
+    var root = btree_create(fd, hdr);
+    root = btree_insert(fd, hdr, root, 10, 100);
+    root = btree_insert(fd, hdr, root, 5, 50);
+    root = btree_insert(fd, hdr, root, 20, 200);
+    root = btree_insert(fd, hdr, root, 15, 150);
+
+    var out = fl_alloc(64);
+    assert_eq(btree_search(fd, root, 10, out, 8), 1, "find 10");
+    assert_eq(load64(out), 100, "val 100");
+    assert_eq(btree_search(fd, root, 5, out, 8), 1, "find 5");
+    assert_eq(load64(out), 50, "val 50");
+    assert_eq(btree_search(fd, root, 99, out, 8), 0, "miss 99");
+
+    fl_free(out);
+    fl_free(hdr);
+    syscall(SYS_CLOSE, fd);
+}
+
+fn test_btree_split() {
+    test_group("btree split");
+    cleanup();
+    var fd = _pt_file_create(_tpath);
+    var hdr = fl_alloc(PAGE_SIZE);
+    patra_hdr_read(fd, hdr);
+
+    var root = btree_create(fd, hdr);
+    # Insert 100 keys to trigger leaf split
+    for (var i = 0; i < 100; i = i + 1) {
+        root = btree_insert(fd, hdr, root, i, i * 10);
+    }
+
+    # Verify all searchable
+    var out = fl_alloc(64);
+    var ok = 1;
+    for (var i = 0; i < 100; i = i + 1) {
+        var n = btree_search(fd, root, i, out, 8);
+        if (n != 1) { ok = 0; }
+        elif (load64(out) != i * 10) { ok = 0; }
+    }
+    assert(ok, "all 100 found");
+    assert_eq(btree_search(fd, root, 999, out, 8), 0, "miss 999");
+
+    fl_free(out);
+    fl_free(hdr);
+    syscall(SYS_CLOSE, fd);
+}
+
+fn test_btree_range() {
+    test_group("btree range");
+    cleanup();
+    var fd = _pt_file_create(_tpath);
+    var hdr = fl_alloc(PAGE_SIZE);
+    patra_hdr_read(fd, hdr);
+
+    var root = btree_create(fd, hdr);
+    for (var i = 0; i < 50; i = i + 1) {
+        root = btree_insert(fd, hdr, root, i, i);
+    }
+
+    var out = fl_alloc(512);
+    var n = _bt_range(fd, root, 10, 19, out, 64);
+    assert_eq(n, 10, "range 10-19: 10");
+
+    n = _bt_range(fd, root, 0, 49, out, 64);
+    assert_eq(n, 50, "range 0-49: 50");
+
+    n = _bt_range(fd, root, 100, 200, out, 64);
+    assert_eq(n, 0, "range miss");
+
+    fl_free(out);
+    fl_free(hdr);
+    syscall(SYS_CLOSE, fd);
+}
+
+fn test_btree_duplicates() {
+    test_group("btree duplicates");
+    cleanup();
+    var fd = _pt_file_create(_tpath);
+    var hdr = fl_alloc(PAGE_SIZE);
+    patra_hdr_read(fd, hdr);
+
+    var root = btree_create(fd, hdr);
+    root = btree_insert(fd, hdr, root, 5, 1);
+    root = btree_insert(fd, hdr, root, 5, 2);
+    root = btree_insert(fd, hdr, root, 5, 3);
+
+    var out = fl_alloc(64);
+    assert_eq(btree_search(fd, root, 5, out, 8), 3, "3 dups");
+
+    fl_free(out);
+    fl_free(hdr);
+    syscall(SYS_CLOSE, fd);
+}
+
+fn test_indexed_select() {
+    test_group("indexed select");
+    cleanup();
+    var db = patra_open(_tpath);
+    _setup_people(db);
+
+    # id is first INT column — should be indexed
+    var rs = patra_query(db, "SELECT * FROM people WHERE id = 3");
+    assert_eq(patra_result_count(rs), 1, "found by index");
+    assert_streq(patra_result_get_str(rs, 0, 1), "carol", "correct row");
+    patra_result_free(rs);
+
+    rs = patra_query(db, "SELECT * FROM people WHERE id = 99");
+    assert_eq(patra_result_count(rs), 0, "index miss");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_indexed_with_and() {
+    test_group("indexed with AND");
+    cleanup();
+    var db = patra_open(_tpath);
+    _setup_people(db);
+
+    # Index finds id=2 candidates, AND filter checks age
+    var rs = patra_query(db, "SELECT * FROM people WHERE id = 2 AND age = 25");
+    assert_eq(patra_result_count(rs), 1, "and filter");
+    assert_streq(patra_result_get_str(rs, 0, 1), "bob", "bob");
+    patra_result_free(rs);
+
+    # Index finds id=2, but age doesn't match
+    rs = patra_query(db, "SELECT * FROM people WHERE id = 2 AND age = 99");
+    assert_eq(patra_result_count(rs), 0, "and no match");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_no_index_str_table() {
+    test_group("no index str table");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE strs (name STR, val STR)");
+    patra_exec(db, "INSERT INTO strs VALUES ('a', 'one')");
+    patra_exec(db, "INSERT INTO strs VALUES ('b', 'two')");
+
+    # No index on STR-first table, should still work via scan
+    var rs = patra_query(db, "SELECT * FROM strs WHERE name = 'a'");
+    assert_eq(patra_result_count(rs), 1, "scan fallback");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_btree_many() {
+    test_group("btree many inserts");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE big (id INT, x INT)");
+    for (var i = 1; i <= 200; i = i + 1) {
+        patra_exec(db, "INSERT INTO big VALUES (1, 0)");
+    }
+    # All 200 have id=1
+    var rs = patra_query(db, "SELECT * FROM big WHERE id = 1");
+    assert_eq(patra_result_count(rs), 200, "200 by index");
+    patra_result_free(rs);
+
+    var rs2 = patra_query(db, "SELECT * FROM big");
+    assert_eq(patra_result_count(rs2), 200, "200 total");
+    patra_result_free(rs2);
+    patra_close(db);
+}
+
 # ── Runner ──────────────────────────────────────────────────
 
 fn main() {
@@ -573,6 +747,16 @@ fn main() {
     test_delete_multiple();
     test_delete_all();
     test_delete_then_insert();
+
+    # v0.3 B-tree
+    test_btree_basic();
+    test_btree_split();
+    test_btree_range();
+    test_btree_duplicates();
+    test_indexed_select();
+    test_indexed_with_and();
+    test_no_index_str_table();
+    test_btree_many();
 
     cleanup();
     return assert_summary();

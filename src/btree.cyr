@@ -1,4 +1,365 @@
-# btree.cyr — B-tree index (v0.3)
-# Stub: v0.1 uses linear page scan. B-tree indexed lookups come in v0.3.
+# btree.cyr — B+ tree index (order 64, keys are i64)
 
-fn btree_stub() { return 0; }
+enum BtConst {
+    BTREE_ORDER = 64;
+    BT_MAX_KEYS = 63;
+}
+
+enum BtOff {
+    BT_TYPE = 0;
+    BT_LEAF = 8;
+    BT_NKEYS = 16;
+    BT_KEYS = 24;
+    BT_VALS = 528;
+}
+# Keys: 63 × 8 = 504 bytes at offset 24–527
+# Vals:  leaf: 63 × 8 = 504 bytes at 528–1031
+#        int:  64 × 8 = 512 bytes at 528–1039
+
+# Schema page index info
+enum SchIdx {
+    SCH_IDX_COL = 4080;
+    SCH_IDX_ROOT = 4088;
+}
+
+# Row reference encoding: page * 65536 + slot
+fn _bt_mkref(pg, slot)  { return pg * 65536 + slot; }
+fn _bt_ref_pg(ref)      { return ref / 65536; }
+fn _bt_ref_slot(ref)    { return ref % 65536; }
+
+# Path stack for insert (max depth 6)
+var _bt_path[48];
+var _bt_pdepth = 0;
+
+# ── Create ──────────────────────────────────────────────────
+
+fn btree_create(fd, hdr) {
+    var pg = page_alloc(fd, hdr);
+    var buf = fl_alloc(PAGE_SIZE);
+    memset(buf, 0, PAGE_SIZE);
+    store64(buf + BT_TYPE, PAGE_BTREE);
+    store64(buf + BT_LEAF, 1);
+    page_write(fd, pg, buf);
+    fl_free(buf);
+    return pg;
+}
+
+# ── Find leaf (records path) ────────────────────────────────
+
+fn _bt_find_leaf(fd, root, key) {
+    _bt_pdepth = 0;
+    var pg = root;
+    var buf = fl_alloc(PAGE_SIZE);
+    page_read(fd, pg, buf);
+
+    while (load64(buf + BT_LEAF) == 0) {
+        store64(&_bt_path + _bt_pdepth * 8, pg);
+        _bt_pdepth = _bt_pdepth + 1;
+        var nk = load64(buf + BT_NKEYS);
+        var ci = nk;
+        var ff = 0;
+        for (var i = 0; i < nk; i = i + 1) {
+            if (ff == 0) {
+                if (key < load64(buf + BT_KEYS + i * 8)) {
+                    ci = i;
+                    ff = 1;
+                }
+            }
+        }
+        pg = load64(buf + BT_VALS + ci * 8);
+        page_read(fd, pg, buf);
+    }
+    store64(&_bt_path + _bt_pdepth * 8, pg);
+    _bt_pdepth = _bt_pdepth + 1;
+    fl_free(buf);
+    return pg;
+}
+
+# ── Insert into non-full leaf ───────────────────────────────
+
+fn _bt_leaf_ins(buf, key, val) {
+    var nk = load64(buf + BT_NKEYS);
+    var pos = nk;
+    var ff = 0;
+    for (var i = 0; i < nk; i = i + 1) {
+        if (ff == 0) {
+            if (key <= load64(buf + BT_KEYS + i * 8)) {
+                pos = i;
+                ff = 1;
+            }
+        }
+    }
+    var j = nk - 1;
+    while (j >= pos) {
+        store64(buf + BT_KEYS + (j + 1) * 8, load64(buf + BT_KEYS + j * 8));
+        store64(buf + BT_VALS + (j + 1) * 8, load64(buf + BT_VALS + j * 8));
+        j = j - 1;
+    }
+    store64(buf + BT_KEYS + pos * 8, key);
+    store64(buf + BT_VALS + pos * 8, val);
+    store64(buf + BT_NKEYS, nk + 1);
+}
+
+# ── Insert into non-full internal node ──────────────────────
+
+fn _bt_int_ins(buf, key, rchild) {
+    var nk = load64(buf + BT_NKEYS);
+    var pos = nk;
+    var ff = 0;
+    for (var i = 0; i < nk; i = i + 1) {
+        if (ff == 0) {
+            if (key < load64(buf + BT_KEYS + i * 8)) {
+                pos = i;
+                ff = 1;
+            }
+        }
+    }
+    var j = nk - 1;
+    while (j >= pos) {
+        store64(buf + BT_KEYS + (j + 1) * 8, load64(buf + BT_KEYS + j * 8));
+        j = j - 1;
+    }
+    store64(buf + BT_KEYS + pos * 8, key);
+    j = nk;
+    while (j >= pos + 1) {
+        store64(buf + BT_VALS + (j + 1) * 8, load64(buf + BT_VALS + j * 8));
+        j = j - 1;
+    }
+    store64(buf + BT_VALS + (pos + 1) * 8, rchild);
+    store64(buf + BT_NKEYS, nk + 1);
+}
+
+# ── Push separator key up to parent ─────────────────────────
+
+fn _bt_push_up(fd, hdr, root, left_pg, sep, right_pg) {
+    if (_bt_pdepth <= 1) {
+        # left_pg is the root — create new root
+        var nr = page_alloc(fd, hdr);
+        var nb = fl_alloc(PAGE_SIZE);
+        memset(nb, 0, PAGE_SIZE);
+        store64(nb + BT_TYPE, PAGE_BTREE);
+        store64(nb + BT_LEAF, 0);
+        store64(nb + BT_NKEYS, 1);
+        store64(nb + BT_KEYS, sep);
+        store64(nb + BT_VALS, left_pg);
+        store64(nb + BT_VALS + 8, right_pg);
+        page_write(fd, nr, nb);
+        fl_free(nb);
+        return nr;
+    }
+
+    var par_pg = load64(&_bt_path + (_bt_pdepth - 2) * 8);
+    var pb = fl_alloc(PAGE_SIZE);
+    page_read(fd, par_pg, pb);
+    var nk = load64(pb + BT_NKEYS);
+
+    if (nk < BT_MAX_KEYS) {
+        _bt_int_ins(pb, sep, right_pg);
+        page_write(fd, par_pg, pb);
+        fl_free(pb);
+        return root;
+    }
+
+    # Parent full — split internal node
+    var tk = fl_alloc(520);
+    var tc = fl_alloc(528);
+
+    # Find position for sep
+    var pos = nk;
+    var ff = 0;
+    for (var i = 0; i < nk; i = i + 1) {
+        if (ff == 0) {
+            if (sep < load64(pb + BT_KEYS + i * 8)) {
+                pos = i;
+                ff = 1;
+            }
+        }
+    }
+
+    # Build temp keys (64)
+    var ti = 0;
+    for (var i = 0; i < nk; i = i + 1) {
+        if (i == pos) {
+            store64(tk + ti * 8, sep);
+            ti = ti + 1;
+        }
+        store64(tk + ti * 8, load64(pb + BT_KEYS + i * 8));
+        ti = ti + 1;
+    }
+    if (pos == nk) { store64(tk + ti * 8, sep); ti = ti + 1; }
+
+    # Build temp children (65)
+    ti = 0;
+    for (var i = 0; i <= nk; i = i + 1) {
+        store64(tc + ti * 8, load64(pb + BT_VALS + i * 8));
+        ti = ti + 1;
+        if (i == pos) {
+            store64(tc + ti * 8, right_pg);
+            ti = ti + 1;
+        }
+    }
+
+    # Split: left [0..30] (31 keys, 32 children), mid=31, right [32..63] (32 keys, 33 children)
+    var mid = 31;
+    var mid_key = load64(tk + mid * 8);
+
+    # Left stays in par_pg
+    store64(pb + BT_NKEYS, mid);
+    for (var i = 0; i < mid; i = i + 1) {
+        store64(pb + BT_KEYS + i * 8, load64(tk + i * 8));
+    }
+    for (var i = 0; i <= mid; i = i + 1) {
+        store64(pb + BT_VALS + i * 8, load64(tc + i * 8));
+    }
+    page_write(fd, par_pg, pb);
+
+    # Right in new page
+    var rpg = page_alloc(fd, hdr);
+    var rnk = 64 - mid - 1;
+    memset(pb, 0, PAGE_SIZE);
+    store64(pb + BT_TYPE, PAGE_BTREE);
+    store64(pb + BT_LEAF, 0);
+    store64(pb + BT_NKEYS, rnk);
+    for (var i = 0; i < rnk; i = i + 1) {
+        store64(pb + BT_KEYS + i * 8, load64(tk + (mid + 1 + i) * 8));
+    }
+    for (var i = 0; i <= rnk; i = i + 1) {
+        store64(pb + BT_VALS + i * 8, load64(tc + (mid + 1 + i) * 8));
+    }
+    page_write(fd, rpg, pb);
+
+    fl_free(tk);
+    fl_free(tc);
+    fl_free(pb);
+
+    _bt_pdepth = _bt_pdepth - 1;
+    return _bt_push_up(fd, hdr, root, par_pg, mid_key, rpg);
+}
+
+# ── Insert ──────────────────────────────────────────────────
+
+fn btree_insert(fd, hdr, root, key, val) {
+    var leaf_pg = _bt_find_leaf(fd, root, key);
+    var buf = fl_alloc(PAGE_SIZE);
+    page_read(fd, leaf_pg, buf);
+    var nk = load64(buf + BT_NKEYS);
+
+    if (nk < BT_MAX_KEYS) {
+        _bt_leaf_ins(buf, key, val);
+        page_write(fd, leaf_pg, buf);
+        fl_free(buf);
+        return root;
+    }
+
+    # Leaf full — build sorted temp (64 entries)
+    var tk = fl_alloc(520);
+    var tv = fl_alloc(520);
+    var ins = 0;
+    var ff = 0;
+    for (var i = 0; i < nk; i = i + 1) {
+        if (ff == 0) {
+            if (key <= load64(buf + BT_KEYS + i * 8)) {
+                store64(tk + ins * 8, key);
+                store64(tv + ins * 8, val);
+                ins = ins + 1;
+                ff = 1;
+            }
+        }
+        store64(tk + ins * 8, load64(buf + BT_KEYS + i * 8));
+        store64(tv + ins * 8, load64(buf + BT_VALS + i * 8));
+        ins = ins + 1;
+    }
+    if (ff == 0) {
+        store64(tk + ins * 8, key);
+        store64(tv + ins * 8, val);
+        ins = ins + 1;
+    }
+
+    var split = 32;
+    var sep = load64(tk + split * 8);
+
+    # Left half stays in leaf_pg
+    store64(buf + BT_NKEYS, split);
+    for (var i = 0; i < split; i = i + 1) {
+        store64(buf + BT_KEYS + i * 8, load64(tk + i * 8));
+        store64(buf + BT_VALS + i * 8, load64(tv + i * 8));
+    }
+    page_write(fd, leaf_pg, buf);
+
+    # Right half in new page
+    var rpg = page_alloc(fd, hdr);
+    memset(buf, 0, PAGE_SIZE);
+    store64(buf + BT_TYPE, PAGE_BTREE);
+    store64(buf + BT_LEAF, 1);
+    var rn = 64 - split;
+    store64(buf + BT_NKEYS, rn);
+    for (var i = 0; i < rn; i = i + 1) {
+        store64(buf + BT_KEYS + i * 8, load64(tk + (split + i) * 8));
+        store64(buf + BT_VALS + i * 8, load64(tv + (split + i) * 8));
+    }
+    page_write(fd, rpg, buf);
+
+    fl_free(tk);
+    fl_free(tv);
+    fl_free(buf);
+
+    return _bt_push_up(fd, hdr, root, leaf_pg, sep, rpg);
+}
+
+# ── Search (returns all refs matching key) ──────────────────
+
+fn btree_search(fd, root, key, out, max) {
+    return _bt_range(fd, root, key, key, out, max);
+}
+
+# ── Range scan [lo, hi] — collects refs into out ────────────
+
+fn _bt_range(fd, root, lo, hi, out, max) {
+    var cnt = 0;
+    _bt_rwalk(fd, root, lo, hi, out, max, &cnt);
+    return cnt;
+}
+
+fn _bt_rwalk(fd, pg, lo, hi, out, max, cp) {
+    var buf = fl_alloc(PAGE_SIZE);
+    page_read(fd, pg, buf);
+    var nk = load64(buf + BT_NKEYS);
+    var leaf = load64(buf + BT_LEAF);
+
+    if (leaf != 0) {
+        for (var i = 0; i < nk; i = i + 1) {
+            var c = load64(cp);
+            if (c < max) {
+                var k = load64(buf + BT_KEYS + i * 8);
+                if (k >= lo) {
+                    if (k <= hi) {
+                        store64(out + c * 8, load64(buf + BT_VALS + i * 8));
+                        store64(cp, c + 1);
+                    }
+                }
+            }
+        }
+    } else {
+        # Find first relevant child
+        var first = 0;
+        for (var i = 0; i < nk; i = i + 1) {
+            if (load64(buf + BT_KEYS + i * 8) < lo) {
+                first = i + 1;
+            }
+        }
+        var stop = 0;
+        for (var i = first; i <= nk; i = i + 1) {
+            if (stop == 0) {
+                if (load64(cp) < max) {
+                    _bt_rwalk(fd, load64(buf + BT_VALS + i * 8), lo, hi, out, max, cp);
+                    if (i < nk) {
+                        if (load64(buf + BT_KEYS + i * 8) > hi) {
+                            stop = 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    fl_free(buf);
+}
