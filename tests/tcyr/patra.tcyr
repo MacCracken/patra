@@ -1030,6 +1030,39 @@ fn test_multi_table_isolation() {
 
 # ── Coverage: SQL edge cases ─────────────────────────────────
 
+fn test_order_by_desc() {
+    test_group("order by desc");
+    cleanup();
+    var db = patra_open(_tpath);
+    _setup_people(db);
+
+    var rs = patra_query(db, "SELECT * FROM people ORDER BY age DESC");
+    assert_eq(patra_result_count(rs), 5, "5 rows");
+    assert_eq(patra_result_get_int(rs, 0, 2), 40, "first 40");
+    assert_eq(patra_result_get_int(rs, 1, 2), 35, "second 35");
+    assert_eq(patra_result_get_int(rs, 4, 2), 25, "last 25");
+    patra_result_free(rs);
+
+    rs = patra_query(db, "SELECT * FROM people ORDER BY name DESC");
+    assert_streq(patra_result_get_str(rs, 0, 1), "eve", "desc first eve");
+    assert_streq(patra_result_get_str(rs, 4, 1), "alice", "desc last alice");
+    patra_result_free(rs);
+
+    # ASC explicit
+    rs = patra_query(db, "SELECT * FROM people ORDER BY age ASC");
+    assert_eq(patra_result_get_int(rs, 0, 2), 25, "asc first 25");
+    patra_result_free(rs);
+
+    # DESC + LIMIT
+    rs = patra_query(db, "SELECT * FROM people ORDER BY id DESC LIMIT 2");
+    assert_eq(patra_result_count(rs), 2, "desc limit 2");
+    assert_eq(patra_result_get_int(rs, 0, 0), 5, "desc id=5 first");
+    assert_eq(patra_result_get_int(rs, 1, 0), 4, "desc id=4 second");
+    patra_result_free(rs);
+
+    patra_close(db);
+}
+
 fn test_sql_semicolons() {
     test_group("sql semicolons");
     # Trailing semicolons should not break parsing
@@ -1148,6 +1181,7 @@ fn main() {
     test_string_edges();
     test_neq_and_str_cmp();
     test_multi_table_isolation();
+    test_order_by_desc();
     test_sql_semicolons();
     test_jsonl_special_chars();
 

@@ -363,3 +363,24 @@ fn _bt_rwalk(fd, pg, lo, hi, out, max, cp) {
     }
     fl_free(buf);
 }
+
+# ── Remove ref (lazy delete — set value to 0) ──────────────
+
+fn btree_remove_ref(fd, root, key, ref) {
+    var leaf_pg = _bt_find_leaf(fd, root, key);
+    var buf = fl_alloc(PAGE_SIZE);
+    page_read(fd, leaf_pg, buf);
+    var nk = load64(buf + BT_NKEYS);
+    var modified = 0;
+    for (var i = 0; i < nk; i = i + 1) {
+        if (load64(buf + BT_KEYS + i * 8) == key) {
+            if (load64(buf + BT_VALS + i * 8) == ref) {
+                store64(buf + BT_VALS + i * 8, 0 - 1);
+                modified = 1;
+            }
+        }
+    }
+    if (modified != 0) { page_write(fd, leaf_pg, buf); }
+    fl_free(buf);
+    return 0;
+}

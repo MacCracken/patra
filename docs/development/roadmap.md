@@ -26,7 +26,6 @@
 | # | Item | Notes |
 |---|------|-------|
 | 1 | B-tree index maintenance on DELETE/UPDATE | Stale refs filtered by verification — should remove/update entries |
-| 2 | B-tree range scan in indexed SELECT | Currently only equality uses index; >, <, >=, <= should too |
 
 ### Features
 

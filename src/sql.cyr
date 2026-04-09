@@ -31,12 +31,14 @@ enum TokType {
     TK_ORDER = 25;
     TK_BY = 26;
     TK_LIMIT = 27;
-    TK_EQ = 28;
-    TK_NEQ = 29;
-    TK_LT = 30;
-    TK_GT = 31;
-    TK_LTE = 32;
-    TK_GTE = 33;
+    TK_ASC = 28;
+    TK_DESC = 29;
+    TK_EQ = 30;
+    TK_NEQ = 31;
+    TK_LT = 32;
+    TK_GT = 33;
+    TK_LTE = 34;
+    TK_GTE = 35;
 }
 
 enum StmtType {
@@ -65,6 +67,7 @@ enum PROff {
     PR_ORDERBY_LEN = 56;
     PR_LIMIT = 64;
     PR_ITEMS = 72;
+    PR_ORDERBY_DIR = 1016;
     PR_WHERE = 1024;
 }
 
@@ -196,6 +199,8 @@ fn _classify_ident(ptr, len) {
     if (_kw_eq(ptr, len, "ORDER"))  { return TK_ORDER; }
     if (_kw_eq(ptr, len, "BY"))     { return TK_BY; }
     if (_kw_eq(ptr, len, "LIMIT"))  { return TK_LIMIT; }
+    if (_kw_eq(ptr, len, "ASC"))    { return TK_ASC; }
+    if (_kw_eq(ptr, len, "DESC"))   { return TK_DESC; }
     return TK_IDENT;
 }
 
@@ -520,6 +525,13 @@ fn _parse_select() {
         store64(_sql_pr + PR_ORDERBY_PTR, _tok_ptr(pos));
         store64(_sql_pr + PR_ORDERBY_LEN, _tok_len(pos));
         pos = pos + 1;
+        # Optional ASC/DESC
+        if (_tok_type(pos) == TK_DESC) {
+            store64(_sql_pr + PR_ORDERBY_DIR, 1);
+            pos = pos + 1;
+        } elif (_tok_type(pos) == TK_ASC) {
+            pos = pos + 1;
+        }
     }
 
     # Optional LIMIT
