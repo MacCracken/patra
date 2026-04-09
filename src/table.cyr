@@ -1,0 +1,132 @@
+# table.cyr — table metadata, schema, create, insert, scan
+
+fn _tbl_entry(hdr, idx) {
+    return hdr + HDR_TBLDIR + idx * TBL_ENTRY_SZ;
+}
+
+fn _tbl_name_eq(entry, name, nlen) {
+    var elen = strlen(entry + TBL_NAME);
+    if (elen != nlen) { return 0; }
+    return memeq(entry + TBL_NAME, name, nlen);
+}
+
+# Find table by name, returns index or -1
+fn tbl_find(hdr, name, nlen) {
+    var count = load64(hdr + HDR_TBLCOUNT);
+    for (var i = 0; i < count; i = i + 1) {
+        if (_tbl_name_eq(_tbl_entry(hdr, i), name, nlen)) {
+            return i;
+        }
+    }
+    return 0 - 1;
+}
+
+# col_names: array of (ptr, len) pairs — each 16 bytes
+# col_types: array of i64 — each 8 bytes
+fn tbl_create(fd, hdr, name, nlen, col_names, col_types, ncols) {
+    if (load64(hdr + HDR_TBLCOUNT) >= MAX_TABLES) { return PATRA_ERR_FULL; }
+    if (ncols > MAX_COLS) { return PATRA_ERR_COLCOUNT; }
+    if (tbl_find(hdr, name, nlen) >= 0) { return PATRA_ERR_EXISTS; }
+
+    # Write schema page
+    var spg = page_alloc(fd, hdr);
+    var sbuf = fl_alloc(PAGE_SIZE);
+    memset(sbuf, 0, PAGE_SIZE);
+    store64(sbuf + SCH_NCOLS, ncols);
+
+    for (var i = 0; i < ncols; i = i + 1) {
+        var soff = SCH_START + i * SCH_ENTRY_SZ;
+        var np = load64(col_names + i * 16);
+        var nl = load64(col_names + i * 16 + 8);
+        var cn = nl;
+        if (cn > SCH_CNAME_MAX - 1) { cn = SCH_CNAME_MAX - 1; }
+        memcpy(sbuf + soff + SCH_CNAME, np, cn);
+        store8(sbuf + soff + SCH_CNAME + cn, 0);
+        store64(sbuf + soff + SCH_CTYPE, load64(col_types + i * 8));
+    }
+    page_write(fd, spg, sbuf);
+    fl_free(sbuf);
+
+    # Allocate first data page
+    var dpg = page_alloc(fd, hdr);
+    var dbuf = fl_alloc(PAGE_SIZE);
+    page_init_data(dbuf);
+    page_write(fd, dpg, dbuf);
+    fl_free(dbuf);
+
+    # Write table directory entry
+    var idx = load64(hdr + HDR_TBLCOUNT);
+    var entry = _tbl_entry(hdr, idx);
+    memset(entry, 0, TBL_ENTRY_SZ);
+    var nn = nlen;
+    if (nn > TBL_NAME_MAX - 1) { nn = TBL_NAME_MAX - 1; }
+    memcpy(entry + TBL_NAME, name, nn);
+    store8(entry + TBL_NAME + nn, 0);
+    store64(entry + TBL_NCOLS, ncols);
+    store64(entry + TBL_ROOT, dpg);
+    store64(entry + TBL_NROWS, 0);
+    store64(entry + TBL_SCHEMA, spg);
+    store64(hdr + HDR_TBLCOUNT, idx + 1);
+
+    return PATRA_OK;
+}
+
+# Insert a row into the table at index idx
+fn tbl_insert(fd, hdr, idx, row_data, row_sz) {
+    var entry = _tbl_entry(hdr, idx);
+    var cur = load64(entry + TBL_ROOT);
+    var buf = fl_alloc(PAGE_SIZE);
+
+    # Walk to last data page
+    page_read(fd, cur, buf);
+    while (load64(buf + DP_NEXT) != 0) {
+        cur = load64(buf + DP_NEXT);
+        page_read(fd, cur, buf);
+    }
+
+    var nrows = load64(buf + DP_NROWS);
+    var used = DP_DATA + nrows * row_sz;
+
+    if (used + row_sz <= PAGE_SIZE) {
+        # Fits in current page
+        memcpy(buf + used, row_data, row_sz);
+        store64(buf + DP_NROWS, nrows + 1);
+        page_write(fd, cur, buf);
+    } else {
+        # Page full — allocate new page, link it
+        var npg = page_alloc(fd, hdr);
+        store64(buf + DP_NEXT, npg);
+        page_write(fd, cur, buf);
+
+        page_init_data(buf);
+        memcpy(buf + DP_DATA, row_data, row_sz);
+        store64(buf + DP_NROWS, 1);
+        page_write(fd, npg, buf);
+    }
+
+    var rc = load64(entry + TBL_NROWS);
+    store64(entry + TBL_NROWS, rc + 1);
+
+    fl_free(buf);
+    return PATRA_OK;
+}
+
+# Scan all rows into pre-allocated output buffer. Returns rows copied.
+fn tbl_scan(fd, hdr, idx, out, row_sz) {
+    var entry = _tbl_entry(hdr, idx);
+    var cur = load64(entry + TBL_ROOT);
+    var buf = fl_alloc(PAGE_SIZE);
+    var written = 0;
+
+    while (cur != 0) {
+        page_read(fd, cur, buf);
+        var nrows = load64(buf + DP_NROWS);
+        var bytes = nrows * row_sz;
+        memcpy(out + written, buf + DP_DATA, bytes);
+        written = written + bytes;
+        cur = load64(buf + DP_NEXT);
+    }
+
+    fl_free(buf);
+    return written / row_sz;
+}

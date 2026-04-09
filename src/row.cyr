@@ -1,0 +1,47 @@
+# row.cyr — row encoding/decoding (i64 + fixed-length strings)
+
+fn row_col_size(ctype) {
+    if (ctype == COL_INT) { return COL_INT_SZ; }
+    return COL_STR_SZ;
+}
+
+# Compute total row size from a schema page buffer
+fn row_compute_size(schema, ncols) {
+    var sz = 0;
+    for (var i = 0; i < ncols; i = i + 1) {
+        var ct = load64(schema + SCH_START + i * SCH_ENTRY_SZ + SCH_CTYPE);
+        sz = sz + row_col_size(ct);
+    }
+    return sz;
+}
+
+# Byte offset of column col_idx within a row
+fn row_field_offset(schema, ncols, col) {
+    var off = 0;
+    for (var i = 0; i < col; i = i + 1) {
+        var ct = load64(schema + SCH_START + i * SCH_ENTRY_SZ + SCH_CTYPE);
+        off = off + row_col_size(ct);
+    }
+    return off;
+}
+
+fn row_write_int(row, off, val) {
+    store64(row + off, val);
+}
+
+# Write string value padded to COL_STR_SZ (64 bytes), null-terminated
+fn row_write_str(row, off, ptr, len) {
+    memset(row + off, 0, COL_STR_SZ);
+    var n = len;
+    if (n > COL_STR_SZ - 1) { n = COL_STR_SZ - 1; }
+    memcpy(row + off, ptr, n);
+}
+
+fn row_read_int(row, off) {
+    return load64(row + off);
+}
+
+# Returns pointer to the 64-byte string field (null-terminated)
+fn row_read_str(row, off) {
+    return row + off;
+}

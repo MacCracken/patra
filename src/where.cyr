@@ -1,0 +1,6 @@
+# where.cyr — WHERE clause evaluation (v0.2)
+# Stub: all rows match until WHERE is implemented.
+
+fn where_eval(row, schema, ncols, expr) {
+    return 1;
+}

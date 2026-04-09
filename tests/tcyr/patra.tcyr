@@ -1,0 +1,366 @@
+# patra.tcyr — Patra v0.1 test suite
+
+include "src/lib.cyr"
+include "lib/assert.cyr"
+
+var _tpath = "/tmp/patra_test.patra";
+
+fn cleanup() {
+    syscall(SYS_UNLINK, _tpath);
+}
+
+# ── Header ──────────────────────────────────────────────────
+
+fn test_header() {
+    test_group("header");
+    var buf = fl_alloc(PAGE_SIZE);
+    patra_hdr_init(buf);
+
+    assert_eq(load32(buf + HDR_MAGIC), PATRA_MAGIC, "magic");
+    assert_eq(load32(buf + HDR_VER), PATRA_VER, "version");
+    assert_eq(load64(buf + HDR_PGCOUNT), 0, "page count");
+    assert_eq(load64(buf + HDR_TBLCOUNT), 0, "table count");
+    assert_eq(patra_hdr_verify(buf), PATRA_OK, "verify ok");
+
+    store32(buf + HDR_MAGIC, 0);
+    assert_eq(patra_hdr_verify(buf), PATRA_ERR_MAGIC, "verify bad magic");
+    fl_free(buf);
+}
+
+# ── File create ─────────────────────────────────────────────
+
+fn test_file_create() {
+    test_group("file create");
+    cleanup();
+    var fd = _pt_file_create(_tpath);
+    assert(fd >= 0, "create fd");
+
+    var buf = fl_alloc(PAGE_SIZE);
+    patra_hdr_read(fd, buf);
+    assert_eq(patra_hdr_verify(buf), PATRA_OK, "header valid");
+    fl_free(buf);
+    syscall(SYS_CLOSE, fd);
+}
+
+# ── Page alloc / free ───────────────────────────────────────
+
+fn test_page_alloc() {
+    test_group("page alloc");
+    cleanup();
+    var fd = _pt_file_create(_tpath);
+    var hdr = fl_alloc(PAGE_SIZE);
+    patra_hdr_read(fd, hdr);
+
+    var p0 = page_alloc(fd, hdr);
+    assert_eq(p0, 0, "first page 0");
+    assert_eq(load64(hdr + HDR_PGCOUNT), 1, "pgcount 1");
+
+    var p1 = page_alloc(fd, hdr);
+    assert_eq(p1, 1, "second page 1");
+    assert_eq(load64(hdr + HDR_PGCOUNT), 2, "pgcount 2");
+
+    # Free p0 and reuse
+    page_free(fd, hdr, p0);
+    var p2 = page_alloc(fd, hdr);
+    assert_eq(p2, 0, "reused freed page");
+
+    fl_free(hdr);
+    syscall(SYS_CLOSE, fd);
+}
+
+# ── Page read / write ──────────────────────────────────────
+
+fn test_page_rw() {
+    test_group("page read write");
+    cleanup();
+    var fd = _pt_file_create(_tpath);
+    var hdr = fl_alloc(PAGE_SIZE);
+    patra_hdr_read(fd, hdr);
+
+    var pg = page_alloc(fd, hdr);
+    var buf = fl_alloc(PAGE_SIZE);
+    memset(buf, 0, PAGE_SIZE);
+    store64(buf, 42);
+    store64(buf + 8, 99);
+    page_write(fd, pg, buf);
+
+    memset(buf, 0, PAGE_SIZE);
+    page_read(fd, pg, buf);
+    assert_eq(load64(buf), 42, "read 42");
+    assert_eq(load64(buf + 8), 99, "read 99");
+
+    fl_free(buf);
+    fl_free(hdr);
+    syscall(SYS_CLOSE, fd);
+}
+
+# ── Row encoding ────────────────────────────────────────────
+
+fn test_row_encoding() {
+    test_group("row encoding");
+
+    # Fake schema: INT, STR, INT
+    var schema = fl_alloc(PAGE_SIZE);
+    memset(schema, 0, PAGE_SIZE);
+    store64(schema + SCH_NCOLS, 3);
+    store64(schema + SCH_START + 0 * SCH_ENTRY_SZ + SCH_CTYPE, COL_INT);
+    store64(schema + SCH_START + 1 * SCH_ENTRY_SZ + SCH_CTYPE, COL_STR);
+    store64(schema + SCH_START + 2 * SCH_ENTRY_SZ + SCH_CTYPE, COL_INT);
+
+    var rsz = row_compute_size(schema, 3);
+    assert_eq(rsz, 80, "row size 8+64+8");
+
+    assert_eq(row_field_offset(schema, 3, 0), 0, "off col 0");
+    assert_eq(row_field_offset(schema, 3, 1), 8, "off col 1");
+    assert_eq(row_field_offset(schema, 3, 2), 72, "off col 2");
+
+    var row = fl_alloc(rsz);
+    memset(row, 0, rsz);
+    row_write_int(row, 0, 42);
+    row_write_str(row, 8, "hello", 5);
+    row_write_int(row, 72, 99);
+
+    assert_eq(row_read_int(row, 0), 42, "int col 0");
+    assert_eq(row_read_int(row, 72), 99, "int col 2");
+    assert_streq(row_read_str(row, 8), "hello", "str col 1");
+
+    fl_free(row);
+    fl_free(schema);
+}
+
+# ── SQL tokenizer ───────────────────────────────────────────
+
+fn test_tokenize() {
+    test_group("tokenize");
+
+    sql_tokenize("CREATE TABLE users (id INT, name STR)");
+    assert_eq(_tok_type(0), TK_CREATE, "CREATE");
+    assert_eq(_tok_type(1), TK_TABLE, "TABLE");
+    assert_eq(_tok_type(2), TK_IDENT, "ident users");
+    assert_eq(_tok_type(3), TK_LPAREN, "(");
+    assert_eq(_tok_type(4), TK_IDENT, "ident id");
+    assert_eq(_tok_type(5), TK_KW_INT, "INT");
+    assert_eq(_tok_type(6), TK_COMMA, ",");
+    assert_eq(_tok_type(7), TK_IDENT, "ident name");
+    assert_eq(_tok_type(8), TK_KW_STR, "STR");
+    assert_eq(_tok_type(9), TK_RPAREN, ")");
+    assert_eq(_sql_ntoks, 10, "10 tokens");
+
+    sql_tokenize("INSERT INTO t VALUES (42, 'hello')");
+    assert_eq(_tok_type(0), TK_INSERT, "INSERT");
+    assert_eq(_tok_type(3), TK_VALUES, "VALUES");
+    assert_eq(_tok_type(5), TK_INT_LIT, "int lit");
+    assert_eq(_tok_type(7), TK_STR_LIT, "str lit");
+
+    sql_tokenize("SELECT * FROM t");
+    assert_eq(_tok_type(0), TK_SELECT, "SELECT");
+    assert_eq(_tok_type(1), TK_STAR, "*");
+    assert_eq(_tok_type(2), TK_FROM, "FROM");
+    assert_eq(_tok_type(3), TK_IDENT, "ident t");
+}
+
+# ── SQL parser ──────────────────────────────────────────────
+
+fn test_parse_create() {
+    test_group("parse create");
+    sql_tokenize("CREATE TABLE users (id INT, name STR)");
+    var r = sql_parse();
+    assert_eq(r, PATRA_OK, "parse ok");
+    assert_eq(load64(_sql_pr + PR_STMT), STMT_CREATE, "stmt create");
+    assert_eq(load64(_sql_pr + PR_COUNT), 2, "2 columns");
+}
+
+fn test_parse_insert() {
+    test_group("parse insert");
+    sql_tokenize("INSERT INTO users VALUES (1, 'alice')");
+    var r = sql_parse();
+    assert_eq(r, PATRA_OK, "parse ok");
+    assert_eq(load64(_sql_pr + PR_STMT), STMT_INSERT, "stmt insert");
+    assert_eq(load64(_sql_pr + PR_COUNT), 2, "2 values");
+}
+
+fn test_parse_select() {
+    test_group("parse select");
+    sql_tokenize("SELECT * FROM users");
+    var r = sql_parse();
+    assert_eq(r, PATRA_OK, "parse ok");
+    assert_eq(load64(_sql_pr + PR_STMT), STMT_SELECT, "stmt select");
+}
+
+fn test_parse_case_insensitive() {
+    test_group("case insensitive");
+    sql_tokenize("create table Foo (id int, name str)");
+    var r = sql_parse();
+    assert_eq(r, PATRA_OK, "lowercase sql");
+    assert_eq(load64(_sql_pr + PR_STMT), STMT_CREATE, "create stmt");
+    assert_eq(load64(_sql_pr + PR_COUNT), 2, "2 cols");
+}
+
+fn test_parse_bad_sql() {
+    test_group("bad sql");
+    sql_tokenize("BANANA");
+    var r = sql_parse();
+    assert_eq(r, PATRA_ERR_SYNTAX, "unknown stmt");
+
+    sql_tokenize("CREATE");
+    r = sql_parse();
+    assert_eq(r, PATRA_ERR_SYNTAX, "incomplete create");
+
+    sql_tokenize("SELECT id FROM t");
+    r = sql_parse();
+    assert_eq(r, PATRA_ERR_SYNTAX, "no star in select");
+}
+
+# ── Full integration ────────────────────────────────────────
+
+fn test_create_insert_select() {
+    test_group("create insert select");
+    cleanup();
+    var db = patra_open(_tpath);
+    assert(db != 0, "open db");
+
+    var r = patra_exec(db, "CREATE TABLE t (id INT, val STR)");
+    assert_eq(r, PATRA_OK, "create table");
+
+    r = patra_exec(db, "INSERT INTO t VALUES (1, 'aaa')");
+    assert_eq(r, PATRA_OK, "insert 1");
+
+    r = patra_exec(db, "INSERT INTO t VALUES (2, 'bbb')");
+    assert_eq(r, PATRA_OK, "insert 2");
+
+    r = patra_exec(db, "INSERT INTO t VALUES (3, 'ccc')");
+    assert_eq(r, PATRA_OK, "insert 3");
+
+    var rs = patra_query(db, "SELECT * FROM t");
+    assert(rs != 0, "query ok");
+    assert_eq(patra_result_count(rs), 3, "3 rows");
+    assert_eq(patra_result_cols(rs), 2, "2 cols");
+
+    assert_eq(patra_result_get_int(rs, 0, 0), 1, "row0 id");
+    assert_streq(patra_result_get_str(rs, 0, 1), "aaa", "row0 val");
+    assert_eq(patra_result_get_int(rs, 1, 0), 2, "row1 id");
+    assert_streq(patra_result_get_str(rs, 1, 1), "bbb", "row1 val");
+    assert_eq(patra_result_get_int(rs, 2, 0), 3, "row2 id");
+    assert_streq(patra_result_get_str(rs, 2, 1), "ccc", "row2 val");
+
+    assert_eq(patra_result_col_type(rs, 0), COL_INT, "col0 type int");
+    assert_eq(patra_result_col_type(rs, 1), COL_STR, "col1 type str");
+    assert_streq(patra_result_col_name(rs, 0), "id", "col0 name");
+    assert_streq(patra_result_col_name(rs, 1), "val", "col1 name");
+
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+# ── Error cases ─────────────────────────────────────────────
+
+fn test_duplicate_table() {
+    test_group("duplicate table");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE dup (x INT)");
+    var r = patra_exec(db, "CREATE TABLE dup (x INT)");
+    assert_eq(r, PATRA_ERR_EXISTS, "duplicate blocked");
+    patra_close(db);
+}
+
+fn test_insert_wrong_count() {
+    test_group("insert wrong count");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE cnt (a INT, b INT)");
+    var r = patra_exec(db, "INSERT INTO cnt VALUES (1)");
+    assert_eq(r, PATRA_ERR_COLCOUNT, "too few");
+    r = patra_exec(db, "INSERT INTO cnt VALUES (1, 2, 3)");
+    assert_eq(r, PATRA_ERR_COLCOUNT, "too many");
+    patra_close(db);
+}
+
+fn test_insert_wrong_type() {
+    test_group("insert wrong type");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE typ (id INT, name STR)");
+    var r = patra_exec(db, "INSERT INTO typ VALUES ('bad', 42)");
+    assert_eq(r, PATRA_ERR_TYPE, "type mismatch");
+    patra_close(db);
+}
+
+fn test_table_not_found() {
+    test_group("table not found");
+    cleanup();
+    var db = patra_open(_tpath);
+    var r = patra_exec(db, "INSERT INTO ghost VALUES (1)");
+    assert_eq(r, PATRA_ERR_NOTFOUND, "insert missing table");
+    var rs = patra_query(db, "SELECT * FROM ghost");
+    assert_eq(rs, 0, "query missing table");
+    patra_close(db);
+}
+
+fn test_empty_table() {
+    test_group("empty table");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE empty (x INT)");
+    var rs = patra_query(db, "SELECT * FROM empty");
+    assert(rs != 0, "query empty ok");
+    assert_eq(patra_result_count(rs), 0, "0 rows");
+    assert_eq(patra_result_cols(rs), 1, "1 col");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_multiple_tables() {
+    test_group("multiple tables");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE a (x INT)");
+    patra_exec(db, "CREATE TABLE b (y STR)");
+    patra_exec(db, "INSERT INTO a VALUES (42)");
+    patra_exec(db, "INSERT INTO b VALUES ('hello')");
+
+    var rs1 = patra_query(db, "SELECT * FROM a");
+    assert(rs1 != 0, "query a");
+    assert_eq(patra_result_get_int(rs1, 0, 0), 42, "a.x");
+    patra_result_free(rs1);
+
+    var rs2 = patra_query(db, "SELECT * FROM b");
+    assert(rs2 != 0, "query b");
+    assert_streq(patra_result_get_str(rs2, 0, 0), "hello", "b.y");
+    patra_result_free(rs2);
+
+    patra_close(db);
+}
+
+# ── Runner ──────────────────────────────────────────────────
+
+fn main() {
+    alloc_init();
+    fl_init();
+    patra_init();
+
+    test_header();
+    test_file_create();
+    test_page_alloc();
+    test_page_rw();
+    test_row_encoding();
+    test_tokenize();
+    test_parse_create();
+    test_parse_insert();
+    test_parse_select();
+    test_parse_case_insensitive();
+    test_parse_bad_sql();
+    test_create_insert_select();
+    test_duplicate_table();
+    test_insert_wrong_count();
+    test_insert_wrong_type();
+    test_table_not_found();
+    test_empty_table();
+    test_multiple_tables();
+
+    cleanup();
+    return assert_summary();
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

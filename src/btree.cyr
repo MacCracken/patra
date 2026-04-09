@@ -1,0 +1,4 @@
+# btree.cyr — B-tree index (v0.3)
+# Stub: v0.1 uses linear page scan. B-tree indexed lookups come in v0.3.
+
+fn btree_stub() { return 0; }

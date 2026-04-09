@@ -1,0 +1,318 @@
+# sql.cyr — SQL tokenizer and parser
+
+# ── Token types ─────────────────────────────────────────────
+
+enum TokType {
+    TK_EOF = 0;
+    TK_ERR = 1;
+    TK_IDENT = 2;
+    TK_INT_LIT = 3;
+    TK_STR_LIT = 4;
+    TK_LPAREN = 5;
+    TK_RPAREN = 6;
+    TK_COMMA = 7;
+    TK_STAR = 8;
+    TK_SEMI = 9;
+    TK_CREATE = 10;
+    TK_TABLE = 11;
+    TK_INSERT = 12;
+    TK_INTO = 13;
+    TK_VALUES = 14;
+    TK_SELECT = 15;
+    TK_FROM = 16;
+    TK_KW_INT = 17;
+    TK_KW_STR = 18;
+}
+
+enum StmtType { STMT_NONE = 0; STMT_CREATE = 1; STMT_INSERT = 2; STMT_SELECT = 3; }
+
+# Token layout: 24 bytes (type, ptr, len)
+enum TokOff { TOK_TYPE = 0; TOK_PTR = 8; TOK_LEN = 16; TOK_SZ = 24; }
+enum TokLim { MAX_TOKENS = 128; }
+
+# Parse result layout
+enum PROff { PR_STMT = 0; PR_TNAME = 8; PR_TNLEN = 16; PR_COUNT = 24; PR_ITEMS = 32; }
+
+# CREATE column item: 24 bytes (name_ptr, name_len, col_type)
+enum CROff { CR_NPTR = 0; CR_NLEN = 8; CR_TYPE = 16; CR_SZ = 24; }
+
+# INSERT value item: 32 bytes (val_type, int_val, str_ptr, str_len)
+enum IROff { IR_TYPE = 0; IR_IVAL = 8; IR_SPTR = 16; IR_SLEN = 24; IR_SZ = 32; }
+
+# ── State ───────────────────────────────────────────────────
+
+var _sql_toks = 0;
+var _sql_ntoks = 0;
+var _sql_pr = 0;
+
+fn _sql_init() {
+    _sql_toks = fl_alloc(MAX_TOKENS * TOK_SZ);
+    _sql_pr = fl_alloc(4096);
+}
+
+# ── Token access ────────────────────────────────────────────
+
+fn _tok_set(i, typ, ptr, len) {
+    var base = _sql_toks + i * TOK_SZ;
+    store64(base + TOK_TYPE, typ);
+    store64(base + TOK_PTR, ptr);
+    store64(base + TOK_LEN, len);
+}
+
+fn _tok_type(i) { return load64(_sql_toks + i * TOK_SZ + TOK_TYPE); }
+fn _tok_ptr(i)  { return load64(_sql_toks + i * TOK_SZ + TOK_PTR); }
+fn _tok_len(i)  { return load64(_sql_toks + i * TOK_SZ + TOK_LEN); }
+
+# ── Character classification ────────────────────────────────
+
+fn _to_upper(c) {
+    if (c >= 97) { if (c <= 122) { return c - 32; } }
+    return c;
+}
+
+fn _is_alpha(c) {
+    if (c >= 65) { if (c <= 90)  { return 1; } }
+    if (c >= 97) { if (c <= 122) { return 1; } }
+    if (c == 95) { return 1; }
+    return 0;
+}
+
+fn _is_digit(c) {
+    if (c >= 48) { if (c <= 57) { return 1; } }
+    return 0;
+}
+
+fn _is_alnum(c) {
+    if (_is_alpha(c)) { return 1; }
+    return _is_digit(c);
+}
+
+fn _is_ws(c) {
+    if (c == 32) { return 1; }
+    if (c == 9)  { return 1; }
+    if (c == 10) { return 1; }
+    if (c == 13) { return 1; }
+    return 0;
+}
+
+# ── Keyword matching (case-insensitive) ─────────────────────
+
+fn _kw_eq(ptr, len, kw) {
+    var kl = strlen(kw);
+    if (len != kl) { return 0; }
+    for (var i = 0; i < len; i = i + 1) {
+        if (_to_upper(load8(ptr + i)) != load8(kw + i)) { return 0; }
+    }
+    return 1;
+}
+
+fn _classify_ident(ptr, len) {
+    if (_kw_eq(ptr, len, "CREATE")) { return TK_CREATE; }
+    if (_kw_eq(ptr, len, "TABLE"))  { return TK_TABLE; }
+    if (_kw_eq(ptr, len, "INSERT")) { return TK_INSERT; }
+    if (_kw_eq(ptr, len, "INTO"))   { return TK_INTO; }
+    if (_kw_eq(ptr, len, "VALUES")) { return TK_VALUES; }
+    if (_kw_eq(ptr, len, "SELECT")) { return TK_SELECT; }
+    if (_kw_eq(ptr, len, "FROM"))   { return TK_FROM; }
+    if (_kw_eq(ptr, len, "INT"))    { return TK_KW_INT; }
+    if (_kw_eq(ptr, len, "STR"))    { return TK_KW_STR; }
+    return TK_IDENT;
+}
+
+# ── Tokenizer ───────────────────────────────────────────────
+
+fn sql_tokenize(input) {
+    var pos = 0;
+    var n = 0;
+    var slen = strlen(input);
+
+    while (pos < slen) {
+        if (n >= MAX_TOKENS - 1) { break; }
+        var c = load8(input + pos);
+
+        # Skip whitespace
+        if (_is_ws(c)) { pos = pos + 1; continue; }
+
+        # Identifier or keyword
+        if (_is_alpha(c)) {
+            var start = pos;
+            while (pos < slen) {
+                if (_is_alnum(load8(input + pos)) == 0) { break; }
+                pos = pos + 1;
+            }
+            var len = pos - start;
+            _tok_set(n, _classify_ident(input + start, len), input + start, len);
+            n = n + 1;
+            continue;
+        }
+
+        # Integer literal
+        if (_is_digit(c)) {
+            var start = pos;
+            while (pos < slen) {
+                if (_is_digit(load8(input + pos)) == 0) { break; }
+                pos = pos + 1;
+            }
+            _tok_set(n, TK_INT_LIT, input + start, pos - start);
+            n = n + 1;
+            continue;
+        }
+
+        # String literal: 'content'
+        if (c == 39) {
+            pos = pos + 1;
+            var start = pos;
+            while (pos < slen) {
+                if (load8(input + pos) == 39) { break; }
+                pos = pos + 1;
+            }
+            _tok_set(n, TK_STR_LIT, input + start, pos - start);
+            if (pos < slen) { pos = pos + 1; }
+            n = n + 1;
+            continue;
+        }
+
+        # Single-character tokens
+        if (c == 40) { _tok_set(n, TK_LPAREN, input + pos, 1); }
+        elif (c == 41) { _tok_set(n, TK_RPAREN, input + pos, 1); }
+        elif (c == 44) { _tok_set(n, TK_COMMA, input + pos, 1); }
+        elif (c == 42) { _tok_set(n, TK_STAR, input + pos, 1); }
+        elif (c == 59) { _tok_set(n, TK_SEMI, input + pos, 1); }
+        else { _tok_set(n, TK_ERR, input + pos, 1); }
+        n = n + 1;
+        pos = pos + 1;
+    }
+
+    _tok_set(n, TK_EOF, 0, 0);
+    _sql_ntoks = n;
+    return n;
+}
+
+# ── Helpers ─────────────────────────────────────────────────
+
+fn _pt_atoi(ptr, len) {
+    var r = 0;
+    for (var i = 0; i < len; i = i + 1) {
+        r = r * 10 + (load8(ptr + i) - 48);
+    }
+    return r;
+}
+
+# ── Parsers ─────────────────────────────────────────────────
+
+fn _parse_create() {
+    # CREATE TABLE name ( col1 TYPE, col2 TYPE, ... )
+    var pos = 0;
+    if (_tok_type(pos) != TK_CREATE) { return PATRA_ERR_SYNTAX; }
+    pos = pos + 1;
+    if (_tok_type(pos) != TK_TABLE)  { return PATRA_ERR_SYNTAX; }
+    pos = pos + 1;
+    if (_tok_type(pos) != TK_IDENT)  { return PATRA_ERR_SYNTAX; }
+
+    store64(_sql_pr + PR_STMT, STMT_CREATE);
+    store64(_sql_pr + PR_TNAME, _tok_ptr(pos));
+    store64(_sql_pr + PR_TNLEN, _tok_len(pos));
+    pos = pos + 1;
+
+    if (_tok_type(pos) != TK_LPAREN) { return PATRA_ERR_SYNTAX; }
+    pos = pos + 1;
+
+    var ncols = 0;
+    while (pos <= _sql_ntoks) {
+        var tt = _tok_type(pos);
+        if (tt == TK_EOF)    { return PATRA_ERR_SYNTAX; }
+        if (tt == TK_RPAREN) { pos = pos + 1; break; }
+        if (ncols >= MAX_COLS) { return PATRA_ERR_COLCOUNT; }
+
+        if (_tok_type(pos) != TK_IDENT) { return PATRA_ERR_SYNTAX; }
+        var item = _sql_pr + PR_ITEMS + ncols * CR_SZ;
+        store64(item + CR_NPTR, _tok_ptr(pos));
+        store64(item + CR_NLEN, _tok_len(pos));
+        pos = pos + 1;
+
+        tt = _tok_type(pos);
+        if (tt == TK_KW_INT)      { store64(item + CR_TYPE, COL_INT); }
+        elif (tt == TK_KW_STR)    { store64(item + CR_TYPE, COL_STR); }
+        else { return PATRA_ERR_SYNTAX; }
+        pos = pos + 1;
+
+        if (_tok_type(pos) == TK_COMMA) { pos = pos + 1; }
+        ncols = ncols + 1;
+    }
+
+    store64(_sql_pr + PR_COUNT, ncols);
+    return PATRA_OK;
+}
+
+fn _parse_insert() {
+    # INSERT INTO name VALUES ( val1, val2, ... )
+    var pos = 0;
+    if (_tok_type(pos) != TK_INSERT) { return PATRA_ERR_SYNTAX; }
+    pos = pos + 1;
+    if (_tok_type(pos) != TK_INTO)   { return PATRA_ERR_SYNTAX; }
+    pos = pos + 1;
+    if (_tok_type(pos) != TK_IDENT)  { return PATRA_ERR_SYNTAX; }
+
+    store64(_sql_pr + PR_STMT, STMT_INSERT);
+    store64(_sql_pr + PR_TNAME, _tok_ptr(pos));
+    store64(_sql_pr + PR_TNLEN, _tok_len(pos));
+    pos = pos + 1;
+
+    if (_tok_type(pos) != TK_VALUES) { return PATRA_ERR_SYNTAX; }
+    pos = pos + 1;
+    if (_tok_type(pos) != TK_LPAREN) { return PATRA_ERR_SYNTAX; }
+    pos = pos + 1;
+
+    var nvals = 0;
+    while (pos <= _sql_ntoks) {
+        var tt = _tok_type(pos);
+        if (tt == TK_EOF)    { return PATRA_ERR_SYNTAX; }
+        if (tt == TK_RPAREN) { pos = pos + 1; break; }
+
+        var item = _sql_pr + PR_ITEMS + nvals * IR_SZ;
+
+        if (tt == TK_INT_LIT) {
+            store64(item + IR_TYPE, COL_INT);
+            store64(item + IR_IVAL, _pt_atoi(_tok_ptr(pos), _tok_len(pos)));
+        } elif (tt == TK_STR_LIT) {
+            store64(item + IR_TYPE, COL_STR);
+            store64(item + IR_SPTR, _tok_ptr(pos));
+            store64(item + IR_SLEN, _tok_len(pos));
+        } else {
+            return PATRA_ERR_SYNTAX;
+        }
+        pos = pos + 1;
+
+        if (_tok_type(pos) == TK_COMMA) { pos = pos + 1; }
+        nvals = nvals + 1;
+    }
+
+    store64(_sql_pr + PR_COUNT, nvals);
+    return PATRA_OK;
+}
+
+fn _parse_select() {
+    # SELECT * FROM name
+    var pos = 0;
+    if (_tok_type(pos) != TK_SELECT) { return PATRA_ERR_SYNTAX; }
+    pos = pos + 1;
+    if (_tok_type(pos) != TK_STAR)   { return PATRA_ERR_SYNTAX; }
+    pos = pos + 1;
+    if (_tok_type(pos) != TK_FROM)   { return PATRA_ERR_SYNTAX; }
+    pos = pos + 1;
+    if (_tok_type(pos) != TK_IDENT)  { return PATRA_ERR_SYNTAX; }
+
+    store64(_sql_pr + PR_STMT, STMT_SELECT);
+    store64(_sql_pr + PR_TNAME, _tok_ptr(pos));
+    store64(_sql_pr + PR_TNLEN, _tok_len(pos));
+    return PATRA_OK;
+}
+
+fn sql_parse() {
+    memset(_sql_pr, 0, 4096);
+    var tt = _tok_type(0);
+    if (tt == TK_CREATE) { return _parse_create(); }
+    if (tt == TK_INSERT) { return _parse_insert(); }
+    if (tt == TK_SELECT) { return _parse_select(); }
+    return PATRA_ERR_SYNTAX;
+}

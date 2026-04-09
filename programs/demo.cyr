@@ -1,0 +1,69 @@
+# demo.cyr — Patra usage demonstration
+#
+# Build:  cyrius build programs/demo.cyr
+# Run:    ./build/demo
+
+include "src/lib.cyr"
+
+fn main() {
+    alloc_init();
+    fl_init();
+    patra_init();
+
+    var db = patra_open("demo.patra");
+    if (db == 0) { println("failed to open db"); return 1; }
+
+    # Create table
+    var r = patra_exec(db, "CREATE TABLE users (id INT, name STR, age INT)");
+    if (r != PATRA_OK) {
+        if (r != PATRA_ERR_EXISTS) {
+            println("create table failed");
+            patra_close(db);
+            return 1;
+        }
+    }
+
+    # Insert rows
+    patra_exec(db, "INSERT INTO users VALUES (1, 'alice', 30)");
+    patra_exec(db, "INSERT INTO users VALUES (2, 'bob', 25)");
+    patra_exec(db, "INSERT INTO users VALUES (3, 'carol', 35)");
+
+    # Query
+    var rs = patra_query(db, "SELECT * FROM users");
+    if (rs == 0) { println("query failed"); patra_close(db); return 1; }
+
+    var count = patra_result_count(rs);
+    var ncols = patra_result_cols(rs);
+
+    # Print column headers
+    for (var c = 0; c < ncols; c = c + 1) {
+        if (c > 0) { print("  ", 2); }
+        var name = patra_result_col_name(rs, c);
+        print(name, strlen(name));
+    }
+    print("\n", 1);
+
+    # Print rows
+    for (var i = 0; i < count; i = i + 1) {
+        for (var c = 0; c < ncols; c = c + 1) {
+            if (c > 0) { print("  ", 2); }
+            if (patra_result_col_type(rs, c) == COL_INT) {
+                fmt_int(patra_result_get_int(rs, i, c));
+            } else {
+                var s = patra_result_get_str(rs, i, c);
+                print(s, strlen(s));
+            }
+        }
+        print("\n", 1);
+    }
+
+    patra_result_free(rs);
+    patra_close(db);
+
+    # Clean up
+    syscall(SYS_UNLINK, "demo.patra");
+    return 0;
+}
+
+var exit_code = main();
+syscall(SYS_EXIT, exit_code);

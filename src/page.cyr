@@ -1,0 +1,53 @@
+# page.cyr — 4KB page management (alloc, read, write, free list)
+
+fn page_offset(num) {
+    return PAGE_SIZE + num * PAGE_SIZE;
+}
+
+fn page_read(fd, num, buf) {
+    if (_pt_seek(fd, page_offset(num)) < 0) { return PATRA_ERR_IO; }
+    if (syscall(SYS_READ, fd, buf, PAGE_SIZE) != PAGE_SIZE) { return PATRA_ERR_IO; }
+    return PATRA_OK;
+}
+
+fn page_write(fd, num, buf) {
+    if (_pt_seek(fd, page_offset(num)) < 0) { return PATRA_ERR_IO; }
+    if (syscall(SYS_WRITE, fd, buf, PAGE_SIZE) != PAGE_SIZE) { return PATRA_ERR_IO; }
+    return PATRA_OK;
+}
+
+fn page_alloc(fd, hdr) {
+    # Try free list first
+    var fh = load64(hdr + HDR_FREEHEAD);
+    if (fh != 0) {
+        var buf = fl_alloc(PAGE_SIZE);
+        page_read(fd, fh, buf);
+        var next = load64(buf + FP_NEXT);
+        store64(hdr + HDR_FREEHEAD, next);
+        fl_free(buf);
+        return fh;
+    }
+    # Extend file — allocate next page number
+    var num = load64(hdr + HDR_PGCOUNT);
+    store64(hdr + HDR_PGCOUNT, num + 1);
+    var buf = fl_alloc(PAGE_SIZE);
+    memset(buf, 0, PAGE_SIZE);
+    page_write(fd, num, buf);
+    fl_free(buf);
+    return num;
+}
+
+fn page_free(fd, hdr, num) {
+    var buf = fl_alloc(PAGE_SIZE);
+    memset(buf, 0, PAGE_SIZE);
+    store64(buf + FP_TYPE, PAGE_FREE);
+    store64(buf + FP_NEXT, load64(hdr + HDR_FREEHEAD));
+    page_write(fd, num, buf);
+    store64(hdr + HDR_FREEHEAD, num);
+    fl_free(buf);
+}
+
+fn page_init_data(buf) {
+    memset(buf, 0, PAGE_SIZE);
+    store64(buf + DP_TYPE, PAGE_DATA);
+}

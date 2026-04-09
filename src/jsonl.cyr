@@ -1,0 +1,4 @@
+# jsonl.cyr — JSON Lines append-only mode (v0.4)
+# Stub: JSONL mode for libro compatibility comes in v0.4.
+
+fn jsonl_stub() { return 0; }

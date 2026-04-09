@@ -1,0 +1,134 @@
+# file.cyr — .patra file format constants, header, flock locking
+
+# ── Constants ───────────────────────────────────────────────
+
+enum PageConst { PAGE_SIZE = 4096; MAX_TABLES = 63; MAX_COLS = 32; }
+
+# Magic: "PTRA" as little-endian u32 (P=0x50 T=0x54 R=0x52 A=0x41)
+enum PatraFmt { PATRA_MAGIC = 0x41525450; PATRA_VER = 1; }
+
+enum PageType  { PAGE_FREE = 0; PAGE_DATA = 1; PAGE_SCHEMA = 2; PAGE_BTREE = 3; }
+enum ColType   { COL_INT = 0; COL_STR = 1; COL_INT_SZ = 8; COL_STR_SZ = 64; }
+
+enum PatraErr {
+    PATRA_OK = 0;
+    PATRA_ERR_IO = 1;
+    PATRA_ERR_MAGIC = 2;
+    PATRA_ERR_FULL = 3;
+    PATRA_ERR_EXISTS = 4;
+    PATRA_ERR_NOTFOUND = 5;
+    PATRA_ERR_SYNTAX = 6;
+    PATRA_ERR_PAGE = 7;
+    PATRA_ERR_ROWSZ = 8;
+    PATRA_ERR_TYPE = 9;
+    PATRA_ERR_COLCOUNT = 10;
+}
+
+# Header layout (4096 bytes total — page 0)
+enum HdrOff {
+    HDR_MAGIC = 0;
+    HDR_VER = 4;
+    HDR_PGCOUNT = 8;
+    HDR_FREEHEAD = 16;
+    HDR_TBLCOUNT = 24;
+    HDR_TBLDIR = 64;
+}
+
+# Table directory entry (64 bytes each, max 63 entries)
+enum TblOff {
+    TBL_NAME = 0;
+    TBL_NAME_MAX = 32;
+    TBL_NCOLS = 32;
+    TBL_ROOT = 40;
+    TBL_NROWS = 48;
+    TBL_SCHEMA = 56;
+    TBL_ENTRY_SZ = 64;
+}
+
+# Schema page column layout (40 bytes per column)
+enum SchOff {
+    SCH_NCOLS = 0;
+    SCH_START = 8;
+    SCH_CNAME = 0;
+    SCH_CNAME_MAX = 32;
+    SCH_CTYPE = 32;
+    SCH_ENTRY_SZ = 40;
+}
+
+# Data page layout
+enum DPOff {
+    DP_TYPE = 0;
+    DP_NROWS = 8;
+    DP_NEXT = 16;
+    DP_DATA = 24;
+}
+
+# Free page layout
+enum FPOff { FP_TYPE = 0; FP_NEXT = 8; }
+
+# flock syscall
+enum Flock { LOCK_SH = 1; LOCK_EX = 2; LOCK_UN = 8; SYS_FLOCK = 73; }
+
+# ── Low-level operations ────────────────────────────────────
+
+fn _pt_seek(fd, off) {
+    return syscall(SYS_LSEEK, fd, off, 0);
+}
+
+fn _pt_flock(fd, op) {
+    return syscall(SYS_FLOCK, fd, op);
+}
+
+fn patra_lock_ex(fd)  { return _pt_flock(fd, LOCK_EX); }
+fn patra_lock_sh(fd)  { return _pt_flock(fd, LOCK_SH); }
+fn patra_unlock(fd)   { return _pt_flock(fd, LOCK_UN); }
+
+# ── Header management ───────────────────────────────────────
+
+fn patra_hdr_init(buf) {
+    memset(buf, 0, PAGE_SIZE);
+    store32(buf + HDR_MAGIC, PATRA_MAGIC);
+    store32(buf + HDR_VER, PATRA_VER);
+}
+
+fn patra_hdr_read(fd, buf) {
+    if (_pt_seek(fd, 0) < 0) { return PATRA_ERR_IO; }
+    if (syscall(SYS_READ, fd, buf, PAGE_SIZE) != PAGE_SIZE) { return PATRA_ERR_IO; }
+    return PATRA_OK;
+}
+
+fn patra_hdr_write(fd, buf) {
+    if (_pt_seek(fd, 0) < 0) { return PATRA_ERR_IO; }
+    if (syscall(SYS_WRITE, fd, buf, PAGE_SIZE) != PAGE_SIZE) { return PATRA_ERR_IO; }
+    return PATRA_OK;
+}
+
+fn patra_hdr_verify(buf) {
+    if (load32(buf + HDR_MAGIC) != PATRA_MAGIC) { return PATRA_ERR_MAGIC; }
+    return PATRA_OK;
+}
+
+fn _pt_err(msg) {
+    syscall(SYS_WRITE, 2, msg, strlen(msg));
+    syscall(SYS_WRITE, 2, "\n", 1);
+}
+
+# ── File create / open ──────────────────────────────────────
+
+# Create new .patra file (O_RDWR | O_CREAT | O_EXCL = 194, mode 0644 = 420)
+fn _pt_file_create(path) {
+    var fd = syscall(SYS_OPEN, path, 194, 420);
+    if (fd < 0) { return 0 - 1; }
+    var buf = fl_alloc(PAGE_SIZE);
+    patra_hdr_init(buf);
+    _pt_seek(fd, 0);
+    var r = syscall(SYS_WRITE, fd, buf, PAGE_SIZE);
+    fl_free(buf);
+    if (r != PAGE_SIZE) { syscall(SYS_CLOSE, fd); return 0 - 1; }
+    return fd;
+}
+
+# Open existing .patra file (O_RDWR = 2)
+fn _pt_file_open(path) {
+    return syscall(SYS_OPEN, path, 2, 0);
+}
