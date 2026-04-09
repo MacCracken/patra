@@ -1,0 +1,24 @@
+# Build
+/build/
+/target/
+
+# Stdlib symlink
+/lib
+
+# Database files (test artifacts)
+*.patra
+*.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code
+.claude/
