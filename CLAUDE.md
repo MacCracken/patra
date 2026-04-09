@@ -7,10 +7,21 @@
 - **Type**: Shared library — database engine for the sovereign stack
 - **License**: GPL-3.0-only
 - **Language**: Cyrius (native)
-- **Version**: SemVer 0.8.0, version file at `VERSION`
+- **Version**: 0.8.0
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
-- **Recipes**: [zugot](https://github.com/MacCracken/zugot) — takumi build recipes
+
+## Goal
+
+Own the database. Zero deps. Pure Cyrius. SQL + B-tree + JSONL in a single `include`.
+
+## Current State
+
+- **Source**: 2,304 lines across 9 modules
+- **Tests**: 157 assertions, 2 fuzz harnesses, 15 benchmarks
+- **Integration**: libro audit log, vidya knowledge index
+- **Index**: B+ tree order-64, auto on first INT column (39% faster indexed SELECT)
+- **Binary**: 94KB (60KB patra overhead on 28KB stdlib baseline)
 
 ## Consumers
 
@@ -23,48 +34,87 @@
 
 ## Dependencies
 
-- **sakshi** — tracing, error handling, structured logging (via Cyrius stdlib `lib/sakshi.cyr`)
-  - Zero-alloc error codes and log output
-  - `_pt_err()` routes through `sakshi_error()`
-  - Default log level: `SK_WARN` (set in `patra_init()`)
+- **sakshi** — tracing + error handling (via Cyrius stdlib `lib/sakshi.cyr`, ships with Cyrius >= 3.2.1)
 
-No external dependencies. No libsqlite3, no FFI. Sakshi ships with Cyrius >= 3.2.1.
+No external deps. No libsqlite3. No FFI.
 
-## What This Is
+## Quick Start
 
-Patra is a pure-Cyrius database engine providing two storage modes:
+```bash
+cyrius build programs/demo.cyr build/demo   # build demo
+./build/demo                                 # run demo
+cyrius test tests/tcyr/patra.tcyr            # 157 assertions
+cyrius fuzz fuzz/                            # 2 harnesses
+cyrius bench tests/bcyr/patra.bcyr           # 15 benchmarks
+./build/test_libro                           # libro integration
+./build/test_vidya                           # vidya integration
+```
 
-1. **Structured storage** (`.patra` files) — SQL queries over 4KB-paged B+ tree-indexed tables. CREATE, INSERT, SELECT, UPDATE, DELETE with WHERE/ORDER BY/LIMIT.
-2. **JSON Lines mode** (`.jsonl` files) — Append-only log storage with flock concurrency. libro-compatible audit entries.
+## Key Principles
 
-Compiles from Cyrius source with `cyrius build`.
+- **Test after EVERY change** — not after the feature is "done"
+- **ONE change at a time** — never bundle unrelated changes
+- **Research before implementation** — vidya entry before code
+- **3 failed attempts = defer and document** — don't burn time
+- **Fuzz every parser path** — SQL edge cases get invariants
+- **Benchmark before claiming perf** — numbers or it didn't happen
+- **Include order matters** — `file → page → row → sql → where → btree → table → jsonl`
+
+## P(-1): Scaffold Hardening
+
+Before starting new work on a release, run this audit phase:
+
+0. Read roadmap, CHANGELOG, and backlog — know what was intended
+1. Test + benchmark sweep: `cyrius test`, `cyrius bench`, `cyrius fuzz`
+2. Cleanliness check: `cyrius build` compiles clean, versions in sync
+3. Get baseline benchmarks
+4. Internal deep review — gaps, correctness, performance, security
+5. External research — vidya entries, reference implementations, best practices
+6. Additional tests/benchmarks from findings
+7. Post-review benchmarks — prove the wins
+8. Documentation audit — CHANGELOG, roadmap, architecture docs
+9. Repeat if heavy
+
+## Development Loop
+
+```
+1. RESEARCH    — Check vidya, review Cyrius stdlib patterns
+2. BUILD       — ONE change at a time
+3. TEST        — After EACH change:
+                 ☐ cyrius build programs/demo.cyr build/demo
+                 ☐ cyrius test tests/tcyr/patra.tcyr
+                 ☐ cyrius fuzz fuzz/
+4. IF BROKEN   — Revert, apply ONE change, test, repeat
+                 3 failed attempts = defer and document
+5. AUDIT       — Full suite: tests, fuzz, benchmarks, integration
+6. DOCUMENT    — CHANGELOG, roadmap, VERSION, cyrius.toml in sync
+```
+
+### Task Sizing
+
+- **Low/Medium**: Batch freely — multiple items per cycle
+- **Large**: Small bites — one module at a time, verify each
+- **If unsure**: Treat as large
+
+### Refactoring
+
+- Refactor when the code tells you to — duplication, unclear boundaries, bottlenecks
+- Never refactor speculatively. Wait for the third instance
+- Every refactor must pass the same test + fuzz + benchmark gates
 
 ## Architecture
 
 ```
 src/
-  lib.cyr       — public API (patra_open, patra_exec, patra_query, patra_close)
-  sql.cyr       — SQL tokenizer + recursive descent parser (622 lines)
-  table.cyr     — table metadata, schema, create, insert, scan, update, delete
-  btree.cyr     — B+ tree index (order-64, insert with split, search, range scan)
-  page.cyr      — 4KB page management (alloc, read, write, free list)
-  file.cyr      — .patra file format, header, flock locking, constants
-  where.cyr     — WHERE clause evaluation (6 operators, AND/OR, type checking)
-  row.cyr       — row encoding/decoding (i64 + 64-byte fixed strings)
-  jsonl.cyr     — JSON Lines I/O, JSON builder, string escaping
-
-programs/
-  demo.cyr      — usage demonstration
-  test_libro.cyr — libro integration test (audit log round-trip)
-  test_vidya.cyr — vidya integration test (knowledge index queries)
-
-tests/
-  tcyr/patra.tcyr — 157 assertions across 31 test groups
-  bcyr/patra.bcyr — 15 benchmarks
-
-fuzz/
-  fuzz_sql.fcyr  — 91 SQL parser invariants
-  fuzz_file.fcyr — malformed .patra file + persistence + JSONL round-trip
+  lib.cyr       — public API + includes (entry point)
+  file.cyr      — .patra format, header, flock, constants (135 lines)
+  page.cyr      — 4KB page alloc/read/write/free list (53 lines)
+  row.cyr       — row encoding: i64 + 64-byte strings (47 lines)
+  sql.cyr       — tokenizer + recursive descent parser (622 lines)
+  where.cyr     — WHERE evaluation: 6 operators, AND/OR (103 lines)
+  btree.cyr     — B+ tree: order-64, insert/split/search/range (365 lines)
+  table.cyr     — table create/insert/scan/update/delete (241 lines)
+  jsonl.cyr     — JSON Lines I/O, JSON builder, escaping (210 lines)
 ```
 
 ## Key Constraints
@@ -74,61 +124,29 @@ fuzz/
 - **4KB pages** — standard page size, B-tree nodes fit one page
 - **flock for concurrency** — `syscall(73, fd, LOCK_EX/LOCK_UN)` advisory locking
 - **No floating point** — integer comparisons only in WHERE clauses
-- **SQL subset only** — CREATE TABLE, INSERT, SELECT, UPDATE, DELETE. No JOINs, no subqueries, no aggregates
+- **SQL subset only** — CREATE TABLE, INSERT, SELECT, UPDATE, DELETE. No JOINs, subqueries, aggregates
 
-## Cyrius Language Notes
+## Cyrius Conventions
 
-Key patterns and gotchas for working in Cyrius:
+- All struct fields are 8 bytes (i64), accessed via `load64`/`store64` with offset
+- Heap allocation via `fl_alloc()`/`fl_free()` (freelist) for data with individual lifetimes
+- Bump allocation via `alloc()` for long-lived data (vec, str internals)
+- Enum values for constants — don't consume gvar_toks slots (256 initialized globals limit)
+- Heap-allocate large buffers — `var buf[256000]` bloats binary by 256KB
+- `break` in while loops with `var` declarations is unreliable — use flag + `continue`
+- No negative literals — write `(0 - N)` not `-N`
+- No mixed `&&`/`||` — nest `if` blocks
+- `match` is reserved — don't use as variable name
+- `return;` without value is invalid — always `return 0;`
+- All `var` declarations are function-scoped — no block scoping
+- Max limits: 4,096 variables, 1,024 functions, 256 initialized globals
 
-- **`break` in while loops is unreliable** when the loop body contains `var` declarations. Use a flag + `continue` pattern instead
-- **No negative literals** — write `(0 - N)` not `-N`
-- **No mixed `&&`/`||`** — nest `if` blocks instead
-- **`var buf[N]`** allocates N **bytes**, not elements
-- **`match`** is a reserved keyword — don't use it as a variable name
-- **`return;`** without a value is invalid — always `return 0;`
-- **All `var` declarations are function-scoped** — no block scoping
-- **Enum values for constants** — don't consume gvar_toks slots (256 limit for initialized globals)
-- **Heap-allocate large buffers** — `var buf[256000]` bloats the binary by 256KB
+## Key References
 
-## Development Process
-
-### P(-1): Research (before implementation)
-
-1. vidya entry for relevant algorithms (B-tree, SQL parsing, file formats)
-2. Study reference implementations (SQLite file format for inspiration)
-3. Review Cyrius stdlib APIs (`lib/io.cyr`, `lib/alloc.cyr`, `lib/freelist.cyr`)
-4. Document design decisions in `docs/architecture/overview.md`
-
-### Work Loop (continuous)
-
-1. Implement module
-2. `cyrius build` — verify compilation
-3. `cyrius test tests/tcyr/patra.tcyr` — all assertions pass
-4. `cyrius fuzz fuzz/` — all invariants pass
-5. `cyrius bench tests/bcyr/patra.bcyr` — measure performance
-6. Integration tests — `./build/test_libro`, `./build/test_vidya`
-7. CHANGELOG, roadmap, VERSION in sync
-
-### Task Sizing
-
-- **Low/Medium**: Batch freely — multiple changes per cycle
-- **Large**: Small bites — one module at a time, verify each before moving on
-- **If unsure**: Treat as large
-
-### Refactoring
-
-- Refactor when the code tells you to — duplication, unclear boundaries, performance bottlenecks
-- Never refactor speculatively. Wait for the third instance before extracting an abstraction
-- Every refactor must pass the same test + fuzz + benchmark gates
-
-### Key Principles
-
-- Never skip tests or fuzz after changes
-- Every SQL edge case gets a fuzz invariant
-- Performance claims require benchmark evidence
-- B-tree index maintenance on INSERT (stale refs acceptable for DELETE/UPDATE in v1)
-- File format changes require updating `docs/architecture/overview.md`
-- Include order in `lib.cyr` matters: `file → page → row → sql → where → btree → table → jsonl`
+- `docs/architecture/overview.md` — file format spec, page layouts, SQL pipeline
+- `docs/development/roadmap.md` — completed milestones + backlog
+- `CHANGELOG.md` — source of truth for all changes
+- `../vidya/content/` — B-tree, SQL parsing, file format vidya entries
 
 ## DO NOT
 
@@ -137,9 +155,10 @@ Key patterns and gotchas for working in Cyrius:
 - Do not link to libsqlite3 — this is a native Cyrius database
 - Do not use floating point
 - Do not implement features beyond the SQL subset in README
-- Do not use `break` in while loops with `var` declarations — use flag + continue
+- Do not use `break` in while loops with `var` declarations — use flag + `continue`
 - Do not skip fuzz/test verification before claiming a feature works
 - Do not add Cyrius stdlib includes in individual src files — `lib.cyr` manages all includes
+- Do not skip benchmarks before claiming performance improvements
 
 ## Documentation Structure
 
@@ -149,6 +168,15 @@ Root files (required):
   SECURITY.md, CODE_OF_CONDUCT.md, LICENSE, VERSION, cyrius.toml
 
 docs/ (required):
-  architecture/overview.md — file format spec, page layouts, SQL pipeline
-  development/roadmap.md — version history, completed milestones
+  architecture/overview.md — file format spec, page layouts
+  development/roadmap.md — completed, backlog
+
+docs/ (when earned):
+  adr/ — architectural decision records
+  guides/ — usage guides, integration patterns
+  sources.md — source citations for algorithms
 ```
+
+## CHANGELOG Format
+
+Follow [Keep a Changelog](https://keepachangelog.com/). Performance claims MUST include benchmark numbers. Breaking changes get a **Breaking** section with migration guide.
