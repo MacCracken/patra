@@ -89,6 +89,7 @@ fn patra_hdr_init(buf) {
     memset(buf, 0, PAGE_SIZE);
     store32(buf + HDR_MAGIC, PATRA_MAGIC);
     store32(buf + HDR_VER, PATRA_VER);
+    store64(buf + HDR_PGCOUNT, 1);
 }
 
 fn patra_hdr_read(fd, buf) {

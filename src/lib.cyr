@@ -84,7 +84,7 @@ fn patra_open(path) {
 }
 
 fn patra_close(db) {
-    if (db == 0) { return; }
+    if (db == 0) { return 0; }
     var fd = load64(db + DB_FD);
     fl_free(load64(db + DB_HDR));
     syscall(SYS_CLOSE, fd);

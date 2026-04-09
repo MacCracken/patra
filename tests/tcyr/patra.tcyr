@@ -18,7 +18,7 @@ fn test_header() {
 
     assert_eq(load32(buf + HDR_MAGIC), PATRA_MAGIC, "magic");
     assert_eq(load32(buf + HDR_VER), PATRA_VER, "version");
-    assert_eq(load64(buf + HDR_PGCOUNT), 0, "page count");
+    assert_eq(load64(buf + HDR_PGCOUNT), 1, "page count");
     assert_eq(load64(buf + HDR_TBLCOUNT), 0, "table count");
     assert_eq(patra_hdr_verify(buf), PATRA_OK, "verify ok");
 
@@ -52,17 +52,17 @@ fn test_page_alloc() {
     patra_hdr_read(fd, hdr);
 
     var p0 = page_alloc(fd, hdr);
-    assert_eq(p0, 0, "first page 0");
-    assert_eq(load64(hdr + HDR_PGCOUNT), 1, "pgcount 1");
-
-    var p1 = page_alloc(fd, hdr);
-    assert_eq(p1, 1, "second page 1");
+    assert_eq(p0, 1, "first page 1");
     assert_eq(load64(hdr + HDR_PGCOUNT), 2, "pgcount 2");
 
-    # Free p0 and reuse
-    page_free(fd, hdr, p0);
+    var p1 = page_alloc(fd, hdr);
+    assert_eq(p1, 2, "second page 2");
+    assert_eq(load64(hdr + HDR_PGCOUNT), 3, "pgcount 3");
+
+    # Free p1 and reuse
+    page_free(fd, hdr, p1);
     var p2 = page_alloc(fd, hdr);
-    assert_eq(p2, 0, "reused freed page");
+    assert_eq(p2, 2, "reused freed page");
 
     fl_free(hdr);
     syscall(SYS_CLOSE, fd);
