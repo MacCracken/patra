@@ -21,7 +21,8 @@ fn page_alloc(fd, hdr) {
     var fh = load64(hdr + HDR_FREEHEAD);
     if (fh != 0) {
         var buf = fl_alloc(PAGE_SIZE);
-        page_read(fd, fh, buf);
+        var rr = page_read(fd, fh, buf);
+        if (rr != PATRA_OK) { fl_free(buf); return 0; }
         var next = load64(buf + FP_NEXT);
         store64(hdr + HDR_FREEHEAD, next);
         fl_free(buf);

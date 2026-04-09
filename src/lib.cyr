@@ -192,13 +192,15 @@ fn _exec_insert(db) {
     if (r == PATRA_OK) {
         var ic = load64(schema + SCH_IDX_COL);
         if (ic >= 0) {
-            var ir = load64(schema + SCH_IDX_ROOT);
-            if (ir != 0) {
-                var ikey = row_read_int(row, row_field_offset(schema, ncols, ic));
-                var nr = btree_insert(fd, hdr, ir, ikey, _tbl_last_ref);
-                if (nr != ir) {
-                    store64(schema + SCH_IDX_ROOT, nr);
-                    page_write(fd, spg, schema);
+            if (ic < ncols) {
+                var ir = load64(schema + SCH_IDX_ROOT);
+                if (ir != 0) {
+                    var ikey = row_read_int(row, row_field_offset(schema, ncols, ic));
+                    var nr = btree_insert(fd, hdr, ir, ikey, _tbl_last_ref);
+                    if (nr != ir) {
+                        store64(schema + SCH_IDX_ROOT, nr);
+                        page_write(fd, spg, schema);
+                    }
                 }
             }
         }
@@ -239,7 +241,7 @@ fn _exec_update(db) {
     var r = tbl_update(fd, hdr, idx, rsz, schema, ncols, _sql_pr);
     fl_free(schema);
 
-    patra_hdr_write(fd, hdr);
+    if (r == PATRA_OK) { patra_hdr_write(fd, hdr); }
     patra_unlock(fd);
     return r;
 }
@@ -409,6 +411,7 @@ fn patra_query(db, sql) {
     var actual = 0;
     var used_index = 0;
     var ic = load64(schema + SCH_IDX_COL);
+    if (ic >= ncols) { ic = 0 - 1; }
     if (ic >= 0) {
         var ir = load64(schema + SCH_IDX_ROOT);
         if (ir != 0) {

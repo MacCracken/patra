@@ -20,17 +20,20 @@ fn jsonl_close(fd) {
 # Append raw data + newline with exclusive lock
 fn jsonl_append(fd, data, len) {
     patra_lock_ex(fd);
-    syscall(SYS_WRITE, fd, data, len);
+    var w = syscall(SYS_WRITE, fd, data, len);
+    if (w < 0) { patra_unlock(fd); return PATRA_ERR_IO; }
     syscall(SYS_WRITE, fd, "\n", 1);
     patra_unlock(fd);
-    return 0;
+    return PATRA_OK;
 }
 
 # ── JSON string escaping ───────────────────────────────────
 
 fn _json_escape(dst, src, slen) {
     var w = 0;
+    var cap = slen * 2;
     for (var i = 0; i < slen; i = i + 1) {
+        if (w + 2 > cap) { return w; }
         var c = load8(src + i);
         if (c == 34) {
             store8(dst + w, 92); store8(dst + w + 1, 34); w = w + 2;
