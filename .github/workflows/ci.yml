@@ -59,7 +59,9 @@ jobs:
           done
 
       - name: Benchmarks
-        run: cyrius bench tests/bcyr/patra.bcyr
+        run: |
+          cyrius build tests/bcyr/patra.bcyr build/bench
+          ./build/bench
 
       - name: Integration tests
         run: |

@@ -407,7 +407,7 @@ fn patra_query(db, sql) {
         memcpy(names_ptr + i * SCH_CNAME_MAX, schema + soff + SCH_CNAME, SCH_CNAME_MAX);
     }
 
-    # Try B-tree index for equality on indexed column
+    # Try B-tree index for WHERE on indexed column
     var actual = 0;
     var used_index = 0;
     var ic = load64(schema + SCH_IDX_COL);
@@ -420,40 +420,54 @@ fn patra_query(db, sql) {
             if (wn == 1) { wjoin_ok = 1; }
             elif (load64(_sql_pr + PR_WHERE_JOIN) == WH_AND) { wjoin_ok = 1; }
             if (wjoin_ok != 0) {
-                # Check first WHERE condition for EQ on indexed column
-                var cond = _sql_pr + PR_WHERE;
+                # Scan WHERE conditions for indexed column — build range [lo, hi]
                 var icn = schema + SCH_START + ic * SCH_ENTRY_SZ + SCH_CNAME;
                 var icnl = strlen(icn);
-                var cptr = load64(cond + WH_COL_PTR);
-                var clen = load64(cond + WH_COL_LEN);
-                if (clen == icnl) {
-                    if (memeq(cptr, icn, clen)) {
-                        if (load64(cond + WH_CMP_OP) == CMP_EQ) {
+                var idx_lo = 0 - (1 << 62);
+                var idx_hi = 1 << 62;
+                var idx_found = 0;
+                for (var wi = 0; wi < wn; wi = wi + 1) {
+                    var cond = _sql_pr + PR_WHERE + wi * WH_ENTRY_SZ;
+                    var cptr = load64(cond + WH_COL_PTR);
+                    var clen = load64(cond + WH_COL_LEN);
+                    if (clen == icnl) {
+                        if (memeq(cptr, icn, clen)) {
                             if (load64(cond + WH_VAL_TYPE) == COL_INT) {
-                                used_index = 1;
-                                var ikey = load64(cond + WH_INT_VAL);
-                                var refs = fl_alloc(2048);
-                                var nrefs = btree_search(fd, ir, ikey, refs, 256);
-                                var rbuf = fl_alloc(PAGE_SIZE);
-                                var lpg = 0 - 1;
-                                for (var ri = 0; ri < nrefs; ri = ri + 1) {
-                                    var ref = load64(refs + ri * 8);
-                                    var rpg = _bt_ref_pg(ref);
-                                    var rsl = _bt_ref_slot(ref);
-                                    if (rpg != lpg) {
-                                        page_read(fd, rpg, rbuf);
-                                        lpg = rpg;
-                                    }
-                                    var rp = rbuf + DP_DATA + rsl * rsz;
-                                    if (where_eval(rp, schema, ncols, _sql_pr)) {
-                                        memcpy(data_ptr + actual * rsz, rp, rsz);
-                                        actual = actual + 1;
-                                    }
-                                }
-                                fl_free(rbuf);
-                                fl_free(refs);
+                                var op = load64(cond + WH_CMP_OP);
+                                var v = load64(cond + WH_INT_VAL);
+                                idx_found = 1;
+                                if (op == CMP_EQ)  { idx_lo = v; idx_hi = v; }
+                                elif (op == CMP_GT)  { if (v + 1 > idx_lo) { idx_lo = v + 1; } }
+                                elif (op == CMP_GTE) { if (v > idx_lo) { idx_lo = v; } }
+                                elif (op == CMP_LT)  { if (v - 1 < idx_hi) { idx_hi = v - 1; } }
+                                elif (op == CMP_LTE) { if (v < idx_hi) { idx_hi = v; } }
                             }
                         }
+                    }
+                }
+                if (idx_found != 0) {
+                    if (idx_lo <= idx_hi) {
+                        used_index = 1;
+                        var refs = fl_alloc(2048);
+                        var nrefs = _bt_range(fd, ir, idx_lo, idx_hi, refs, 256);
+                        var rbuf = fl_alloc(PAGE_SIZE);
+                        var lpg = 0 - 1;
+                        for (var ri = 0; ri < nrefs; ri = ri + 1) {
+                            var ref = load64(refs + ri * 8);
+                            var rpg = _bt_ref_pg(ref);
+                            var rsl = _bt_ref_slot(ref);
+                            if (rpg != lpg) {
+                                page_read(fd, rpg, rbuf);
+                                lpg = rpg;
+                            }
+                            var rp = rbuf + DP_DATA + rsl * rsz;
+                            if (where_eval(rp, schema, ncols, _sql_pr)) {
+                                memcpy(data_ptr + actual * rsz, rp, rsz);
+                                actual = actual + 1;
+                            }
+                        }
+                        fl_free(rbuf);
+                        fl_free(refs);
                     }
                 }
             }

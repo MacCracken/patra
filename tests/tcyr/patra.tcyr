@@ -815,6 +815,73 @@ fn test_btree_many() {
     patra_close(db);
 }
 
+# ── v0.8.1: Indexed range scan ───────────────────────────────
+
+fn test_indexed_range() {
+    test_group("indexed range");
+    cleanup();
+    var db = patra_open(_tpath);
+    _setup_people(db);
+
+    # id > 3 should use B-tree range [4, max]
+    var rs = patra_query(db, "SELECT * FROM people WHERE id > 3");
+    assert_eq(patra_result_count(rs), 2, "id>3: 2 rows");
+    patra_result_free(rs);
+
+    # id >= 3
+    rs = patra_query(db, "SELECT * FROM people WHERE id >= 3");
+    assert_eq(patra_result_count(rs), 3, "id>=3: 3 rows");
+    patra_result_free(rs);
+
+    # id < 3
+    rs = patra_query(db, "SELECT * FROM people WHERE id < 3");
+    assert_eq(patra_result_count(rs), 2, "id<3: 2 rows");
+    patra_result_free(rs);
+
+    # id <= 2
+    rs = patra_query(db, "SELECT * FROM people WHERE id <= 2");
+    assert_eq(patra_result_count(rs), 2, "id<=2: 2 rows");
+    patra_result_free(rs);
+
+    # id > 1 AND id < 5 (range [2,4])
+    rs = patra_query(db, "SELECT * FROM people WHERE id > 1 AND id < 5");
+    assert_eq(patra_result_count(rs), 3, "1<id<5: 3 rows");
+    patra_result_free(rs);
+
+    # id >= 2 AND id <= 4
+    rs = patra_query(db, "SELECT * FROM people WHERE id >= 2 AND id <= 4");
+    assert_eq(patra_result_count(rs), 3, "2<=id<=4: 3 rows");
+    patra_result_free(rs);
+
+    # Range with no results
+    rs = patra_query(db, "SELECT * FROM people WHERE id > 100");
+    assert_eq(patra_result_count(rs), 0, "id>100: 0 rows");
+    patra_result_free(rs);
+
+    patra_close(db);
+}
+
+fn test_indexed_range_with_filter() {
+    test_group("indexed range + filter");
+    cleanup();
+    var db = patra_open(_tpath);
+    _setup_people(db);
+
+    # Index narrows by id, AND filter checks age
+    var rs = patra_query(db, "SELECT * FROM people WHERE id >= 2 AND age = 25");
+    assert_eq(patra_result_count(rs), 2, "id>=2 and age=25");
+    patra_result_free(rs);
+
+    # Index + ORDER BY + LIMIT
+    rs = patra_query(db, "SELECT * FROM people WHERE id > 1 ORDER BY id LIMIT 2");
+    assert_eq(patra_result_count(rs), 2, "range+order+limit");
+    assert_eq(patra_result_get_int(rs, 0, 0), 2, "first id=2");
+    assert_eq(patra_result_get_int(rs, 1, 0), 3, "second id=3");
+    patra_result_free(rs);
+
+    patra_close(db);
+}
+
 # ── Runner ──────────────────────────────────────────────────
 
 fn main() {
@@ -878,6 +945,10 @@ fn main() {
     test_indexed_with_and();
     test_no_index_str_table();
     test_btree_many();
+
+    # v0.8.1 indexed range
+    test_indexed_range();
+    test_indexed_range_with_filter();
 
     cleanup();
     return assert_summary();

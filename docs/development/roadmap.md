@@ -16,17 +16,41 @@
 - Fuzz harnesses (SQL parser + malformed files)
 - Benchmarks (15 operations)
 - Integration tests (libro, vidya)
+- CI/CD workflows (GitHub Actions)
+- P(-1) scaffold hardening (error handling, bounds checks, security audit)
 
 ## Backlog
 
+### Correctness
+
 | # | Item | Notes |
 |---|------|-------|
-| 1 | B-tree index maintenance on DELETE/UPDATE | Currently stale refs filtered by verification |
-| 2 | CREATE INDEX syntax | Currently auto-index on first INT column only |
-| 3 | B-tree range scan in indexed SELECT | Currently only equality uses index |
+| 1 | B-tree index maintenance on DELETE/UPDATE | Stale refs filtered by verification — should remove/update entries |
+| 2 | B-tree range scan in indexed SELECT | Currently only equality uses index; >, <, >=, <= should too |
+
+### Features
+
+| # | Item | Notes |
+|---|------|-------|
+| 3 | CREATE INDEX syntax | Currently auto-index on first INT column only |
 | 4 | DESC in ORDER BY | Currently ascending only |
 | 5 | COUNT, SUM, MIN, MAX aggregates | |
 | 6 | Multi-column ORDER BY | |
 | 7 | JSONL line-level parsing (extract fields) | Currently returns raw lines |
 | 8 | SHA-256 hash chain for libro audit entries | Currently libro handles hashing |
-| 9 | Binary size reduction | 60KB overhead — investigate dead code elimination |
+
+### Durability / Architecture
+
+| # | Item | Notes |
+|---|------|-------|
+| 9 | Write-ahead logging (WAL) | No crash recovery — header/data page writes are not atomic |
+| 10 | Transaction semantics (BEGIN/COMMIT/ROLLBACK) | Each exec/query locks individually, no multi-statement atomicity |
+| 11 | fsync after writes | Currently relies on OS page cache; no explicit durability guarantee |
+
+### Optimization
+
+| # | Item | Notes |
+|---|------|-------|
+| 12 | Binary size reduction | 60KB overhead — investigate dead code elimination |
+| 13 | Buffer pool (cached page reads) | Currently re-reads pages from disk on every operation |
+| 14 | Last-page pointer for INSERT | Currently walks entire page chain to find last page |
