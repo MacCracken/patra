@@ -56,6 +56,7 @@ fn _cmp_str(row_str, cmp_ptr, cmp_len, op) {
 # Evaluate WHERE conditions against a single row.
 # Returns 1 if row matches, 0 if not.
 # pr = parse result buffer (_sql_pr).
+# Evaluate WHERE conditions against a row (1=match, 0=no)
 fn where_eval(row, schema, ncols, pr) {
     var wcount = load64(pr + PR_WHERE_N);
     if (wcount == 0) { return 1; }
@@ -69,7 +70,7 @@ fn where_eval(row, schema, ncols, pr) {
     for (var i = 0; i < wcount; i = i + 1) {
         var cond = pr + PR_WHERE + i * WH_ENTRY_SZ;
         var col_idx = _wh_resolve_col(schema, ncols,
-            load64(cond + WH_COL_PTR), load64(cond + WH_COL_LEN));
+        load64(cond + WH_COL_PTR), load64(cond + WH_COL_LEN));
         if (col_idx < 0) {
             if (join == WH_AND) { result = 0; }
             continue;
@@ -88,7 +89,7 @@ fn where_eval(row, schema, ncols, pr) {
         } else {
             if (val_type == COL_STR) {
                 hit = _cmp_str(row_read_str(row, off),
-                    load64(cond + WH_STR_PTR), load64(cond + WH_STR_LEN), cmp);
+                load64(cond + WH_STR_PTR), load64(cond + WH_STR_LEN), cmp);
             }
         }
 

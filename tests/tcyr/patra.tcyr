@@ -977,6 +977,57 @@ fn test_indexed_range_with_filter() {
     patra_close(db);
 }
 
+
+# ── v0.11: SHA-256 ──────────────────────────────────────────
+
+fn test_sha256() {
+    test_group("sha256");
+    var out[68];
+    sha256_hex("", 0, &out);
+    assert_streq(&out, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "empty");
+    sha256_hex("abc", 3, &out);
+    assert_streq(&out, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "abc");
+    sha256_hex("hello", 5, &out);
+    assert_streq(&out, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", "hello");
+}
+
+# ── v0.11: Transactions ─────────────────────────────────────
+
+fn test_transaction_commit() {
+    test_group("tx commit");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE tx (id INT, val STR)");
+    patra_begin(db);
+    patra_exec(db, "INSERT INTO tx VALUES (1, 'a')");
+    patra_exec(db, "INSERT INTO tx VALUES (2, 'b')");
+    patra_commit(db);
+    var rs = patra_query(db, "SELECT * FROM tx");
+    assert_eq(patra_result_count(rs), 2, "committed 2");
+    patra_result_free(rs);
+    patra_close(db);
+    db = patra_open(_tpath);
+    rs = patra_query(db, "SELECT * FROM tx");
+    assert_eq(patra_result_count(rs), 2, "persisted 2");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_transaction_rollback() {
+    test_group("tx rollback");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE txr (id INT)");
+    patra_exec(db, "INSERT INTO txr VALUES (1)");
+    patra_begin(db);
+    patra_exec(db, "INSERT INTO txr VALUES (2)");
+    patra_exec(db, "INSERT INTO txr VALUES (3)");
+    patra_rollback(db);
+    var rs = patra_query(db, "SELECT * FROM txr");
+    assert_eq(patra_result_count(rs), 1, "rolled back to 1");
+    patra_result_free(rs);
+    patra_close(db);
+}
 # ── Coverage: persistence ────────────────────────────────────
 
 fn test_persistence() {
@@ -1325,6 +1376,11 @@ fn main() {
     # v0.8.1 indexed range
     test_indexed_range();
     test_indexed_range_with_filter();
+
+    # v0.11 SHA-256 + WAL + transactions
+    test_sha256();
+    test_transaction_commit();
+    test_transaction_rollback();
 
     # Coverage
     test_persistence();

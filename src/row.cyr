@@ -1,11 +1,13 @@
 # row.cyr — row encoding/decoding (i64 + fixed-length strings)
 
+# Size in bytes for a column type (INT=8, STR=64)
 fn row_col_size(ctype) {
     if (ctype == COL_INT) { return COL_INT_SZ; }
     return COL_STR_SZ;
 }
 
 # Compute total row size from a schema page buffer
+# Total row size from schema page
 fn row_compute_size(schema, ncols) {
     var sz = 0;
     for (var i = 0; i < ncols; i = i + 1) {
@@ -16,6 +18,7 @@ fn row_compute_size(schema, ncols) {
 }
 
 # Byte offset of column col_idx within a row
+# Byte offset of column within a row
 fn row_field_offset(schema, ncols, col) {
     var off = 0;
     for (var i = 0; i < col; i = i + 1) {
@@ -25,11 +28,13 @@ fn row_field_offset(schema, ncols, col) {
     return off;
 }
 
+# Write i64 value to row at offset
 fn row_write_int(row, off, val) {
     store64(row + off, val);
 }
 
 # Write string value padded to COL_STR_SZ (64 bytes), null-terminated
+# Write string value to row at offset (padded to 64 bytes)
 fn row_write_str(row, off, ptr, len) {
     memset(row + off, 0, COL_STR_SZ);
     var n = len;
@@ -37,11 +42,13 @@ fn row_write_str(row, off, ptr, len) {
     memcpy(row + off, ptr, n);
 }
 
+# Read i64 value from row at offset
 fn row_read_int(row, off) {
     return load64(row + off);
 }
 
 # Returns pointer to the 64-byte string field (null-terminated)
+# Read string pointer from row at offset
 fn row_read_str(row, off) {
     return row + off;
 }

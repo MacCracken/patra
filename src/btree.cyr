@@ -31,8 +31,9 @@ fn _bt_ref_slot(ref)    { return ref % 65536; }
 var _bt_path[48];
 var _bt_pdepth = 0;
 
-# ── Create ──────────────────────────────────────────────────
+# ── Create ────────────────────
 
+# Create empty B-tree (single leaf root), returns page number
 fn btree_create(fd, hdr) {
     var pg = page_alloc(fd, hdr);
     var buf = fl_alloc(PAGE_SIZE);
@@ -44,7 +45,7 @@ fn btree_create(fd, hdr) {
     return pg;
 }
 
-# ── Find leaf (records path) ────────────────────────────────
+# ── Find leaf (records path) ────────────────────
 
 fn _bt_find_leaf(fd, root, key) {
     _bt_pdepth = 0;
@@ -75,7 +76,7 @@ fn _bt_find_leaf(fd, root, key) {
     return pg;
 }
 
-# ── Insert into non-full leaf ───────────────────────────────
+# ── Insert into non-full leaf ────────────────────
 
 fn _bt_leaf_ins(buf, key, val) {
     var nk = load64(buf + BT_NKEYS);
@@ -100,7 +101,7 @@ fn _bt_leaf_ins(buf, key, val) {
     store64(buf + BT_NKEYS, nk + 1);
 }
 
-# ── Insert into non-full internal node ──────────────────────
+# ── Insert into non-full internal ──────────
 
 fn _bt_int_ins(buf, key, rchild) {
     var nk = load64(buf + BT_NKEYS);
@@ -129,7 +130,7 @@ fn _bt_int_ins(buf, key, rchild) {
     store64(buf + BT_NKEYS, nk + 1);
 }
 
-# ── Push separator key up to parent ─────────────────────────
+# ── Push separator to parent ───────────────
 
 fn _bt_push_up(fd, hdr, root, left_pg, sep, right_pg) {
     if (_bt_pdepth <= 1) {
@@ -236,8 +237,9 @@ fn _bt_push_up(fd, hdr, root, left_pg, sep, right_pg) {
     return _bt_push_up(fd, hdr, root, par_pg, mid_key, rpg);
 }
 
-# ── Insert ──────────────────────────────────────────────────
+# ── Insert ────────────────────
 
+# Insert key-value into B-tree, returns (possibly new) root
 fn btree_insert(fd, hdr, root, key, val) {
     var leaf_pg = _bt_find_leaf(fd, root, key);
     var buf = fl_alloc(PAGE_SIZE);
@@ -306,8 +308,9 @@ fn btree_insert(fd, hdr, root, key, val) {
     return _bt_push_up(fd, hdr, root, leaf_pg, sep, rpg);
 }
 
-# ── Search (returns all refs matching key) ──────────────────
+# ── Search (all refs for key) ──────────────
 
+# Search for all refs matching key
 fn btree_search(fd, root, key, out, max) {
     return _bt_range(fd, root, key, key, out, max);
 }
@@ -366,6 +369,7 @@ fn _bt_rwalk(fd, pg, lo, hi, out, max, cp) {
 
 # ── Remove ref (lazy delete — set value to 0) ──────────────
 
+# Lazy-delete: invalidate a specific ref for a key
 fn btree_remove_ref(fd, root, key, ref) {
     var leaf_pg = _bt_find_leaf(fd, root, key);
     var buf = fl_alloc(PAGE_SIZE);

@@ -14,6 +14,7 @@ fn _tbl_name_eq(entry, name, nlen) {
     return memeq(entry + TBL_NAME, name, nlen);
 }
 
+# Find table by name, returns index or -1
 fn tbl_find(hdr, name, nlen) {
     var count = load64(hdr + HDR_TBLCOUNT);
     for (var i = 0; i < count; i = i + 1) {
@@ -26,6 +27,7 @@ fn tbl_find(hdr, name, nlen) {
 
 # col_names: array of (ptr, len) pairs — 16 bytes each
 # col_types: array of i64 — 8 bytes each
+# Create table with schema and data pages
 fn tbl_create(fd, hdr, name, nlen, col_names, col_types, ncols) {
     if (load64(hdr + HDR_TBLCOUNT) >= MAX_TABLES) { return PATRA_ERR_FULL; }
     if (ncols > MAX_COLS) { return PATRA_ERR_COLCOUNT; }
@@ -80,6 +82,7 @@ fn tbl_create(fd, hdr, name, nlen, col_names, col_types, ncols) {
     return PATRA_OK;
 }
 
+# Insert a row into table
 fn tbl_insert(fd, hdr, idx, row_data, row_sz) {
     var entry = _tbl_entry(hdr, idx);
     var buf = fl_alloc(PAGE_SIZE);
@@ -130,6 +133,7 @@ fn tbl_insert(fd, hdr, idx, row_data, row_sz) {
 }
 
 # Scan all rows (no filter). Returns rows copied.
+# Scan all rows into output buffer, returns count
 fn tbl_scan(fd, hdr, idx, out, row_sz) {
     var entry = _tbl_entry(hdr, idx);
     var cur = load64(entry + TBL_ROOT);
@@ -150,6 +154,7 @@ fn tbl_scan(fd, hdr, idx, out, row_sz) {
 }
 
 # Filtered scan — copies matching rows into out. Returns count.
+# Scan rows matching WHERE into output, returns count
 fn tbl_scan_where(fd, hdr, idx, out, row_sz, schema, ncols, pr) {
     var entry = _tbl_entry(hdr, idx);
     var cur = load64(entry + TBL_ROOT);
@@ -174,6 +179,7 @@ fn tbl_scan_where(fd, hdr, idx, out, row_sz, schema, ncols, pr) {
 }
 
 # Update matching rows in-place. Returns PATRA_OK or error.
+# Update matching rows in-place
 fn tbl_update(fd, hdr, idx, row_sz, schema, ncols, pr) {
     var entry = _tbl_entry(hdr, idx);
     var cur = load64(entry + TBL_ROOT);
@@ -219,7 +225,7 @@ fn tbl_update(fd, hdr, idx, row_sz, schema, ncols, pr) {
                 for (var s = 0; s < nsets; s = s + 1) {
                     var set = pr + PR_ITEMS + s * SET_SZ;
                     var cidx = _wh_resolve_col(schema, ncols,
-                        load64(set + SET_CPTR), load64(set + SET_CLEN));
+                    load64(set + SET_CPTR), load64(set + SET_CLEN));
                     if (cidx < 0) {
                         fl_free(buf);
                         return PATRA_ERR_NOTFOUND;
@@ -252,6 +258,7 @@ fn tbl_update(fd, hdr, idx, row_sz, schema, ncols, pr) {
 }
 
 # Delete matching rows with page compaction. Returns PATRA_OK.
+# Delete matching rows with page compaction
 fn tbl_delete(fd, hdr, idx, row_sz, schema, ncols, pr) {
     _tbl_lp_idx = 0 - 1;
     var entry = _tbl_entry(hdr, idx);

@@ -7,7 +7,7 @@
 - **Type**: Shared library — database engine for the sovereign stack
 - **License**: GPL-3.0-only
 - **Language**: Cyrius (native)
-- **Version**: 0.8.0
+- **Version**: 0.11.0
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
 
@@ -17,11 +17,11 @@ Own the database. Zero deps. Pure Cyrius. SQL + B-tree + JSONL in a single `incl
 
 ## Current State
 
-- **Source**: 2,304 lines across 9 modules
-- **Tests**: 157 assertions, 2 fuzz harnesses, 15 benchmarks
+- **Source**: 3,089 lines across 11 modules
+- **Tests**: 243 assertions, 2 fuzz harnesses, 20 benchmarks
 - **Integration**: libro audit log, vidya knowledge index
-- **Index**: B+ tree order-64, auto on first INT column (39% faster indexed SELECT)
-- **Binary**: 94KB (60KB patra overhead on 28KB stdlib baseline)
+- **Index**: B+ tree order-64, auto or explicit CREATE INDEX (16% faster indexed SELECT)
+- **Binary**: 120KB
 
 ## Consumers
 
@@ -58,7 +58,7 @@ cyrius bench tests/bcyr/patra.bcyr           # 15 benchmarks
 - **3 failed attempts = defer and document** — don't burn time
 - **Fuzz every parser path** — SQL edge cases get invariants
 - **Benchmark before claiming perf** — numbers or it didn't happen
-- **Include order matters** — `file → page → row → sql → where → btree → table → jsonl`
+- **Include order matters** — `file → sha256 → wal → page → row → sql → where → btree → table → jsonl`
 
 ## P(-1): Scaffold Hardening
 
@@ -107,14 +107,16 @@ Before starting new work on a release, run this audit phase:
 ```
 src/
   lib.cyr       — public API + includes (entry point)
-  file.cyr      — .patra format, header, flock, constants (135 lines)
-  page.cyr      — 4KB page alloc/read/write/free list (53 lines)
-  row.cyr       — row encoding: i64 + 64-byte strings (47 lines)
-  sql.cyr       — tokenizer + recursive descent parser (622 lines)
-  where.cyr     — WHERE evaluation: 6 operators, AND/OR (103 lines)
-  btree.cyr     — B+ tree: order-64, insert/split/search/range (365 lines)
-  table.cyr     — table create/insert/scan/update/delete (241 lines)
-  jsonl.cyr     — JSON Lines I/O, JSON builder, escaping (210 lines)
+  file.cyr      — .patra format, header, flock, fdatasync, constants
+  page.cyr      — 4KB page alloc/read/write/free list + WAL integration
+  row.cyr       — row encoding: i64 + 64-byte strings
+  sql.cyr       — tokenizer + recursive descent parser (CREATE/INSERT/SELECT/UPDATE/DELETE/CREATE INDEX, aggregates)
+  where.cyr     — WHERE evaluation: 6 operators, AND/OR
+  sha256.cyr    — SHA-256 hash (FIPS 180-4)
+  wal.cyr       — Write-ahead logging: page before-images, crash recovery
+  btree.cyr     — B+ tree: order-64, insert/split/search/range/lazy delete
+  table.cyr     — table create/insert/scan/update/delete + index maintenance
+  jsonl.cyr     — JSON Lines I/O, JSON builder, field extraction, escaping
 ```
 
 ## Key Constraints

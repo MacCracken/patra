@@ -1,6 +1,6 @@
 # sql.cyr — SQL tokenizer and parser (v0.2: WHERE, ORDER BY, LIMIT, UPDATE, DELETE)
 
-# ── Token types ─────────────────────────────────────────────
+# ── Token types ────────────────────
 
 enum TokType {
     TK_EOF = 0;
@@ -64,7 +64,7 @@ enum AggOff { PR_AGG_TYPE = 768; PR_AGG_COL_PTR = 776; PR_AGG_COL_LEN = 784; }
 enum TokOff { TOK_TYPE = 0; TOK_PTR = 8; TOK_LEN = 16; TOK_SZ = 24; }
 enum TokLim { MAX_TOKENS = 128; }
 
-# ── Parse result layout ────────────────────────────────────
+# ── Parse result layout ────────────────────
 
 enum PROff {
     PR_STMT = 0;
@@ -126,7 +126,7 @@ enum CmpOp {
 # WHERE join type
 enum WhJoin { WH_AND = 0; WH_OR = 1; }
 
-# ── State ───────────────────────────────────────────────────
+# ── State ────────────────────
 
 var _sql_toks = 0;
 var _sql_ntoks = 0;
@@ -137,7 +137,7 @@ fn _sql_init() {
     _sql_pr = fl_alloc(4096);
 }
 
-# ── Token access ────────────────────────────────────────────
+# ── Token access ────────────────────
 
 fn _tok_set(i, typ, ptr, len) {
     var base = _sql_toks + i * TOK_SZ;
@@ -150,7 +150,7 @@ fn _tok_type(i) { return load64(_sql_toks + i * TOK_SZ + TOK_TYPE); }
 fn _tok_ptr(i)  { return load64(_sql_toks + i * TOK_SZ + TOK_PTR); }
 fn _tok_len(i)  { return load64(_sql_toks + i * TOK_SZ + TOK_LEN); }
 
-# ── Character classification ────────────────────────────────
+# ── Character classification ────────────────────
 
 fn _to_upper(c) {
     if (c >= 97) { if (c <= 122) { return c - 32; } }
@@ -182,7 +182,7 @@ fn _is_ws(c) {
     return 0;
 }
 
-# ── Keyword matching (case-insensitive) ─────────────────────
+# ── Keyword matching ───────────────────────
 
 fn _kw_eq(ptr, len, kw) {
     var kl = strlen(kw);
@@ -223,8 +223,9 @@ fn _classify_ident(ptr, len) {
     return TK_IDENT;
 }
 
-# ── Tokenizer ───────────────────────────────────────────────
+# ── Tokenizer ────────────────────
 
+# Tokenize SQL string into token array
 fn sql_tokenize(input) {
     var pos = 0;
     var n = 0;
@@ -338,7 +339,7 @@ fn sql_tokenize(input) {
     return n;
 }
 
-# ── Helpers ─────────────────────────────────────────────────
+# ── Helpers ────────────────────
 
 fn _pt_atoi(ptr, len) {
     var r = 0;
@@ -424,7 +425,7 @@ fn _parse_where(pos) {
     return pos;
 }
 
-# ── Parsers ─────────────────────────────────────────────────
+# ── Parsers ────────────────────
 
 fn _parse_create() {
     var pos = 0;
@@ -516,7 +517,7 @@ fn _parse_insert() {
 }
 
 fn _parse_select() {
-    # SELECT * | COUNT(*) | SUM(col) | MIN(col) | MAX(col) FROM table [WHERE ...] [ORDER BY ...] [LIMIT n]
+    # SELECT * | agg(col) FROM tbl [WHERE] [ORDER BY] [LIMIT]
     var pos = 0;
     if (_tok_type(pos) != TK_SELECT) { return PATRA_ERR_SYNTAX; }
     pos = pos + 1;
@@ -724,6 +725,7 @@ fn _parse_create_index() {
     return PATRA_OK;
 }
 
+# Parse tokenized SQL into parse result
 fn sql_parse() {
     memset(_sql_pr, 0, 4096);
     var tt = _tok_type(0);

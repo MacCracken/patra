@@ -3,19 +3,21 @@
 # JSONL files: one JSON object per line, newline-delimited.
 # flock for concurrent access, O_APPEND for atomic appends.
 
-# ── Open / Close ────────────────────────────────────────────
+# ── Open / Close ────────────────────
 
 # O_RDWR | O_CREAT | O_APPEND = 2 + 64 + 1024 = 1090
+# Open JSONL file (O_RDWR | O_CREAT | O_APPEND)
 fn jsonl_open(path) {
     return syscall(SYS_OPEN, path, 1090, 420);
 }
 
+# Close JSONL file
 fn jsonl_close(fd) {
     syscall(SYS_CLOSE, fd);
     return 0;
 }
 
-# ── Append ──────────────────────────────────────────────────
+# ── Append ────────────────────
 
 # Append raw data + newline with exclusive lock
 fn jsonl_append(fd, data, len) {
@@ -28,7 +30,7 @@ fn jsonl_append(fd, data, len) {
     return PATRA_OK;
 }
 
-# ── JSON string escaping ───────────────────────────────────
+# ── JSON string escaping ────────────────────
 
 fn _json_escape(dst, src, slen) {
     var w = 0;
@@ -53,13 +55,14 @@ fn _json_escape(dst, src, slen) {
     return w;
 }
 
-# ── JSON object builder ────────────────────────────────────
+# ── JSON object builder ────────────────────
 
 # Build JSON: {"key1": val1, "key2": "str_val", ...}
 # keys: array of n pointers to null-terminated strings
 # vals: array of n i64 (int values) or pointers (string values)
 # types: array of n COL_INT/COL_STR
 # Returns length written (null-terminated).
+# Build JSON object string from key-value arrays
 fn json_build(buf, max, keys, vals, types, n) {
     var pos = 0;
     store8(buf + pos, 123); pos = pos + 1;
@@ -97,6 +100,7 @@ fn json_build(buf, max, keys, vals, types, n) {
 }
 
 # Append a JSON object built from key-value pairs
+# Build and append JSON object to JSONL file
 fn jsonl_append_obj(fd, keys, vals, types, n) {
     var buf = fl_alloc(4096);
     var len = json_build(buf, 4096, keys, vals, types, n);
@@ -105,12 +109,13 @@ fn jsonl_append_obj(fd, keys, vals, types, n) {
     return 0;
 }
 
-# ── Read ────────────────────────────────────────────────────
+# ── Read ────────────────────
 
 # Read result layout: { count(8), data_ptr(8), lines_ptr(8) }
 # lines: array of (ptr, len) pairs — 16 bytes each
 enum JlrOff { JLR_COUNT = 0; JLR_DATA = 8; JLR_LINES = 16; JLR_SZ = 24; }
 
+# Read all lines from JSONL file into indexed result
 fn jsonl_read(fd) {
     patra_lock_sh(fd);
     var size = syscall(SYS_LSEEK, fd, 0, 2);
@@ -171,18 +176,22 @@ fn jsonl_read(fd) {
     return lr;
 }
 
+# Get number of lines in read result
 fn jsonl_lines_count(lr) { return load64(lr + JLR_COUNT); }
 
+# Get pointer to line data at index
 fn jsonl_lines_get(lr, idx) {
     var lines = load64(lr + JLR_LINES);
     return load64(lines + idx * 16);
 }
 
+# Get length of line at index
 fn jsonl_lines_len(lr, idx) {
     var lines = load64(lr + JLR_LINES);
     return load64(lines + idx * 16 + 8);
 }
 
+# Free read result and all buffers
 fn jsonl_lines_free(lr) {
     if (lr == 0) { return 0; }
     var d = load64(lr + JLR_DATA);
@@ -193,7 +202,7 @@ fn jsonl_lines_free(lr) {
     return 0;
 }
 
-# ── Field extraction ─────────────────────────────────────────
+# ── Field extraction ────────────────────
 
 # Find "key": in a JSON line. Returns offset past the colon+space, or -1.
 fn _jl_find_key(line, llen, key, klen) {
@@ -244,6 +253,7 @@ fn _jl_find_key(line, llen, key, klen) {
 
 # Get string value for key from JSON line. Returns ptr to content (inside quotes), sets len.
 # out_len: pointer to store length. Returns pointer or 0.
+# Extract string field from JSON line by key
 fn jsonl_get_str(line, llen, key, klen, out_len) {
     var off = _jl_find_key(line, llen, key, klen);
     if (off < 0) { return 0; }
@@ -262,6 +272,7 @@ fn jsonl_get_str(line, llen, key, klen, out_len) {
 }
 
 # Get integer value for key from JSON line. Returns the value, or 0 if not found.
+# Extract integer field from JSON line by key
 fn jsonl_get_int(line, llen, key, klen) {
     var off = _jl_find_key(line, llen, key, klen);
     if (off < 0) { return 0; }
@@ -282,8 +293,9 @@ fn jsonl_get_int(line, llen, key, klen) {
     return val;
 }
 
-# ── Count lines ─────────────────────────────────────────────
+# ── Count lines ────────────────────
 
+# Count lines in JSONL file
 fn jsonl_count(fd) {
     patra_lock_sh(fd);
     syscall(SYS_LSEEK, fd, 0, 0);

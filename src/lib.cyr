@@ -3,7 +3,7 @@
 # Structured storage and SQL queries for Cyrius.
 # Usage: include "src/lib.cyr", call patra_init(), then use the API.
 
-# ── Stdlib ──────────────────────────────────────────────────
+# ── Stdlib ────────────────────
 
 include "lib/syscalls.cyr"
 include "lib/string.cyr"
@@ -18,6 +18,8 @@ include "lib/sakshi.cyr"
 # ── Modules (order matters: sql before where before table) ──
 
 include "src/file.cyr"
+include "src/sha256.cyr"
+include "src/wal.cyr"
 include "src/page.cyr"
 include "src/row.cyr"
 include "src/sql.cyr"
@@ -26,9 +28,9 @@ include "src/btree.cyr"
 include "src/table.cyr"
 include "src/jsonl.cyr"
 
-# ── DB handle (16 bytes) ────────────────────────────────────
+# ── DB handle (16 bytes) ────────────────────
 
-enum DbOff { DB_FD = 0; DB_HDR = 8; DB_SZ = 16; }
+enum DbOff { DB_FD = 0; DB_HDR = 8; DB_PATH = 16; DB_TX = 24; DB_SZ = 32; }
 
 # ── Result set (48 bytes header + inline data) ──────────────
 
@@ -42,15 +44,17 @@ enum RsOff {
     RS_HDR_SZ = 48;
 }
 
-# ── Init ────────────────────────────────────────────────────
+# ── Init ────────────────────
 
+# Initialize patra (call once before use)
 fn patra_init() {
     _sql_init();
     sakshi_set_level(SK_WARN);
 }
 
-# ── Open / Close ────────────────────────────────────────────
+# ── Open / Close ────────────────────
 
+# Open or create a .patra database file
 fn patra_open(path) {
     _tbl_lp_idx = 0 - 1;
     bp_flush();
@@ -79,14 +83,27 @@ fn patra_open(path) {
         fl_free(tmp);
     }
 
+    # Build WAL path
+    var plen = strlen(path);
+    var wpath = alloc(plen + 5);
+    memcpy(wpath, path, plen);
+    memcpy(wpath + plen, ".wal", 4);
+    store8(wpath + plen + 4, 0);
+
+    # WAL recovery
+    wal_recover(fd, wpath);
+
     var db = fl_alloc(DB_SZ);
     var hdr = fl_alloc(PAGE_SIZE);
     patra_hdr_read(fd, hdr);
     store64(db + DB_FD, fd);
     store64(db + DB_HDR, hdr);
+    store64(db + DB_PATH, wpath);
+    store64(db + DB_TX, 0);
     return db;
 }
 
+# Close database and free resources
 fn patra_close(db) {
     if (db == 0) { return 0; }
     var fd = load64(db + DB_FD);
@@ -99,7 +116,7 @@ fn patra_close(db) {
 fn _db_fd(db)  { return load64(db + DB_FD); }
 fn _db_hdr(db) { return load64(db + DB_HDR); }
 
-# ── Exec: CREATE TABLE ──────────────────────────────────────
+# ── Exec: CREATE TABLE ────────────────────
 
 fn _exec_create(db) {
     var fd = _db_fd(db);
@@ -120,7 +137,7 @@ fn _exec_create(db) {
     }
 
     var r = tbl_create(fd, hdr, load64(_sql_pr + PR_TNAME),
-                       load64(_sql_pr + PR_TNLEN), names, types, ncols);
+    load64(_sql_pr + PR_TNLEN), names, types, ncols);
     fl_free(names);
     fl_free(types);
 
@@ -129,7 +146,7 @@ fn _exec_create(db) {
     return r;
 }
 
-# ── Exec: INSERT ─────────────────────────────────────────────
+# ── Exec: INSERT ────────────────────
 
 fn _exec_insert(db) {
     var fd = _db_fd(db);
@@ -216,7 +233,7 @@ fn _exec_insert(db) {
     return r;
 }
 
-# ── Exec: UPDATE ─────────────────────────────────────────────
+# ── Exec: UPDATE ────────────────────
 
 fn _exec_update(db) {
     var fd = _db_fd(db);
@@ -252,7 +269,7 @@ fn _exec_update(db) {
     return r;
 }
 
-# ── Exec: DELETE ─────────────────────────────────────────────
+# ── Exec: DELETE ────────────────────
 
 fn _exec_delete(db) {
     var fd = _db_fd(db);
@@ -284,7 +301,7 @@ fn _exec_delete(db) {
     return r;
 }
 
-# ── Exec: CREATE INDEX ────────────────────────────────────────
+# ── Exec: CREATE INDEX ────────────────────
 
 fn _exec_create_index(db) {
     var fd = _db_fd(db);
@@ -344,8 +361,46 @@ fn _exec_create_index(db) {
     return PATRA_OK;
 }
 
-# ── patra_exec ───────────────────────────────────────────────
+# ── Transactions ────────────────────
 
+# Begin an explicit transaction (lock + WAL)
+fn patra_begin(db) {
+    if (load64(db + DB_TX) != 0) { return PATRA_OK; }
+    var fd = _db_fd(db);
+    var wpath = load64(db + DB_PATH);
+    patra_lock_ex(fd);
+    patra_hdr_read(fd, _db_hdr(db));
+    wal_start(fd, wpath);
+    store64(db + DB_TX, 1);
+    return PATRA_OK;
+}
+
+# Commit transaction (sync + unlock)
+fn patra_commit(db) {
+    if (load64(db + DB_TX) == 0) { return PATRA_OK; }
+    var fd = _db_fd(db);
+    var wpath = load64(db + DB_PATH);
+    patra_hdr_write(fd, _db_hdr(db));
+    wal_commit(wpath);
+    patra_unlock(fd);
+    store64(db + DB_TX, 0);
+    return PATRA_OK;
+}
+
+# Rollback transaction (restore pages + unlock)
+fn patra_rollback(db) {
+    if (load64(db + DB_TX) == 0) { return PATRA_OK; }
+    var wpath = load64(db + DB_PATH);
+    wal_rollback(wpath);
+    patra_hdr_read(_db_fd(db), _db_hdr(db));
+    patra_unlock(_db_fd(db));
+    store64(db + DB_TX, 0);
+    return PATRA_OK;
+}
+
+# ── patra_exec ────────────────────
+
+# Execute a DDL/DML SQL statement
 fn patra_exec(db, sql) {
     if (db == 0) { return PATRA_ERR_IO; }
     sql_tokenize(sql);
@@ -361,7 +416,7 @@ fn patra_exec(db, sql) {
     return PATRA_ERR_SYNTAX;
 }
 
-# ── Sorting for ORDER BY ────────────────────────────────────
+# ── Sorting for ORDER BY ────────────────────
 
 fn _strcmp_nn(a, b) {
     var i = 0;
@@ -431,6 +486,7 @@ fn _sort_result_multi(rs, ob_idxs, ob_types, ob_dirs, obn) {
 
 # ── patra_query (SELECT with WHERE, ORDER BY, LIMIT) ────────
 
+# Execute a SELECT query, returns result set
 fn patra_query(db, sql) {
     if (db == 0) { return 0; }
     sql_tokenize(sql);
@@ -471,7 +527,7 @@ fn patra_query(db, sql) {
         var agg_off = 0;
         if (agg != AGG_COUNT) {
             var aci = _wh_resolve_col(schema, ncols,
-                load64(_sql_pr + PR_AGG_COL_PTR), load64(_sql_pr + PR_AGG_COL_LEN));
+            load64(_sql_pr + PR_AGG_COL_PTR), load64(_sql_pr + PR_AGG_COL_LEN));
             if (aci < 0) { fl_free(schema); patra_unlock(fd); return 0; }
             agg_off = row_field_offset(schema, ncols, aci);
         }
@@ -665,33 +721,40 @@ fn patra_query(db, sql) {
     return rs;
 }
 
-# ── Result set accessors ────────────────────────────────────
+# ── Result set accessors ────────────────────
 
+# Get number of rows in result set
 fn patra_result_count(rs) { return load64(rs + RS_NROWS); }
+# Get number of columns in result set
 fn patra_result_cols(rs)  { return load64(rs + RS_NCOLS); }
 
+# Get integer value at (row, col)
 fn patra_result_get_int(rs, row, col) {
     var data = load64(rs + RS_DATA);
     var rsz = load64(rs + RS_ROWSZ);
     return load64(data + row * rsz + _rs_field_off(rs, col));
 }
 
+# Get string pointer at (row, col)
 fn patra_result_get_str(rs, row, col) {
     var data = load64(rs + RS_DATA);
     var rsz = load64(rs + RS_ROWSZ);
     return data + row * rsz + _rs_field_off(rs, col);
 }
 
+# Get column name at index
 fn patra_result_col_name(rs, col) {
     var names = load64(rs + RS_NAMES);
     return names + col * SCH_CNAME_MAX;
 }
 
+# Get column type at index (COL_INT or COL_STR)
 fn patra_result_col_type(rs, col) {
     var types = load64(rs + RS_TYPES);
     return load64(types + col * 8);
 }
 
+# Free result set and all buffers
 fn patra_result_free(rs) {
     if (rs != 0) { fl_free(rs); }
     return 0;

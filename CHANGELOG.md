@@ -5,6 +5,26 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-04-09
+
+### Added
+
+- SHA-256 hash (FIPS 180-4): `sha256(data, len, out)`, `sha256_hex(data, len, out)`
+  - Verified against NIST test vectors ("", "abc", "hello")
+- Write-ahead logging (WAL): page before-images logged before modification
+  - Automatic crash recovery on patra_open (replays WAL if present)
+  - Max 64 pages per transaction, dedup to avoid double-logging
+- Transaction API: `patra_begin(db)`, `patra_commit(db)`, `patra_rollback(db)`
+  - Rollback restores all pages modified in the transaction
+  - Without BEGIN/COMMIT, each patra_exec is auto-committed (existing behavior preserved)
+- fdatasync on WAL commit for durability guarantee
+
+### Testing
+
+- 243 unit tests across 61 test groups
+- SHA-256 FIPS test vectors
+- Transaction commit persistence + rollback verification
+
 ## [0.10.0] - 2026-04-09
 
 ### Added

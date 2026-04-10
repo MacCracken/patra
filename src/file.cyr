@@ -1,6 +1,6 @@
 # file.cyr — .patra file format constants, header, flock locking
 
-# ── Constants ───────────────────────────────────────────────
+# ── Constants ────────────────────
 
 enum PageConst { PAGE_SIZE = 4096; MAX_TABLES = 63; MAX_COLS = 32; }
 
@@ -70,22 +70,28 @@ enum FPOff { FP_TYPE = 0; FP_NEXT = 8; }
 enum Flock { LOCK_SH = 1; LOCK_EX = 2; LOCK_UN = 8; SYS_FLOCK = 73; }
 enum Sync { SYS_FDATASYNC = 75; }
 
-# ── Low-level operations ────────────────────────────────────
+# ── Low-level operations ────────────────────
 
+# Seek to byte offset in file
 fn _pt_seek(fd, off) {
     return syscall(SYS_LSEEK, fd, off, 0);
 }
 
+# Apply flock operation to fd
 fn _pt_flock(fd, op) {
     return syscall(SYS_FLOCK, fd, op);
 }
 
+# Acquire exclusive (write) lock
 fn patra_lock_ex(fd)  { return _pt_flock(fd, LOCK_EX); }
+# Acquire shared (read) lock
 fn patra_lock_sh(fd)  { return _pt_flock(fd, LOCK_SH); }
+# Release lock
 fn patra_unlock(fd)   { return _pt_flock(fd, LOCK_UN); }
 
-# ── Header management ───────────────────────────────────────
+# ── Header management ────────────────────
 
+# Initialize header buffer with magic and defaults
 fn patra_hdr_init(buf) {
     memset(buf, 0, PAGE_SIZE);
     store32(buf + HDR_MAGIC, PATRA_MAGIC);
@@ -93,12 +99,14 @@ fn patra_hdr_init(buf) {
     store64(buf + HDR_PGCOUNT, 1);
 }
 
+# Read header page from file into buffer
 fn patra_hdr_read(fd, buf) {
     if (_pt_seek(fd, 0) < 0) { return PATRA_ERR_IO; }
     if (syscall(SYS_READ, fd, buf, PAGE_SIZE) != PAGE_SIZE) { return PATRA_ERR_IO; }
     return PATRA_OK;
 }
 
+# Write header page from buffer to file with fdatasync
 fn patra_hdr_write(fd, buf) {
     if (_pt_seek(fd, 0) < 0) { return PATRA_ERR_IO; }
     if (syscall(SYS_WRITE, fd, buf, PAGE_SIZE) != PAGE_SIZE) { return PATRA_ERR_IO; }
@@ -106,18 +114,21 @@ fn patra_hdr_write(fd, buf) {
     return PATRA_OK;
 }
 
+# Verify header magic bytes
 fn patra_hdr_verify(buf) {
     if (load32(buf + HDR_MAGIC) != PATRA_MAGIC) { return PATRA_ERR_MAGIC; }
     return PATRA_OK;
 }
 
+# Log error message via sakshi
 fn _pt_err(msg) {
     sakshi_error(msg, strlen(msg));
 }
 
-# ── File create / open ──────────────────────────────────────
+# ── File create / open ────────────────────
 
 # Create new .patra file (O_RDWR | O_CREAT | O_EXCL = 194, mode 0644 = 420)
+# Create new .patra file with initialized header
 fn _pt_file_create(path) {
     var fd = syscall(SYS_OPEN, path, 194, 420);
     if (fd < 0) { return 0 - 1; }
@@ -131,6 +142,7 @@ fn _pt_file_create(path) {
 }
 
 # Open existing .patra file (O_RDWR = 2)
+# Open existing .patra file for read-write
 fn _pt_file_open(path) {
     return syscall(SYS_OPEN, path, 2, 0);
 }

@@ -1,0 +1,109 @@
+# wal.cyr — Write-ahead logging for crash recovery
+#
+# Before modifying a page, the current (before) content is saved to a .wal file.
+# On commit: WAL is deleted. On crash recovery: WAL is replayed (undo).
+# Integrates with page_write via globals — no call-site changes needed.
+
+var _wal_fd = 0 - 1;
+var _wal_db_fd = 0 - 1;
+var _wal_pages = 0;
+var _wal_nlog = 0;
+
+enum WalConst { WAL_MAX_PAGES = 64; WAL_REC_SZ = 4104; }
+
+# Begin WAL logging for a transaction
+fn wal_start(db_fd, wal_path) {
+    _wal_fd = syscall(SYS_OPEN, wal_path, 578, 420);
+    # O_RDWR | O_CREAT | O_TRUNC = 2 + 64 + 512 = 578
+    if (_wal_fd < 0) { _wal_fd = 0 - 1; return PATRA_ERR_IO; }
+    _wal_db_fd = db_fd;
+    if (_wal_pages == 0) { _wal_pages = alloc(WAL_MAX_PAGES * 8); }
+    _wal_nlog = 0;
+    return PATRA_OK;
+}
+
+# Returns 1 if WAL logging is active
+fn wal_is_active() {
+    if (_wal_fd >= 0) { return 1; }
+    return 0;
+}
+
+# Log before-image of a page (called from page_write)
+fn wal_log_page(page_num) {
+    if (_wal_fd < 0) { return 0; }
+    # Check if already logged
+    for (var i = 0; i < _wal_nlog; i = i + 1) {
+        if (load64(_wal_pages + i * 8) == page_num) { return 0; }
+    }
+    if (_wal_nlog >= WAL_MAX_PAGES) { return 0; }
+    store64(_wal_pages + _wal_nlog * 8, page_num);
+    _wal_nlog = _wal_nlog + 1;
+
+    # Read current page from disk
+    var buf = fl_alloc(WAL_REC_SZ);
+    store64(buf, page_num);
+    _pt_seek(_wal_db_fd, page_offset(page_num));
+    var nr = syscall(SYS_READ, _wal_db_fd, buf + 8, PAGE_SIZE);
+    if (nr < 0) { nr = 0; }
+    # Write record to WAL
+    syscall(SYS_WRITE, _wal_fd, buf, WAL_REC_SZ);
+    fl_free(buf);
+    return 0;
+}
+
+# Commit transaction: sync WAL, delete it
+fn wal_commit(wal_path) {
+    if (_wal_fd >= 0) {
+        syscall(SYS_FDATASYNC, _wal_fd);
+        syscall(SYS_CLOSE, _wal_fd);
+    }
+    _wal_fd = 0 - 1;
+    _wal_nlog = 0;
+    # Delete WAL — transaction complete
+    syscall(SYS_UNLINK, wal_path);
+    return 0;
+}
+
+# Rollback: restore before-images from WAL, delete it
+fn wal_rollback(wal_path) {
+    if (_wal_fd < 0) { return 0; }
+    # Replay WAL: restore before-images
+    syscall(SYS_LSEEK, _wal_fd, 0, 0);
+    var buf = fl_alloc(WAL_REC_SZ);
+    var done = 0;
+    while (done == 0) {
+        var nr = syscall(SYS_READ, _wal_fd, buf, WAL_REC_SZ);
+        if (nr != WAL_REC_SZ) { done = 1; continue; }
+        var pg = load64(buf);
+        _pt_seek(_wal_db_fd, page_offset(pg));
+        syscall(SYS_WRITE, _wal_db_fd, buf + 8, PAGE_SIZE);
+    }
+    fl_free(buf);
+    syscall(SYS_FDATASYNC, _wal_db_fd);
+    syscall(SYS_CLOSE, _wal_fd);
+    _wal_fd = 0 - 1;
+    _wal_nlog = 0;
+    syscall(SYS_UNLINK, wal_path);
+    return 0;
+}
+
+# Recover from crash: if WAL file exists, replay it
+fn wal_recover(db_fd, wal_path) {
+    var wfd = syscall(SYS_OPEN, wal_path, 0, 0);
+    if (wfd < 0) { return 0; }
+    # WAL exists — replay
+    var buf = fl_alloc(WAL_REC_SZ);
+    var done = 0;
+    while (done == 0) {
+        var nr = syscall(SYS_READ, wfd, buf, WAL_REC_SZ);
+        if (nr != WAL_REC_SZ) { done = 1; continue; }
+        var pg = load64(buf);
+        _pt_seek(db_fd, page_offset(pg));
+        syscall(SYS_WRITE, db_fd, buf + 8, PAGE_SIZE);
+    }
+    fl_free(buf);
+    syscall(SYS_FDATASYNC, db_fd);
+    syscall(SYS_CLOSE, wfd);
+    syscall(SYS_UNLINK, wal_path);
+    return 1;
+}

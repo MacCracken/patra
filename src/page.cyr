@@ -1,23 +1,29 @@
 # page.cyr — 4KB page management (alloc, read, write, free list)
 
+# Compute byte offset for page number
 fn page_offset(num) {
     return PAGE_SIZE + num * PAGE_SIZE;
 }
 
+# Read a page from file into buffer
 fn page_read(fd, num, buf) {
     if (_pt_seek(fd, page_offset(num)) < 0) { return PATRA_ERR_IO; }
     if (syscall(SYS_READ, fd, buf, PAGE_SIZE) != PAGE_SIZE) { return PATRA_ERR_IO; }
     return PATRA_OK;
 }
 
+# Write a page from buffer to file (WAL-logged)
 fn page_write(fd, num, buf) {
+    wal_log_page(num);
     if (_pt_seek(fd, page_offset(num)) < 0) { return PATRA_ERR_IO; }
     if (syscall(SYS_WRITE, fd, buf, PAGE_SIZE) != PAGE_SIZE) { return PATRA_ERR_IO; }
     return PATRA_OK;
 }
 
+# Flush buffer pool (no-op, reserved for future use)
 fn bp_flush() { return 0; }
 
+# Allocate a new page (from free list or extend file)
 fn page_alloc(fd, hdr) {
     var fh = load64(hdr + HDR_FREEHEAD);
     if (fh != 0) {
@@ -38,6 +44,7 @@ fn page_alloc(fd, hdr) {
     return num;
 }
 
+# Free a page (add to free list)
 fn page_free(fd, hdr, num) {
     var buf = fl_alloc(PAGE_SIZE);
     memset(buf, 0, PAGE_SIZE);
@@ -48,6 +55,7 @@ fn page_free(fd, hdr, num) {
     fl_free(buf);
 }
 
+# Initialize buffer as empty data page
 fn page_init_data(buf) {
     memset(buf, 0, PAGE_SIZE);
     store64(buf + DP_TYPE, PAGE_DATA);
