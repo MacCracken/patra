@@ -39,6 +39,12 @@ enum TokType {
     TK_GT = 33;
     TK_LTE = 34;
     TK_GTE = 35;
+    TK_COUNT = 36;
+    TK_SUM = 37;
+    TK_MINF = 38;
+    TK_MAXF = 39;
+    TK_INDEX = 40;
+    TK_ON = 41;
 }
 
 enum StmtType {
@@ -48,7 +54,11 @@ enum StmtType {
     STMT_SELECT = 3;
     STMT_UPDATE = 4;
     STMT_DELETE = 5;
+    STMT_CREATE_INDEX = 6;
 }
+
+enum AggType { AGG_NONE = 0; AGG_COUNT = 1; AGG_SUM = 2; AGG_MIN = 3; AGG_MAX = 4; }
+enum AggOff { PR_AGG_TYPE = 768; PR_AGG_COL_PTR = 776; PR_AGG_COL_LEN = 784; }
 
 # Token layout: 24 bytes (type, ptr, len)
 enum TokOff { TOK_TYPE = 0; TOK_PTR = 8; TOK_LEN = 16; TOK_SZ = 24; }
@@ -204,6 +214,12 @@ fn _classify_ident(ptr, len) {
     if (_kw_eq(ptr, len, "LIMIT"))  { return TK_LIMIT; }
     if (_kw_eq(ptr, len, "ASC"))    { return TK_ASC; }
     if (_kw_eq(ptr, len, "DESC"))   { return TK_DESC; }
+    if (_kw_eq(ptr, len, "COUNT")) { return TK_COUNT; }
+    if (_kw_eq(ptr, len, "SUM"))   { return TK_SUM; }
+    if (_kw_eq(ptr, len, "MIN"))   { return TK_MINF; }
+    if (_kw_eq(ptr, len, "MAX"))   { return TK_MAXF; }
+    if (_kw_eq(ptr, len, "INDEX")) { return TK_INDEX; }
+    if (_kw_eq(ptr, len, "ON"))    { return TK_ON; }
     return TK_IDENT;
 }
 
@@ -500,12 +516,61 @@ fn _parse_insert() {
 }
 
 fn _parse_select() {
-    # SELECT * FROM table [WHERE ...] [ORDER BY col] [LIMIT n]
+    # SELECT * | COUNT(*) | SUM(col) | MIN(col) | MAX(col) FROM table [WHERE ...] [ORDER BY ...] [LIMIT n]
     var pos = 0;
     if (_tok_type(pos) != TK_SELECT) { return PATRA_ERR_SYNTAX; }
     pos = pos + 1;
-    if (_tok_type(pos) != TK_STAR)   { return PATRA_ERR_SYNTAX; }
-    pos = pos + 1;
+
+    # Check for aggregate function or *
+    var tt = _tok_type(pos);
+    if (tt == TK_COUNT) {
+        store64(_sql_pr + PR_AGG_TYPE, AGG_COUNT);
+        pos = pos + 1;
+        if (_tok_type(pos) != TK_LPAREN) { return PATRA_ERR_SYNTAX; }
+        pos = pos + 1;
+        if (_tok_type(pos) != TK_STAR) { return PATRA_ERR_SYNTAX; }
+        pos = pos + 1;
+        if (_tok_type(pos) != TK_RPAREN) { return PATRA_ERR_SYNTAX; }
+        pos = pos + 1;
+    } elif (tt == TK_SUM) {
+        store64(_sql_pr + PR_AGG_TYPE, AGG_SUM);
+        pos = pos + 1;
+        if (_tok_type(pos) != TK_LPAREN) { return PATRA_ERR_SYNTAX; }
+        pos = pos + 1;
+        if (_tok_type(pos) != TK_IDENT) { return PATRA_ERR_SYNTAX; }
+        store64(_sql_pr + PR_AGG_COL_PTR, _tok_ptr(pos));
+        store64(_sql_pr + PR_AGG_COL_LEN, _tok_len(pos));
+        pos = pos + 1;
+        if (_tok_type(pos) != TK_RPAREN) { return PATRA_ERR_SYNTAX; }
+        pos = pos + 1;
+    } elif (tt == TK_MINF) {
+        store64(_sql_pr + PR_AGG_TYPE, AGG_MIN);
+        pos = pos + 1;
+        if (_tok_type(pos) != TK_LPAREN) { return PATRA_ERR_SYNTAX; }
+        pos = pos + 1;
+        if (_tok_type(pos) != TK_IDENT) { return PATRA_ERR_SYNTAX; }
+        store64(_sql_pr + PR_AGG_COL_PTR, _tok_ptr(pos));
+        store64(_sql_pr + PR_AGG_COL_LEN, _tok_len(pos));
+        pos = pos + 1;
+        if (_tok_type(pos) != TK_RPAREN) { return PATRA_ERR_SYNTAX; }
+        pos = pos + 1;
+    } elif (tt == TK_MAXF) {
+        store64(_sql_pr + PR_AGG_TYPE, AGG_MAX);
+        pos = pos + 1;
+        if (_tok_type(pos) != TK_LPAREN) { return PATRA_ERR_SYNTAX; }
+        pos = pos + 1;
+        if (_tok_type(pos) != TK_IDENT) { return PATRA_ERR_SYNTAX; }
+        store64(_sql_pr + PR_AGG_COL_PTR, _tok_ptr(pos));
+        store64(_sql_pr + PR_AGG_COL_LEN, _tok_len(pos));
+        pos = pos + 1;
+        if (_tok_type(pos) != TK_RPAREN) { return PATRA_ERR_SYNTAX; }
+        pos = pos + 1;
+    } elif (tt == TK_STAR) {
+        pos = pos + 1;
+    } else {
+        return PATRA_ERR_SYNTAX;
+    }
+
     if (_tok_type(pos) != TK_FROM)   { return PATRA_ERR_SYNTAX; }
     pos = pos + 1;
     if (_tok_type(pos) != TK_IDENT)  { return PATRA_ERR_SYNTAX; }
@@ -634,10 +699,38 @@ fn _parse_delete() {
     return PATRA_OK;
 }
 
+fn _parse_create_index() {
+    # CREATE INDEX ON table (col)
+    var pos = 0;
+    if (_tok_type(pos) != TK_CREATE) { return PATRA_ERR_SYNTAX; }
+    pos = pos + 1;
+    if (_tok_type(pos) != TK_INDEX) { return PATRA_ERR_SYNTAX; }
+    pos = pos + 1;
+    if (_tok_type(pos) != TK_ON) { return PATRA_ERR_SYNTAX; }
+    pos = pos + 1;
+    if (_tok_type(pos) != TK_IDENT) { return PATRA_ERR_SYNTAX; }
+    store64(_sql_pr + PR_STMT, STMT_CREATE_INDEX);
+    store64(_sql_pr + PR_TNAME, _tok_ptr(pos));
+    store64(_sql_pr + PR_TNLEN, _tok_len(pos));
+    pos = pos + 1;
+    if (_tok_type(pos) != TK_LPAREN) { return PATRA_ERR_SYNTAX; }
+    pos = pos + 1;
+    if (_tok_type(pos) != TK_IDENT) { return PATRA_ERR_SYNTAX; }
+    # Store column name in first item slot
+    store64(_sql_pr + PR_ITEMS, _tok_ptr(pos));
+    store64(_sql_pr + PR_ITEMS + 8, _tok_len(pos));
+    pos = pos + 1;
+    if (_tok_type(pos) != TK_RPAREN) { return PATRA_ERR_SYNTAX; }
+    return PATRA_OK;
+}
+
 fn sql_parse() {
     memset(_sql_pr, 0, 4096);
     var tt = _tok_type(0);
-    if (tt == TK_CREATE) { return _parse_create(); }
+    if (tt == TK_CREATE) {
+        if (_tok_type(1) == TK_INDEX) { return _parse_create_index(); }
+        return _parse_create();
+    }
     if (tt == TK_INSERT) { return _parse_insert(); }
     if (tt == TK_SELECT) { return _parse_select(); }
     if (tt == TK_UPDATE) { return _parse_update(); }

@@ -53,6 +53,7 @@ fn patra_init() {
 
 fn patra_open(path) {
     _tbl_lp_idx = 0 - 1;
+    bp_flush();
     var fd = _pt_file_open(path);
     if (fd < 0) {
         fd = _pt_file_create(path);
@@ -283,6 +284,66 @@ fn _exec_delete(db) {
     return r;
 }
 
+# ── Exec: CREATE INDEX ────────────────────────────────────────
+
+fn _exec_create_index(db) {
+    var fd = _db_fd(db);
+    var hdr = _db_hdr(db);
+
+    patra_lock_ex(fd);
+    patra_hdr_read(fd, hdr);
+
+    var tname = load64(_sql_pr + PR_TNAME);
+    var tnlen = load64(_sql_pr + PR_TNLEN);
+    var idx = tbl_find(hdr, tname, tnlen);
+    if (idx < 0) { patra_unlock(fd); return PATRA_ERR_NOTFOUND; }
+
+    var entry = _tbl_entry(hdr, idx);
+    var spg = load64(entry + TBL_SCHEMA);
+    var schema = fl_alloc(PAGE_SIZE);
+    page_read(fd, spg, schema);
+    var ncols = load64(schema + SCH_NCOLS);
+
+    # Resolve column name
+    var cn_ptr = load64(_sql_pr + PR_ITEMS);
+    var cn_len = load64(_sql_pr + PR_ITEMS + 8);
+    var ci = _wh_resolve_col(schema, ncols, cn_ptr, cn_len);
+    if (ci < 0) { fl_free(schema); patra_unlock(fd); return PATRA_ERR_NOTFOUND; }
+
+    # Check column is INT
+    var ct = load64(schema + SCH_START + ci * SCH_ENTRY_SZ + SCH_CTYPE);
+    if (ct != COL_INT) { fl_free(schema); patra_unlock(fd); return PATRA_ERR_TYPE; }
+
+    # Create B-tree and populate with existing rows
+    var bt = btree_create(fd, hdr);
+    var rsz = row_compute_size(schema, ncols);
+    var koff = row_field_offset(schema, ncols, ci);
+    var cur = load64(entry + TBL_ROOT);
+    var pbuf = fl_alloc(PAGE_SIZE);
+
+    while (cur != 0) {
+        page_read(fd, cur, pbuf);
+        var nrows = load64(pbuf + DP_NROWS);
+        for (var i = 0; i < nrows; i = i + 1) {
+            var rp = pbuf + DP_DATA + i * rsz;
+            var key = row_read_int(rp, koff);
+            bt = btree_insert(fd, hdr, bt, key, _bt_mkref(cur, i));
+        }
+        cur = load64(pbuf + DP_NEXT);
+    }
+    fl_free(pbuf);
+
+    # Store index in schema page
+    store64(schema + SCH_IDX_COL, ci);
+    store64(schema + SCH_IDX_ROOT, bt);
+    page_write(fd, spg, schema);
+    fl_free(schema);
+
+    patra_hdr_write(fd, hdr);
+    patra_unlock(fd);
+    return PATRA_OK;
+}
+
 # ── patra_exec ───────────────────────────────────────────────
 
 fn patra_exec(db, sql) {
@@ -296,6 +357,7 @@ fn patra_exec(db, sql) {
     if (stmt == STMT_INSERT) { return _exec_insert(db); }
     if (stmt == STMT_UPDATE) { return _exec_update(db); }
     if (stmt == STMT_DELETE) { return _exec_delete(db); }
+    if (stmt == STMT_CREATE_INDEX) { return _exec_create_index(db); }
     return PATRA_ERR_SYNTAX;
 }
 
@@ -398,6 +460,67 @@ fn patra_query(db, sql) {
     var schema = fl_alloc(PAGE_SIZE);
     page_read(fd, spg, schema);
     var rsz = row_compute_size(schema, ncols);
+
+    # Check for aggregate query
+    var agg = load64(_sql_pr + PR_AGG_TYPE);
+    if (agg != AGG_NONE) {
+        # Compute aggregate over matching rows
+        var agg_val = 0;
+        var agg_count = 0;
+        var agg_init = 0;
+        var agg_off = 0;
+        if (agg != AGG_COUNT) {
+            var aci = _wh_resolve_col(schema, ncols,
+                load64(_sql_pr + PR_AGG_COL_PTR), load64(_sql_pr + PR_AGG_COL_LEN));
+            if (aci < 0) { fl_free(schema); patra_unlock(fd); return 0; }
+            agg_off = row_field_offset(schema, ncols, aci);
+        }
+
+        var acur = load64(entry + TBL_ROOT);
+        var abuf = fl_alloc(PAGE_SIZE);
+        while (acur != 0) {
+            page_read(fd, acur, abuf);
+            var anr = load64(abuf + DP_NROWS);
+            for (var ai = 0; ai < anr; ai = ai + 1) {
+                var arp = abuf + DP_DATA + ai * rsz;
+                if (where_eval(arp, schema, ncols, _sql_pr)) {
+                    agg_count = agg_count + 1;
+                    if (agg != AGG_COUNT) {
+                        var av = row_read_int(arp, agg_off);
+                        if (agg == AGG_SUM) { agg_val = agg_val + av; }
+                        elif (agg_init == 0) { agg_val = av; agg_init = 1; }
+                        elif (agg == AGG_MIN) { if (av < agg_val) { agg_val = av; } }
+                        elif (agg == AGG_MAX) { if (av > agg_val) { agg_val = av; } }
+                    }
+                }
+            }
+            acur = load64(abuf + DP_NEXT);
+        }
+        fl_free(abuf);
+        fl_free(schema);
+        patra_unlock(fd);
+
+        if (agg == AGG_COUNT) { agg_val = agg_count; }
+
+        # Build 1-row, 1-column result
+        var ars = fl_alloc(RS_HDR_SZ + 8 + 32 + 8);
+        memset(ars, 0, RS_HDR_SZ + 8 + 32 + 8);
+        store64(ars + RS_NCOLS, 1);
+        store64(ars + RS_NROWS, 1);
+        store64(ars + RS_TYPES, ars + RS_HDR_SZ);
+        store64(ars + RS_NAMES, ars + RS_HDR_SZ + 8);
+        store64(ars + RS_ROWSZ, 8);
+        store64(ars + RS_DATA, ars + RS_HDR_SZ + 8 + 32);
+        store64(ars + RS_HDR_SZ, COL_INT);
+        # Column name based on aggregate type
+        var aname = ars + RS_HDR_SZ + 8;
+        if (agg == AGG_COUNT) { memcpy(aname, "count", 5); }
+        elif (agg == AGG_SUM) { memcpy(aname, "sum", 3); }
+        elif (agg == AGG_MIN) { memcpy(aname, "min", 3); }
+        elif (agg == AGG_MAX) { memcpy(aname, "max", 3); }
+        store64(ars + RS_HDR_SZ + 8 + 32, agg_val);
+        return ars;
+    }
 
     # Allocate result for worst case (all rows)
     var total = RS_HDR_SZ + ncols * 8 + ncols * SCH_CNAME_MAX + nrows * rsz;

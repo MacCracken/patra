@@ -815,6 +815,101 @@ fn test_btree_many() {
     patra_close(db);
 }
 
+# ── v0.10: Aggregates ─────────────────────────────────────────
+
+fn test_aggregates() {
+    test_group("aggregates");
+    cleanup();
+    var db = patra_open(_tpath);
+    _setup_people(db);
+
+    var rs = patra_query(db, "SELECT COUNT(*) FROM people");
+    assert_eq(patra_result_count(rs), 1, "count 1 row");
+    assert_eq(patra_result_get_int(rs, 0, 0), 5, "count=5");
+    assert_streq(patra_result_col_name(rs, 0), "count", "col name");
+    patra_result_free(rs);
+
+    rs = patra_query(db, "SELECT SUM(age) FROM people");
+    assert_eq(patra_result_get_int(rs, 0, 0), 155, "sum=155");
+    patra_result_free(rs);
+
+    rs = patra_query(db, "SELECT MIN(age) FROM people");
+    assert_eq(patra_result_get_int(rs, 0, 0), 25, "min=25");
+    patra_result_free(rs);
+
+    rs = patra_query(db, "SELECT MAX(age) FROM people");
+    assert_eq(patra_result_get_int(rs, 0, 0), 40, "max=40");
+    patra_result_free(rs);
+
+    rs = patra_query(db, "SELECT MIN(id) FROM people");
+    assert_eq(patra_result_get_int(rs, 0, 0), 1, "min id=1");
+    patra_result_free(rs);
+
+    rs = patra_query(db, "SELECT MAX(id) FROM people");
+    assert_eq(patra_result_get_int(rs, 0, 0), 5, "max id=5");
+    patra_result_free(rs);
+
+    patra_close(db);
+}
+
+fn test_aggregate_where() {
+    test_group("aggregate where");
+    cleanup();
+    var db = patra_open(_tpath);
+    _setup_people(db);
+
+    var rs = patra_query(db, "SELECT COUNT(*) FROM people WHERE age > 25");
+    assert_eq(patra_result_get_int(rs, 0, 0), 3, "count age>25");
+    patra_result_free(rs);
+
+    rs = patra_query(db, "SELECT SUM(age) FROM people WHERE id <= 3");
+    assert_eq(patra_result_get_int(rs, 0, 0), 90, "sum first 3");
+    patra_result_free(rs);
+
+    rs = patra_query(db, "SELECT MAX(age) FROM people WHERE name = 'bob'");
+    assert_eq(patra_result_get_int(rs, 0, 0), 25, "max bob age");
+    patra_result_free(rs);
+
+    patra_close(db);
+}
+
+# ── v0.10: CREATE INDEX ──────────────────────────────────────
+
+fn test_create_index() {
+    test_group("create index");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE ci (x INT, y INT, name STR)");
+    patra_exec(db, "INSERT INTO ci VALUES (1, 10, 'a')");
+    patra_exec(db, "INSERT INTO ci VALUES (2, 20, 'b')");
+    patra_exec(db, "INSERT INTO ci VALUES (3, 30, 'c')");
+    patra_exec(db, "INSERT INTO ci VALUES (4, 20, 'd')");
+
+    # Create index on y column (not the first column)
+    var r = patra_exec(db, "CREATE INDEX ON ci (y)");
+    assert_eq(r, PATRA_OK, "create index ok");
+
+    # Now WHERE y = 20 should use the index
+    var rs = patra_query(db, "SELECT * FROM ci WHERE y = 20");
+    assert_eq(patra_result_count(rs), 2, "y=20: 2 rows");
+    patra_result_free(rs);
+
+    # Range query on indexed column
+    rs = patra_query(db, "SELECT * FROM ci WHERE y > 15");
+    assert_eq(patra_result_count(rs), 3, "y>15: 3 rows");
+    patra_result_free(rs);
+
+    # Index on STR should fail
+    r = patra_exec(db, "CREATE INDEX ON ci (name)");
+    assert_eq(r, PATRA_ERR_TYPE, "str index rejected");
+
+    # Missing table
+    r = patra_exec(db, "CREATE INDEX ON ghost (x)");
+    assert_eq(r, PATRA_ERR_NOTFOUND, "missing table");
+
+    patra_close(db);
+}
+
 # ── v0.8.1: Indexed range scan ───────────────────────────────
 
 fn test_indexed_range() {
@@ -1105,6 +1200,31 @@ fn test_sql_semicolons() {
 
 # ── Coverage: JSONL special chars ────────────────────────────
 
+fn test_jsonl_field_extract() {
+    test_group("jsonl field extract");
+    var line = "{\"action\": \"login\", \"count\": 42, \"name\": \"alice\"}";
+    var llen = strlen(line);
+    var slen = 0;
+
+    # String extraction
+    var sp = jsonl_get_str(line, llen, "action", 6, &slen);
+    assert(sp != 0, "found action");
+    assert_eq(slen, 5, "action len 5");
+    assert(memeq(sp, "login", 5), "action=login");
+
+    sp = jsonl_get_str(line, llen, "name", 4, &slen);
+    assert(sp != 0, "found name");
+    assert_eq(slen, 5, "name len 5");
+    assert(memeq(sp, "alice", 5), "name=alice");
+
+    # Integer extraction
+    assert_eq(jsonl_get_int(line, llen, "count", 5), 42, "count=42");
+
+    # Missing key
+    assert_eq(jsonl_get_str(line, llen, "nope", 4, &slen), 0, "missing key");
+    assert_eq(jsonl_get_int(line, llen, "nope", 4), 0, "missing int");
+}
+
 fn test_jsonl_special_chars() {
     test_group("jsonl special chars");
     jcleanup();
@@ -1197,6 +1317,11 @@ fn main() {
     test_no_index_str_table();
     test_btree_many();
 
+    # v0.10 aggregates + CREATE INDEX
+    test_aggregates();
+    test_aggregate_where();
+    test_create_index();
+
     # v0.8.1 indexed range
     test_indexed_range();
     test_indexed_range_with_filter();
@@ -1210,6 +1335,7 @@ fn main() {
     test_order_by_multi();
     test_order_by_desc();
     test_sql_semicolons();
+    test_jsonl_field_extract();
     test_jsonl_special_chars();
 
     cleanup();

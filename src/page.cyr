@@ -16,8 +16,9 @@ fn page_write(fd, num, buf) {
     return PATRA_OK;
 }
 
+fn bp_flush() { return 0; }
+
 fn page_alloc(fd, hdr) {
-    # Try free list first
     var fh = load64(hdr + HDR_FREEHEAD);
     if (fh != 0) {
         var buf = fl_alloc(PAGE_SIZE);
@@ -28,7 +29,6 @@ fn page_alloc(fd, hdr) {
         fl_free(buf);
         return fh;
     }
-    # Extend file — allocate next page number
     var num = load64(hdr + HDR_PGCOUNT);
     store64(hdr + HDR_PGCOUNT, num + 1);
     var buf = fl_alloc(PAGE_SIZE);

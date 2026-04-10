@@ -5,6 +5,23 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-04-09
+
+### Added
+
+- CREATE INDEX ON table (col) — index any INT column, populates from existing rows
+- Aggregate queries: SELECT COUNT(*), SUM(col), MIN(col), MAX(col) with WHERE support
+- Multi-column ORDER BY: `ORDER BY age DESC, name ASC` — up to 8 columns
+- JSONL field extraction: jsonl_get_str(), jsonl_get_int() — parse fields from JSON lines
+
+### Investigated
+
+- Buffer pool (16-slot write-through page cache) — reverted. 4x slower due to memcpy overhead. OS page cache is sufficient for current workloads.
+
+### Testing
+
+- 237 unit tests across 58 test groups
+
 ## [0.9.0] - 2026-04-09
 
 ### Added

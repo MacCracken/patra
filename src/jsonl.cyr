@@ -193,6 +193,95 @@ fn jsonl_lines_free(lr) {
     return 0;
 }
 
+# ── Field extraction ─────────────────────────────────────────
+
+# Find "key": in a JSON line. Returns offset past the colon+space, or -1.
+fn _jl_find_key(line, llen, key, klen) {
+    var i = 0;
+    var result = 0 - 1;
+    var done = 0;
+    while (done == 0) {
+        if (i >= llen) { done = 1; continue; }
+        if (load8(line + i) != 34) { i = i + 1; continue; }
+        # Found opening quote — check if key matches
+        i = i + 1;
+        if (i + klen >= llen) { done = 1; continue; }
+        var eq = memeq(line + i, key, klen);
+        if (eq != 0) {
+            if (load8(line + i + klen) == 34) {
+                # Matched "key" — skip to colon
+                i = i + klen + 1;
+                var fdone = 0;
+                while (fdone == 0) {
+                    if (i >= llen) { fdone = 1; continue; }
+                    if (load8(line + i) == 58) { fdone = 1; continue; }
+                    i = i + 1;
+                }
+                i = i + 1;
+                # Skip whitespace
+                var sdone = 0;
+                while (sdone == 0) {
+                    if (i >= llen) { sdone = 1; continue; }
+                    if (load8(line + i) != 32) { sdone = 1; continue; }
+                    i = i + 1;
+                }
+                result = i;
+                done = 1;
+                continue;
+            }
+        }
+        # Skip past this string value
+        var qdone = 0;
+        while (qdone == 0) {
+            if (i >= llen) { qdone = 1; continue; }
+            if (load8(line + i) == 34) { qdone = 1; continue; }
+            i = i + 1;
+        }
+        if (i < llen) { i = i + 1; }
+    }
+    return result;
+}
+
+# Get string value for key from JSON line. Returns ptr to content (inside quotes), sets len.
+# out_len: pointer to store length. Returns pointer or 0.
+fn jsonl_get_str(line, llen, key, klen, out_len) {
+    var off = _jl_find_key(line, llen, key, klen);
+    if (off < 0) { return 0; }
+    if (off >= llen) { return 0; }
+    if (load8(line + off) != 34) { return 0; }
+    off = off + 1;
+    var start = off;
+    var edone = 0;
+    while (edone == 0) {
+        if (off >= llen) { edone = 1; continue; }
+        if (load8(line + off) == 34) { edone = 1; continue; }
+        off = off + 1;
+    }
+    store64(out_len, off - start);
+    return line + start;
+}
+
+# Get integer value for key from JSON line. Returns the value, or 0 if not found.
+fn jsonl_get_int(line, llen, key, klen) {
+    var off = _jl_find_key(line, llen, key, klen);
+    if (off < 0) { return 0; }
+    if (off >= llen) { return 0; }
+    var neg = 0;
+    if (load8(line + off) == 45) { neg = 1; off = off + 1; }
+    var val = 0;
+    var pdone = 0;
+    while (pdone == 0) {
+        if (off >= llen) { pdone = 1; continue; }
+        var c = load8(line + off);
+        if (c < 48) { pdone = 1; continue; }
+        if (c > 57) { pdone = 1; continue; }
+        val = val * 10 + (c - 48);
+        off = off + 1;
+    }
+    if (neg != 0) { val = 0 - val; }
+    return val;
+}
+
 # ── Count lines ─────────────────────────────────────────────
 
 fn jsonl_count(fd) {
