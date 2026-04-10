@@ -5,6 +5,17 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-04-10
+
+### Removed
+- **`src/sha256.cyr`**: Hand-rolled SHA-256 (161 lines) deleted. Was included in build but
+  never called by any database module. Crypto is sigil's responsibility — available as
+  `lib/sigil.cyr` in the cyrius stdlib.
+- SHA-256 known-answer tests removed from `patra.tcyr` (3 assertions).
+
+### Changed
+- Minimum Cyrius version pinned to 3.3.5 in cyrius.toml.
+
 ## [0.11.1] - 2026-04-09
 
 ### Changed

@@ -18,7 +18,6 @@ include "lib/sakshi.cyr"
 # ── Modules (order matters: sql before where before table) ──
 
 include "src/file.cyr"
-include "src/sha256.cyr"
 include "src/wal.cyr"
 include "src/page.cyr"
 include "src/row.cyr"

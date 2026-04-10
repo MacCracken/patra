@@ -980,16 +980,6 @@ fn test_indexed_range_with_filter() {
 
 # ── v0.11: SHA-256 ──────────────────────────────────────────
 
-fn test_sha256() {
-    test_group("sha256");
-    var out[68];
-    sha256_hex("", 0, &out);
-    assert_streq(&out, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "empty");
-    sha256_hex("abc", 3, &out);
-    assert_streq(&out, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "abc");
-    sha256_hex("hello", 5, &out);
-    assert_streq(&out, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", "hello");
-}
 
 # ── v0.11: Transactions ─────────────────────────────────────
 
@@ -1378,7 +1368,7 @@ fn main() {
     test_indexed_range_with_filter();
 
     # v0.11 SHA-256 + WAL + transactions
-    test_sha256();
+    # sha256 tests removed — crypto is sigil's responsibility
     test_transaction_commit();
     test_transaction_rollback();
 

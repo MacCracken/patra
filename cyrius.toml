@@ -1,9 +1,11 @@
 [package]
 name = "patra"
-version = "0.11.1"
+version = "0.12.0"
 description = "Patra — structured storage and SQL queries for Cyrius. The sovereign database."
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/patra"
+
+cyrius = "3.3.5"
 
 [build]
 src = "src/lib.cyr"
