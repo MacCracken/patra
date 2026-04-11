@@ -5,6 +5,15 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-04-11
+
+### Added
+- **Bundled distribution**: `dist/patra.cyr` — single-file 3,013-line bundle for stdlib inclusion. No `include` statements, no SHA-256, no stdlib dependencies baked in. Consumers provide their own stdlib.
+- **`scripts/bundle.sh`** — generates `dist/patra.cyr` from source modules in dependency order.
+
+### Changed
+- Patra is now distributable as a stdlib dependency via `dist/patra.cyr`. Projects like libro can `include "lib/patra.cyr"` without SHA-256 conflicts (sigil handles crypto, patra handles storage).
+
 ## [0.12.0] - 2026-04-10
 
 ### Removed
