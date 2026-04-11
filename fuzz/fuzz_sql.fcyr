@@ -7,7 +7,7 @@ alloc_init();
 fl_init();
 patra_init();
 
-# ── Incomplete / empty SQL ──────────────────────────────────
+# ── Incomplete / empty SQL ──
 
 sql_tokenize("");
 if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 1); }
@@ -33,7 +33,7 @@ if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 7); }
 sql_tokenize("SELECT * FROM");
 if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 8); }
 
-# ── Garbage ─────────────────────────────────────────────────
+# ── Garbage ──
 
 sql_tokenize("!@#$%^&");
 if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 10); }
@@ -44,7 +44,7 @@ if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 11); }
 sql_tokenize("42 42 42");
 if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 12); }
 
-# ── Malformed WHERE ─────────────────────────────────────────
+# ── Malformed WHERE ──
 
 sql_tokenize("SELECT * FROM t WHERE");
 if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 20); }
@@ -61,12 +61,12 @@ if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 23); }
 sql_tokenize("SELECT * FROM t WHERE id 1");
 if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 24); }
 
-# ── Mixed AND/OR must fail ──────────────────────────────────
+# ── Mixed AND/OR must fail ──
 
 sql_tokenize("SELECT * FROM t WHERE a = 1 AND b = 2 OR c = 3");
 if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 25); }
 
-# ── Malformed UPDATE ────────────────────────────────────────
+# ── Malformed UPDATE ──
 
 sql_tokenize("UPDATE");
 if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 30); }
@@ -83,7 +83,7 @@ if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 33); }
 sql_tokenize("UPDATE t SET x =");
 if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 34); }
 
-# ── Malformed DELETE ────────────────────────────────────────
+# ── Malformed DELETE ──
 
 sql_tokenize("DELETE");
 if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 40); }
@@ -94,7 +94,7 @@ if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 41); }
 sql_tokenize("DELETE FROM");
 if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 42); }
 
-# ── Valid edge cases must succeed ────────────────────────────
+# ── Valid edge cases ──
 
 sql_tokenize("create table t (x int)");
 if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 50); }
@@ -117,7 +117,7 @@ if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 55); }
 sql_tokenize("SELECT * FROM t WHERE id = 1 OR id = 2 OR id = 3");
 if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 56); }
 
-# ── Header verification ─────────────────────────────────────
+# ── Header verification ──
 
 var buf = fl_alloc(PAGE_SIZE);
 memset(buf, 0, PAGE_SIZE);
@@ -128,7 +128,7 @@ patra_hdr_init(buf);
 if (patra_hdr_verify(buf) != PATRA_OK) { syscall(SYS_EXIT, 62); }
 fl_free(buf);
 
-# ── Row string truncation ───────────────────────────────────
+# ── Row string truncation ──
 
 var schema = fl_alloc(PAGE_SIZE);
 memset(schema, 0, PAGE_SIZE);
@@ -137,14 +137,22 @@ store64(schema + SCH_START + SCH_CTYPE, COL_STR);
 var rsz = row_compute_size(schema, 1);
 var row = fl_alloc(rsz);
 memset(row, 0, rsz);
-row_write_str(row, 0, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 73);
-if (strlen(row_read_str(row, 0)) != 63) { syscall(SYS_EXIT, 70); }
+var longstr = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+var longstr2 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+var ls = alloc(73);
+memcpy(ls, longstr, 31);
+memcpy(ls + 31, longstr2, 31);
+memcpy(ls + 62, "aaaaaaaaaaa", 11);
+store8(ls + 73, 0);
+row_write_str(row, 0, ls, 73);
+var rl = strlen(row_read_str(row, 0));
+if (rl != 73) { syscall(SYS_EXIT, 70); }
 row_write_str(row, 0, "", 0);
 if (strlen(row_read_str(row, 0)) != 0) { syscall(SYS_EXIT, 71); }
 fl_free(row);
 fl_free(schema);
 
-# ── Integration: error paths ────────────────────────────────
+# ── Integration: error paths ──
 
 var tpath = "/tmp/patra_fuzz.patra";
 syscall(SYS_UNLINK, tpath);
@@ -158,7 +166,8 @@ if (patra_exec(db, "INSERT INTO fuzz VALUES ('bad', 42)") == PATRA_OK) { syscall
 # Wrong count
 if (patra_exec(db, "INSERT INTO fuzz VALUES (1)") == PATRA_OK) { syscall(SYS_EXIT, 82); }
 # Missing table
-if (patra_exec(db, "INSERT INTO ghost VALUES (1, 'x')") != PATRA_ERR_NOTFOUND) { syscall(SYS_EXIT, 83); }
+var gr = patra_exec(db, "INSERT INTO ghost VALUES (1, 'x')");
+if (gr != PATRA_ERR_NOTFOUND) { syscall(SYS_EXIT, 83); }
 # Duplicate table
 if (patra_exec(db, "CREATE TABLE fuzz (x INT)") != PATRA_ERR_EXISTS) { syscall(SYS_EXIT, 84); }
 
