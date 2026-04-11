@@ -8,7 +8,7 @@ enum PageConst { PAGE_SIZE = 4096; MAX_TABLES = 63; MAX_COLS = 32; }
 enum PatraFmt { PATRA_MAGIC = 0x41525450; PATRA_VER = 1; }
 
 enum PageType  { PAGE_FREE = 0; PAGE_DATA = 1; PAGE_SCHEMA = 2; PAGE_BTREE = 3; }
-enum ColType   { COL_INT = 0; COL_STR = 1; COL_INT_SZ = 8; COL_STR_SZ = 64; }
+enum ColType   { COL_INT = 0; COL_STR = 1; COL_INT_SZ = 8; COL_STR_SZ = 256; }
 
 enum PatraErr {
     PATRA_OK = 0;

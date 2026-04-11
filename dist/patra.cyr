@@ -1,5 +1,5 @@
 # patra.cyr — structured storage and SQL queries for Cyrius
-# Bundled distribution of patra v0.13.0
+# Bundled distribution of patra v0.14.0
 # Source: https://github.com/MacCracken/patra
 # License: GPL-3.0-only
 #
@@ -20,7 +20,7 @@ enum PageConst { PAGE_SIZE = 4096; MAX_TABLES = 63; MAX_COLS = 32; }
 enum PatraFmt { PATRA_MAGIC = 0x41525450; PATRA_VER = 1; }
 
 enum PageType  { PAGE_FREE = 0; PAGE_DATA = 1; PAGE_SCHEMA = 2; PAGE_BTREE = 3; }
-enum ColType   { COL_INT = 0; COL_STR = 1; COL_INT_SZ = 8; COL_STR_SZ = 64; }
+enum ColType   { COL_INT = 0; COL_STR = 1; COL_INT_SZ = 8; COL_STR_SZ = 256; }
 
 enum PatraErr {
     PATRA_OK = 0;
@@ -337,7 +337,7 @@ fn page_init_data(buf) {
 # --- row.cyr ---
 # row.cyr — row encoding/decoding (i64 + fixed-length strings)
 
-# Size in bytes for a column type (INT=8, STR=64)
+# Size in bytes for a column type (INT=8, STR=256)
 fn row_col_size(ctype) {
     if (ctype == COL_INT) { return COL_INT_SZ; }
     return COL_STR_SZ;
@@ -370,7 +370,7 @@ fn row_write_int(row, off, val) {
     store64(row + off, val);
 }
 
-# Write string value padded to COL_STR_SZ (64 bytes), null-terminated
+# Write string value padded to COL_STR_SZ (256 bytes), null-terminated
 # Write string value to row at offset (padded to 64 bytes)
 fn row_write_str(row, off, ptr, len) {
     memset(row + off, 0, COL_STR_SZ);
@@ -384,7 +384,7 @@ fn row_read_int(row, off) {
     return load64(row + off);
 }
 
-# Returns pointer to the 64-byte string field (null-terminated)
+# Returns pointer to the 256-byte string field (null-terminated)
 # Read string pointer from row at offset
 fn row_read_str(row, off) {
     return row + off;

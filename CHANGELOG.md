@@ -5,6 +5,11 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2026-04-11
+
+### Changed
+- **`COL_STR_SZ` raised from 64 to 256 bytes** — string columns now support up to 255 characters (was 63). Fixes truncation of SHA-256 hex hashes (64 chars), UUIDs (36 chars), and longer text fields. Breaking change for existing .patra files — databases created with 0.13.0 are not compatible (row layout changed).
+
 ## [0.13.0] - 2026-04-11
 
 ### Added
