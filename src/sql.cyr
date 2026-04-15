@@ -419,6 +419,8 @@ fn _parse_where(pos) {
         }
     }
 
+    # WHERE with no conditions is malformed
+    if (count == 0) { return 0 - 1; }
     store64(_sql_pr + PR_WHERE_N, count);
     if (join == (0 - 1)) { join = WH_AND; }
     store64(_sql_pr + PR_WHERE_JOIN, join);

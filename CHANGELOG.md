@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.15.0] - 2026-04-15
 
+### Fixed
+- **SQL parser: WHERE with no conditions** — `SELECT * FROM t WHERE`
+  (trailing WHERE, no condition) was accepted as valid. Now returns
+  `PATRA_ERR_PARSE`. Root cause: `_parse_where` returned successfully
+  with count=0 after consuming the WHERE token. Added `count == 0`
+  check before storing results.
+
 ### Changed
 - **Toolchain min raised to 4.9.3** (was 3.3.5). CI updated to 4.10.3.
 - **`cyrius.toml` updated** — added `[deps]` section with stdlib and
@@ -17,7 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Validation
 - 240 passed, 0 failed.
-- Bundle compiles clean (3023 lines).
+- 2 fuzz harnesses pass (fuzz_file, fuzz_sql).
+- Bundle compiles clean (3025 lines).
 
 ## [0.14.0] - 2026-04-11
 
