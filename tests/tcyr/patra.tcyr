@@ -1294,6 +1294,136 @@ fn test_jsonl_special_chars() {
     jcleanup();
 }
 
+# ── v0.16: DROP TABLE ───────────────────────────────────────
+
+fn test_drop_table() {
+    test_group("drop table");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE d1 (id INT, val STR)");
+    patra_exec(db, "INSERT INTO d1 VALUES (1, 'a')");
+    patra_exec(db, "INSERT INTO d1 VALUES (2, 'b')");
+
+    # Verify data exists
+    var rs = patra_query(db, "SELECT * FROM d1");
+    assert_eq(patra_result_count(rs), 2, "2 rows before drop");
+    patra_result_free(rs);
+
+    # Drop it
+    var r = patra_exec(db, "DROP TABLE d1");
+    assert_eq(r, PATRA_OK, "drop ok");
+
+    # Query on dropped table should fail (returns 0)
+    rs = patra_query(db, "SELECT * FROM d1");
+    assert_eq(rs, 0, "query after drop null");
+
+    # Insert should fail
+    r = patra_exec(db, "INSERT INTO d1 VALUES (3, 'c')");
+    assert_eq(r, PATRA_ERR_NOTFOUND, "insert after drop");
+
+    # Drop missing table
+    r = patra_exec(db, "DROP TABLE ghost");
+    assert_eq(r, PATRA_ERR_NOTFOUND, "drop missing");
+
+    patra_close(db);
+}
+
+fn test_drop_table_multi() {
+    test_group("drop table multi");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t1 (id INT)");
+    patra_exec(db, "CREATE TABLE t2 (id INT)");
+    patra_exec(db, "CREATE TABLE t3 (id INT)");
+    patra_exec(db, "INSERT INTO t1 VALUES (1)");
+    patra_exec(db, "INSERT INTO t2 VALUES (2)");
+    patra_exec(db, "INSERT INTO t3 VALUES (3)");
+
+    # Drop middle table
+    var r = patra_exec(db, "DROP TABLE t2");
+    assert_eq(r, PATRA_OK, "drop t2 ok");
+
+    # t1 and t3 still work
+    var rs = patra_query(db, "SELECT * FROM t1");
+    assert_eq(patra_result_count(rs), 1, "t1 intact");
+    assert_eq(patra_result_get_int(rs, 0, 0), 1, "t1 val");
+    patra_result_free(rs);
+
+    rs = patra_query(db, "SELECT * FROM t3");
+    assert_eq(patra_result_count(rs), 1, "t3 intact");
+    assert_eq(patra_result_get_int(rs, 0, 0), 3, "t3 val");
+    patra_result_free(rs);
+
+    # t2 gone
+    rs = patra_query(db, "SELECT * FROM t2");
+    assert_eq(rs, 0, "t2 gone");
+
+    patra_close(db);
+}
+
+fn test_drop_table_persistence() {
+    test_group("drop table persist");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE dp (id INT)");
+    patra_exec(db, "INSERT INTO dp VALUES (1)");
+    patra_exec(db, "DROP TABLE dp");
+    patra_close(db);
+
+    # Reopen — table should still be gone
+    db = patra_open(_tpath);
+    var rs = patra_query(db, "SELECT * FROM dp");
+    assert_eq(rs, 0, "gone after reopen");
+    patra_close(db);
+}
+
+fn test_drop_parse_errors() {
+    test_group("drop parse errors");
+    # DROP without TABLE
+    sql_tokenize("DROP");
+    assert_eq(sql_parse(), PATRA_ERR_SYNTAX, "drop alone");
+
+    # DROP TABLE without name
+    sql_tokenize("DROP TABLE");
+    assert_eq(sql_parse(), PATRA_ERR_SYNTAX, "drop table no name");
+}
+
+# ── v0.16: WAL overflow ────────────────────────────────────
+
+fn test_wal_overflow() {
+    test_group("wal overflow");
+    cleanup();
+    var db = patra_open(_tpath);
+
+    # Create a table with many columns to make rows large
+    patra_exec(db, "CREATE TABLE wo (id INT, a STR, b STR, c STR)");
+
+    # Start explicit transaction
+    patra_begin(db);
+
+    # Insert many rows to force many page writes
+    # Each STR is 256 bytes, row = 8 + 256*3 = 776 bytes
+    # Page fits ~5 rows (776*5 = 3880 < 4072 available)
+    # 64 pages * 5 rows = 320 rows to fill WAL
+    # We need > 64 unique page writes to trigger overflow
+    var i = 0;
+    while (i < 400) {
+        patra_exec(db, "INSERT INTO wo VALUES (1, 'x', 'y', 'z')");
+        i = i + 1;
+    }
+
+    # Commit returns PATRA_ERR_FULL to signal WAL overflow
+    var r = patra_commit(db);
+    assert_eq(r, PATRA_ERR_FULL, "commit reports overflow");
+
+    # Data was still committed (just not crash-safe beyond 64 pages)
+    var rs = patra_query(db, "SELECT COUNT(*) FROM wo");
+    assert(patra_result_get_int(rs, 0, 0) > 0, "data committed");
+    patra_result_free(rs);
+
+    patra_close(db);
+}
+
 # ── Runner ──────────────────────────────────────────────────
 
 fn main() {
@@ -1383,6 +1513,13 @@ fn main() {
     test_sql_semicolons();
     test_jsonl_field_extract();
     test_jsonl_special_chars();
+
+    # v0.16
+    test_drop_table();
+    test_drop_table_multi();
+    test_drop_table_persistence();
+    test_drop_parse_errors();
+    test_wal_overflow();
 
     cleanup();
     return assert_summary();

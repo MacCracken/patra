@@ -5,6 +5,24 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] - 2026-04-15
+
+### Added
+- **DROP TABLE** — `DROP TABLE name` removes a table, frees its data pages,
+  schema page, and B-tree index root. Table directory is compacted.
+- **WAL overflow detection** — transactions exceeding 64 page writes now
+  set an overflow flag. `patra_commit()` returns `PATRA_ERR_FULL` when
+  WAL capacity was exceeded (data is still committed, but crash-safety
+  is degraded beyond the 64-page window).
+- **B-tree index fallback on overflow** — when a range query returns the
+  maximum 256 refs, the query engine falls back to linear scan to
+  guarantee complete results.
+
+### Validation
+- 256 passed, 0 failed (was 240).
+- 2 fuzz harnesses pass (fuzz_file, fuzz_sql).
+- New tests: DROP TABLE (4 groups), WAL overflow (1 group).
+
 ## [0.15.0] - 2026-04-15
 
 ### Fixed

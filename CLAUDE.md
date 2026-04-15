@@ -7,7 +7,7 @@
 - **Type**: Shared library — database engine for the sovereign stack
 - **License**: GPL-3.0-only
 - **Language**: Cyrius (native)
-- **Version**: 0.15.0
+- **Version**: 0.16.0
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
 
@@ -17,8 +17,8 @@ Own the database. Zero deps. Pure Cyrius. SQL + B-tree + JSONL in a single `incl
 
 ## Current State
 
-- **Source**: 3,003 lines across 10 modules
-- **Tests**: 240 assertions, 2 fuzz harnesses, 20 benchmarks
+- **Source**: 3,103 lines across 10 modules
+- **Tests**: 256 assertions, 2 fuzz harnesses, 20 benchmarks
 - **Integration**: libro audit log, vidya knowledge index
 - **Index**: B+ tree order-64, auto or explicit CREATE INDEX (16% faster indexed SELECT)
 - **Binary**: 120KB
@@ -43,7 +43,7 @@ No external deps. No libsqlite3. No FFI.
 ```bash
 cyrius build programs/demo.cyr build/demo   # build demo
 ./build/demo                                 # run demo
-cyrius test tests/tcyr/patra.tcyr            # 240 assertions
+cyrius test tests/tcyr/patra.tcyr            # 256 assertions
 cyrius fuzz fuzz/                            # 2 harnesses
 cyrius bench tests/bcyr/patra.bcyr           # 20 benchmarks
 ./build/test_libro                           # libro integration
@@ -125,7 +125,7 @@ src/
 - **4KB pages** — standard page size, B-tree nodes fit one page
 - **flock for concurrency** — `syscall(73, fd, LOCK_EX/LOCK_UN)` advisory locking
 - **No floating point** — integer comparisons only in WHERE clauses
-- **SQL subset only** — CREATE TABLE, CREATE INDEX, INSERT, SELECT (with COUNT/SUM/MIN/MAX aggregates), UPDATE, DELETE. No JOINs or subqueries
+- **SQL subset only** — CREATE TABLE, CREATE INDEX, DROP TABLE, INSERT, SELECT (with COUNT/SUM/MIN/MAX aggregates), UPDATE, DELETE. No JOINs or subqueries
 
 ## Cyrius Conventions
 

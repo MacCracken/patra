@@ -300,6 +300,29 @@ fn _exec_delete(db) {
     return r;
 }
 
+# ── Exec: DROP TABLE ────────────────────
+
+fn _exec_drop(db) {
+    var fd = _db_fd(db);
+    var hdr = _db_hdr(db);
+
+    patra_lock_ex(fd);
+    patra_hdr_read(fd, hdr);
+
+    var tname = load64(_sql_pr + PR_TNAME);
+    var tnlen = load64(_sql_pr + PR_TNLEN);
+    var idx = tbl_find(hdr, tname, tnlen);
+    if (idx < 0) {
+        patra_unlock(fd);
+        return PATRA_ERR_NOTFOUND;
+    }
+
+    var r = tbl_drop(fd, hdr, idx);
+    if (r == PATRA_OK) { patra_hdr_write(fd, hdr); }
+    patra_unlock(fd);
+    return r;
+}
+
 # ── Exec: CREATE INDEX ────────────────────
 
 fn _exec_create_index(db) {
@@ -379,10 +402,12 @@ fn patra_commit(db) {
     if (load64(db + DB_TX) == 0) { return PATRA_OK; }
     var fd = _db_fd(db);
     var wpath = load64(db + DB_PATH);
+    var overflow = wal_overflowed();
     patra_hdr_write(fd, _db_hdr(db));
     wal_commit(wpath);
     patra_unlock(fd);
     store64(db + DB_TX, 0);
+    if (overflow != 0) { return PATRA_ERR_FULL; }
     return PATRA_OK;
 }
 
@@ -412,6 +437,7 @@ fn patra_exec(db, sql) {
     if (stmt == STMT_UPDATE) { return _exec_update(db); }
     if (stmt == STMT_DELETE) { return _exec_delete(db); }
     if (stmt == STMT_CREATE_INDEX) { return _exec_create_index(db); }
+    if (stmt == STMT_DROP) { return _exec_drop(db); }
     return PATRA_ERR_SYNTAX;
 }
 
@@ -640,28 +666,33 @@ fn patra_query(db, sql) {
                 }
                 if (idx_found != 0) {
                     if (idx_lo <= idx_hi) {
-                        used_index = 1;
                         var refs = fl_alloc(2048);
                         var nrefs = _bt_range(fd, ir, idx_lo, idx_hi, refs, 256);
-                        var rbuf = fl_alloc(PAGE_SIZE);
-                        var lpg = 0 - 1;
-                        for (var ri = 0; ri < nrefs; ri = ri + 1) {
-                            var ref = load64(refs + ri * 8);
-                            if (ref == (0 - 1)) { continue; }
-                            var rpg = _bt_ref_pg(ref);
-                            var rsl = _bt_ref_slot(ref);
-                            if (rpg != lpg) {
-                                page_read(fd, rpg, rbuf);
-                                lpg = rpg;
+                        if (nrefs >= 256) {
+                            # Index returned max refs — may be truncated, fall back to scan
+                            fl_free(refs);
+                        } else {
+                            used_index = 1;
+                            var rbuf = fl_alloc(PAGE_SIZE);
+                            var lpg = 0 - 1;
+                            for (var ri = 0; ri < nrefs; ri = ri + 1) {
+                                var ref = load64(refs + ri * 8);
+                                if (ref == (0 - 1)) { continue; }
+                                var rpg = _bt_ref_pg(ref);
+                                var rsl = _bt_ref_slot(ref);
+                                if (rpg != lpg) {
+                                    page_read(fd, rpg, rbuf);
+                                    lpg = rpg;
+                                }
+                                var rp = rbuf + DP_DATA + rsl * rsz;
+                                if (where_eval(rp, schema, ncols, _sql_pr)) {
+                                    memcpy(data_ptr + actual * rsz, rp, rsz);
+                                    actual = actual + 1;
+                                }
                             }
-                            var rp = rbuf + DP_DATA + rsl * rsz;
-                            if (where_eval(rp, schema, ncols, _sql_pr)) {
-                                memcpy(data_ptr + actual * rsz, rp, rsz);
-                                actual = actual + 1;
-                            }
+                            fl_free(rbuf);
+                            fl_free(refs);
                         }
-                        fl_free(rbuf);
-                        fl_free(refs);
                     }
                 }
             }

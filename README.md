@@ -76,6 +76,7 @@ var result = patra_query(db, "SELECT * FROM events WHERE source = 'daimon'", 46)
 
 ```sql
 CREATE TABLE name (col1, col2, ...)
+DROP TABLE name
 CREATE INDEX ON name (col)
 INSERT INTO name VALUES (val1, val2, ...)
 SELECT * FROM name

@@ -1,6 +1,6 @@
 # Patra Development Roadmap
 
-> **v0.15.0** — Sovereign database for Cyrius.
+> **v0.16.0** — Sovereign database for Cyrius.
 
 ## Completed
 
@@ -61,6 +61,12 @@
 - SQL parser fix: reject `WHERE` with no conditions (PATRA_ERR_PARSE)
 - Toolchain min raised to 4.9.3
 - Bundle script rewritten from bash to sh
+
+### v0.16.0
+
+- DROP TABLE (free pages, compact directory)
+- WAL overflow detection (flag + PATRA_ERR_FULL on commit)
+- B-tree index fallback on range query overflow (>256 refs → linear scan)
 
 ## Backlog
 

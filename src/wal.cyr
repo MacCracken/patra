@@ -8,6 +8,7 @@ var _wal_fd = 0 - 1;
 var _wal_db_fd = 0 - 1;
 var _wal_pages = 0;
 var _wal_nlog = 0;
+var _wal_overflow = 0;
 
 enum WalConst { WAL_MAX_PAGES = 64; WAL_REC_SZ = 4104; }
 
@@ -19,6 +20,7 @@ fn wal_start(db_fd, wal_path) {
     _wal_db_fd = db_fd;
     if (_wal_pages == 0) { _wal_pages = alloc(WAL_MAX_PAGES * 8); }
     _wal_nlog = 0;
+    _wal_overflow = 0;
     return PATRA_OK;
 }
 
@@ -28,6 +30,9 @@ fn wal_is_active() {
     return 0;
 }
 
+# Returns 1 if WAL overflowed (more than 64 pages in transaction)
+fn wal_overflowed() { return _wal_overflow; }
+
 # Log before-image of a page (called from page_write)
 fn wal_log_page(page_num) {
     if (_wal_fd < 0) { return 0; }
@@ -35,7 +40,7 @@ fn wal_log_page(page_num) {
     for (var i = 0; i < _wal_nlog; i = i + 1) {
         if (load64(_wal_pages + i * 8) == page_num) { return 0; }
     }
-    if (_wal_nlog >= WAL_MAX_PAGES) { return 0; }
+    if (_wal_nlog >= WAL_MAX_PAGES) { _wal_overflow = 1; return 0; }
     store64(_wal_pages + _wal_nlog * 8, page_num);
     _wal_nlog = _wal_nlog + 1;
 

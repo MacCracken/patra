@@ -82,6 +82,52 @@ fn tbl_create(fd, hdr, name, nlen, col_names, col_types, ncols) {
     return PATRA_OK;
 }
 
+# Drop table: free data pages, schema page, compact directory
+fn tbl_drop(fd, hdr, idx) {
+    _tbl_lp_idx = 0 - 1;
+    var entry = _tbl_entry(hdr, idx);
+    var spg = load64(entry + TBL_SCHEMA);
+
+    # Free data page chain
+    var cur = load64(entry + TBL_ROOT);
+    var buf = fl_alloc(PAGE_SIZE);
+    while (cur != 0) {
+        page_read(fd, cur, buf);
+        var next = load64(buf + DP_NEXT);
+        page_free(fd, hdr, cur);
+        cur = next;
+    }
+
+    # Free B-tree pages (walk from schema index root)
+    var sbuf = fl_alloc(PAGE_SIZE);
+    page_read(fd, spg, sbuf);
+    var ic = load64(sbuf + SCH_IDX_COL);
+    if (ic >= 0) {
+        var ir = load64(sbuf + SCH_IDX_ROOT);
+        if (ir != 0) {
+            page_free(fd, hdr, ir);
+        }
+    }
+    fl_free(sbuf);
+
+    # Free schema page
+    page_free(fd, hdr, spg);
+
+    # Compact table directory: shift entries after idx left by one
+    var count = load64(hdr + HDR_TBLCOUNT);
+    var i = idx;
+    while (i < count - 1) {
+        var dst = _tbl_entry(hdr, i);
+        var src = _tbl_entry(hdr, i + 1);
+        memcpy(dst, src, TBL_ENTRY_SZ);
+        i = i + 1;
+    }
+    store64(hdr + HDR_TBLCOUNT, count - 1);
+
+    fl_free(buf);
+    return PATRA_OK;
+}
+
 # Insert a row into table
 fn tbl_insert(fd, hdr, idx, row_data, row_sz) {
     var entry = _tbl_entry(hdr, idx);
