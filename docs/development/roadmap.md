@@ -1,8 +1,10 @@
 # Patra Development Roadmap
 
-> **v0.8.0** — Initial release. Sovereign database for Cyrius.
+> **v0.15.0** — Sovereign database for Cyrius.
 
-## Completed (v0.8.0+)
+## Completed
+
+### v0.8.0 — Initial Release
 
 - .patra file format (4KB pages, header, free list)
 - Page manager (alloc, read, write, free list recycling)
@@ -21,30 +23,55 @@
 - P(-1) scaffold hardening (error handling, bounds checks, security audit)
 - vidya entries (6 topics: btree, sql, pages, WAL, concurrency, JSONL)
 
+### v0.9.0
+
+- Multi-column ORDER BY (ASC/DESC per column)
+- B-tree index maintenance on UPDATE
+- fdatasync after header writes and JSONL appends
+
+### v0.10.0
+
+- CREATE INDEX ON table (col) — explicit index creation
+- Aggregate queries: COUNT(*), SUM(col), MIN(col), MAX(col) with WHERE support
+- JSONL field extraction: jsonl_get_str(), jsonl_get_int()
+
+### v0.11.0
+
+- SHA-256 hash (FIPS 180-4) — later removed in v0.12.0 (crypto is sigil's responsibility)
+- Write-ahead logging (WAL): page before-images, crash recovery
+- Transaction API: BEGIN/COMMIT/ROLLBACK
+- fdatasync on WAL commit for durability
+
+### v0.12.0
+
+- Removed hand-rolled SHA-256 (sigil handles crypto)
+- Minimum Cyrius version pinned to 3.3.5
+
+### v0.13.0
+
+- Bundled distribution: `dist/patra.cyr` single-file include
+- `scripts/bundle.sh` for generating the bundle
+
+### v0.14.0
+
+- COL_STR_SZ raised from 64 to 256 bytes (breaking — row layout changed)
+
+### v0.15.0
+
+- SQL parser fix: reject `WHERE` with no conditions (PATRA_ERR_PARSE)
+- Toolchain min raised to 4.9.3
+- Bundle script rewritten from bash to sh
+
 ## Backlog
-
-### Features
-
-| # | Item | Notes |
-|---|------|-------|
-| 1 | CREATE INDEX syntax | Currently auto-index on first INT column only |
-| 2 | COUNT, SUM, MIN, MAX aggregates | |
-| 3 | Multi-column ORDER BY | |
-| 4 | JSONL line-level parsing (extract fields) | Currently returns raw lines |
-| 5 | SHA-256 hash chain for libro audit entries | Currently libro handles hashing |
-| 6 | B-tree index maintenance on UPDATE | DELETE done; UPDATE still uses stale refs |
-
-### Durability / Architecture
-
-| # | Item | Notes |
-|---|------|-------|
-| 7 | Write-ahead logging (WAL) | No crash recovery — header/data page writes are not atomic |
-| 8 | Transaction semantics (BEGIN/COMMIT/ROLLBACK) | Each exec/query locks individually, no multi-statement atomicity |
-| 9 | fsync after writes | Currently relies on OS page cache; no explicit durability guarantee |
 
 ### Optimization
 
 | # | Item | Notes |
 |---|------|-------|
-| 10 | Binary size reduction | 60KB overhead — investigate dead code elimination |
-| 11 | Buffer pool (cached page reads) | Currently re-reads pages from disk on every operation |
+| 1 | Binary size reduction | 60KB overhead — investigate dead code elimination |
+
+### Investigated / Rejected
+
+| Item | Outcome |
+|------|---------|
+| Buffer pool (16-slot write-through page cache) | Reverted in v0.10.0 — 4x slower due to memcpy overhead. OS page cache is sufficient. |

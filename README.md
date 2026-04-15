@@ -4,8 +4,10 @@
 
 ## What It Does
 
-- **SQL subset** — CREATE TABLE, INSERT, SELECT, WHERE, UPDATE, DELETE, ORDER BY, LIMIT
-- **B-tree storage** — pages in a single `.patra` file, crash-safe with flock
+- **SQL subset** — CREATE TABLE, CREATE INDEX, INSERT, SELECT, WHERE, UPDATE, DELETE, ORDER BY, LIMIT
+- **Aggregates** — COUNT(*), SUM, MIN, MAX with WHERE support
+- **B-tree storage** — pages in a single `.patra` file, crash-safe with WAL + flock
+- **Transactions** — BEGIN/COMMIT/ROLLBACK with write-ahead logging
 - **Zero dependencies** — pure Cyrius, no libsqlite3, no FFI
 - **File locking** — `flock` for concurrent process access
 - **JSON Lines mode** — append-only log with structured queries (libro integration)
@@ -31,6 +33,7 @@ patra/
     file.cyr      — .patra file format, header, flock locking
     where.cyr     — WHERE clause evaluation (=, !=, <, >, <=, >=, AND, OR)
     row.cyr       — row encoding/decoding (fixed-width fields)
+    wal.cyr       — write-ahead logging, crash recovery
     jsonl.cyr     — JSON Lines append-only mode (libro compatibility)
 ```
 
@@ -73,17 +76,20 @@ var result = patra_query(db, "SELECT * FROM events WHERE source = 'daimon'", 46)
 
 ```sql
 CREATE TABLE name (col1, col2, ...)
+CREATE INDEX ON name (col)
 INSERT INTO name VALUES (val1, val2, ...)
 SELECT * FROM name
 SELECT * FROM name WHERE col = val
 SELECT * FROM name WHERE col > val AND col2 = val2
-SELECT * FROM name ORDER BY col
+SELECT COUNT(*) FROM name
+SELECT SUM(col), MIN(col), MAX(col) FROM name WHERE col > val
+SELECT * FROM name ORDER BY col1 DESC, col2 ASC
 SELECT * FROM name LIMIT n
 UPDATE name SET col = val WHERE col2 = val2
 DELETE FROM name WHERE col = val
 ```
 
-All values are i64 or fixed-length strings (64 bytes max). No blobs. No floating point. Matches Cyrius's type system.
+All values are i64 or fixed-length strings (256 bytes max). No blobs. No floating point. Matches Cyrius's type system.
 
 ## Build
 

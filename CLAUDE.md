@@ -7,7 +7,7 @@
 - **Type**: Shared library — database engine for the sovereign stack
 - **License**: GPL-3.0-only
 - **Language**: Cyrius (native)
-- **Version**: 0.11.0
+- **Version**: 0.15.0
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
 
@@ -17,8 +17,8 @@ Own the database. Zero deps. Pure Cyrius. SQL + B-tree + JSONL in a single `incl
 
 ## Current State
 
-- **Source**: 3,089 lines across 11 modules
-- **Tests**: 243 assertions, 2 fuzz harnesses, 20 benchmarks
+- **Source**: 3,003 lines across 10 modules
+- **Tests**: 240 assertions, 2 fuzz harnesses, 20 benchmarks
 - **Integration**: libro audit log, vidya knowledge index
 - **Index**: B+ tree order-64, auto or explicit CREATE INDEX (16% faster indexed SELECT)
 - **Binary**: 120KB
@@ -43,9 +43,9 @@ No external deps. No libsqlite3. No FFI.
 ```bash
 cyrius build programs/demo.cyr build/demo   # build demo
 ./build/demo                                 # run demo
-cyrius test tests/tcyr/patra.tcyr            # 157 assertions
+cyrius test tests/tcyr/patra.tcyr            # 240 assertions
 cyrius fuzz fuzz/                            # 2 harnesses
-cyrius bench tests/bcyr/patra.bcyr           # 15 benchmarks
+cyrius bench tests/bcyr/patra.bcyr           # 20 benchmarks
 ./build/test_libro                           # libro integration
 ./build/test_vidya                           # vidya integration
 ```
@@ -58,7 +58,7 @@ cyrius bench tests/bcyr/patra.bcyr           # 15 benchmarks
 - **3 failed attempts = defer and document** — don't burn time
 - **Fuzz every parser path** — SQL edge cases get invariants
 - **Benchmark before claiming perf** — numbers or it didn't happen
-- **Include order matters** — `file → sha256 → wal → page → row → sql → where → btree → table → jsonl`
+- **Include order matters** — `file → wal → page → row → sql → where → btree → table → jsonl`
 
 ## P(-1): Scaffold Hardening
 
@@ -112,7 +112,6 @@ src/
   row.cyr       — row encoding: i64 + 64-byte strings
   sql.cyr       — tokenizer + recursive descent parser (CREATE/INSERT/SELECT/UPDATE/DELETE/CREATE INDEX, aggregates)
   where.cyr     — WHERE evaluation: 6 operators, AND/OR
-  sha256.cyr    — SHA-256 hash (FIPS 180-4)
   wal.cyr       — Write-ahead logging: page before-images, crash recovery
   btree.cyr     — B+ tree: order-64, insert/split/search/range/lazy delete
   table.cyr     — table create/insert/scan/update/delete + index maintenance
@@ -122,11 +121,11 @@ src/
 ## Key Constraints
 
 - **Zero dependencies** — no libsqlite3, no FFI, pure Cyrius
-- **All values are i64 or 64-byte strings** — matches Cyrius type system
+- **All values are i64 or 256-byte strings** — matches Cyrius type system
 - **4KB pages** — standard page size, B-tree nodes fit one page
 - **flock for concurrency** — `syscall(73, fd, LOCK_EX/LOCK_UN)` advisory locking
 - **No floating point** — integer comparisons only in WHERE clauses
-- **SQL subset only** — CREATE TABLE, INSERT, SELECT, UPDATE, DELETE. No JOINs, subqueries, aggregates
+- **SQL subset only** — CREATE TABLE, CREATE INDEX, INSERT, SELECT (with COUNT/SUM/MIN/MAX aggregates), UPDATE, DELETE. No JOINs or subqueries
 
 ## Cyrius Conventions
 
