@@ -5,6 +5,23 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-04-15
+
+### Added
+- **Hardening tests** — 18 new assertions across 4 test groups:
+  - UPDATE on indexed column (B-tree remove old key + insert new key)
+  - DROP TABLE + recreate with different schema
+  - Transaction rollback persistence across close/reopen
+  - Multi-page indexed query (50 rows across ~4 pages)
+
+### Fixed
+- **`test_page_overflow` comment** — row size calculation updated to
+  reflect 256-byte strings (was still referencing 64-byte era).
+
+### Validation
+- 274 passed, 0 failed (was 256).
+- 2 fuzz harnesses pass.
+
 ## [0.16.0] - 2026-04-15
 
 ### Added

@@ -7,7 +7,7 @@
 - **Type**: Shared library — database engine for the sovereign stack
 - **License**: GPL-3.0-only
 - **Language**: Cyrius (native)
-- **Version**: 0.16.0
+- **Version**: 0.17.0
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
 
@@ -18,7 +18,7 @@ Own the database. Zero deps. Pure Cyrius. SQL + B-tree + JSONL in a single `incl
 ## Current State
 
 - **Source**: 3,103 lines across 10 modules
-- **Tests**: 256 assertions, 2 fuzz harnesses, 20 benchmarks
+- **Tests**: 274 assertions, 2 fuzz harnesses, 20 benchmarks
 - **Integration**: libro audit log, vidya knowledge index
 - **Index**: B+ tree order-64, auto or explicit CREATE INDEX (16% faster indexed SELECT)
 - **Binary**: 120KB
@@ -43,7 +43,7 @@ No external deps. No libsqlite3. No FFI.
 ```bash
 cyrius build programs/demo.cyr build/demo   # build demo
 ./build/demo                                 # run demo
-cyrius test tests/tcyr/patra.tcyr            # 256 assertions
+cyrius test tests/tcyr/patra.tcyr            # 274 assertions
 cyrius fuzz fuzz/                            # 2 harnesses
 cyrius bench tests/bcyr/patra.bcyr           # 20 benchmarks
 ./build/test_libro                           # libro integration

@@ -1,6 +1,6 @@
 # Patra Development Roadmap
 
-> **v0.16.0** — Sovereign database for Cyrius.
+> **v0.17.0** — Sovereign database for Cyrius.
 
 ## Completed
 
@@ -67,6 +67,11 @@
 - DROP TABLE (free pages, compact directory)
 - WAL overflow detection (flag + PATRA_ERR_FULL on commit)
 - B-tree index fallback on range query overflow (>256 refs → linear scan)
+
+### v0.17.0
+
+- Hardening tests: UPDATE indexed column, DROP+recreate, tx rollback persistence, multi-page indexed query
+- Fixed stale row size comment in page_overflow test
 
 ## Backlog
 

@@ -1054,8 +1054,8 @@ fn test_page_overflow() {
     cleanup();
     var db = patra_open(_tpath);
     patra_exec(db, "CREATE TABLE wide (id INT, a STR, b STR)");
-    # Row size: 8 + 64 + 64 = 136 bytes. Page capacity: (4096-24)/136 = 29 rows.
-    # Insert 60 rows to span 3 pages.
+    # Row size: 8 + 256 + 256 = 520 bytes. Page capacity: (4096-24)/520 = 7 rows.
+    # Insert 60 rows to span ~9 pages.
     for (var i = 1; i <= 60; i = i + 1) {
         patra_exec(db, "INSERT INTO wide VALUES (1, 'aaaa', 'bbbb')");
     }
@@ -1424,6 +1424,133 @@ fn test_wal_overflow() {
     patra_close(db);
 }
 
+# ── v0.17: Hardening ────────────────────────────────────────
+
+fn test_update_indexed_col() {
+    test_group("update indexed col");
+    cleanup();
+    var db = patra_open(_tpath);
+    _setup_people(db);
+
+    # id is the auto-indexed column. Change alice's id from 1 to 100.
+    var r = patra_exec(db, "UPDATE people SET id = 100 WHERE name = 'alice'");
+    assert_eq(r, PATRA_OK, "update id ok");
+
+    # Old id should not find alice
+    var rs = patra_query(db, "SELECT * FROM people WHERE id = 1");
+    assert_eq(patra_result_count(rs), 0, "old id=1 gone");
+    patra_result_free(rs);
+
+    # New id should find alice via index
+    rs = patra_query(db, "SELECT * FROM people WHERE id = 100");
+    assert_eq(patra_result_count(rs), 1, "new id=100");
+    assert_streq(patra_result_get_str(rs, 0, 1), "alice", "still alice");
+    patra_result_free(rs);
+
+    # Other rows unaffected
+    rs = patra_query(db, "SELECT * FROM people WHERE id = 2");
+    assert_eq(patra_result_count(rs), 1, "bob intact");
+    patra_result_free(rs);
+
+    # Range query still works
+    rs = patra_query(db, "SELECT * FROM people WHERE id >= 3 AND id <= 5");
+    assert_eq(patra_result_count(rs), 3, "range 3-5 intact");
+    patra_result_free(rs);
+
+    patra_close(db);
+}
+
+fn test_drop_recreate() {
+    test_group("drop recreate");
+    cleanup();
+    var db = patra_open(_tpath);
+
+    # Create, populate, drop
+    patra_exec(db, "CREATE TABLE reuse (id INT, val STR)");
+    patra_exec(db, "INSERT INTO reuse VALUES (1, 'old')");
+    patra_exec(db, "DROP TABLE reuse");
+
+    # Recreate with same name, different schema
+    var r = patra_exec(db, "CREATE TABLE reuse (x INT, y INT)");
+    assert_eq(r, PATRA_OK, "recreate ok");
+
+    # Insert into new schema
+    r = patra_exec(db, "INSERT INTO reuse VALUES (10, 20)");
+    assert_eq(r, PATRA_OK, "insert new schema");
+
+    var rs = patra_query(db, "SELECT * FROM reuse");
+    assert_eq(patra_result_count(rs), 1, "1 row");
+    assert_eq(patra_result_get_int(rs, 0, 0), 10, "x=10");
+    assert_eq(patra_result_get_int(rs, 0, 1), 20, "y=20");
+    patra_result_free(rs);
+
+    # Old data is gone — only 1 row, not 2
+    rs = patra_query(db, "SELECT COUNT(*) FROM reuse");
+    assert_eq(patra_result_get_int(rs, 0, 0), 1, "count=1");
+    patra_result_free(rs);
+
+    patra_close(db);
+}
+
+fn test_tx_rollback_persistence() {
+    test_group("tx rollback persist");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE txp (id INT, val STR)");
+    patra_exec(db, "INSERT INTO txp VALUES (1, 'keep')");
+
+    # Begin tx, insert more, rollback
+    patra_begin(db);
+    patra_exec(db, "INSERT INTO txp VALUES (2, 'discard')");
+    patra_exec(db, "INSERT INTO txp VALUES (3, 'discard')");
+    patra_rollback(db);
+
+    # Close and reopen
+    patra_close(db);
+    db = patra_open(_tpath);
+
+    # Only the pre-tx row should survive
+    var rs = patra_query(db, "SELECT * FROM txp");
+    assert_eq(patra_result_count(rs), 1, "1 row after reopen");
+    assert_eq(patra_result_get_int(rs, 0, 0), 1, "id=1 kept");
+    assert_streq(patra_result_get_str(rs, 0, 1), "keep", "val=keep");
+    patra_result_free(rs);
+
+    patra_close(db);
+}
+
+fn test_multipage_indexed() {
+    test_group("multipage indexed");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE mp (id INT, name STR)");
+
+    # Row = 8 + 256 = 264 bytes. Page capacity = (4096-24)/264 = 15 rows.
+    # Insert 50 rows to span 4 pages.
+    var i = 1;
+    while (i <= 50) {
+        patra_exec(db, "INSERT INTO mp VALUES (1, 'row')");
+        i = i + 1;
+    }
+
+    # Full scan
+    var rs = patra_query(db, "SELECT COUNT(*) FROM mp");
+    assert_eq(patra_result_get_int(rs, 0, 0), 50, "count=50");
+    patra_result_free(rs);
+
+    # Index query (all have id=1)
+    rs = patra_query(db, "SELECT * FROM mp WHERE id = 1");
+    assert_eq(patra_result_count(rs), 50, "indexed all 50");
+    patra_result_free(rs);
+
+    # Range that matches nothing
+    rs = patra_query(db, "SELECT * FROM mp WHERE id > 1");
+    assert_eq(patra_result_count(rs), 0, "id>1 = 0");
+    patra_result_free(rs);
+
+    patra_close(db);
+}
+
 # ── Runner ──────────────────────────────────────────────────
 
 fn main() {
@@ -1520,6 +1647,12 @@ fn main() {
     test_drop_table_persistence();
     test_drop_parse_errors();
     test_wal_overflow();
+
+    # v0.17 hardening
+    test_update_indexed_col();
+    test_drop_recreate();
+    test_tx_rollback_persistence();
+    test_multipage_indexed();
 
     cleanup();
     return assert_summary();
