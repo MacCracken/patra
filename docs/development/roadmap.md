@@ -1,6 +1,6 @@
 # Patra Development Roadmap
 
-> **v0.17.0** — Sovereign database for Cyrius.
+> **v1.0.0** — Sovereign database for Cyrius. Stable.
 
 ## Completed
 
@@ -73,13 +73,26 @@
 - Hardening tests: UPDATE indexed column, DROP+recreate, tx rollback persistence, multi-page indexed query
 - Fixed stale row size comment in page_overflow test
 
-## Backlog
+### v1.0.0
+
+- Stable release. Feature-complete, hardened, fuzzed.
+
+## Post-1.0 Backlog
 
 ### Optimization
 
 | # | Item | Notes |
 |---|------|-------|
 | 1 | Binary size reduction | 60KB overhead — investigate dead code elimination |
+
+### Features
+
+| # | Item | Notes |
+|---|------|-------|
+| 2 | SELECT column list | Currently SELECT * only |
+| 3 | ALTER TABLE | Schema migration |
+| 4 | B-tree compaction | Reclaim lazy-deleted entries |
+| 5 | LIKE operator | String pattern matching |
 
 ### Investigated / Rejected
 

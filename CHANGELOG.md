@@ -5,6 +5,37 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - 2026-04-15
+
+Patra 1.0 — the sovereign database is stable.
+
+### Summary
+
+Zero-dependency SQL database engine in pure Cyrius. 3,103 lines of source
+across 10 modules, bundled as a single `dist/patra.cyr` include.
+
+**SQL**: CREATE TABLE, DROP TABLE, CREATE INDEX, INSERT, SELECT, UPDATE,
+DELETE. WHERE with 6 operators and AND/OR. ORDER BY (multi-column, ASC/DESC).
+LIMIT. Aggregates: COUNT(*), SUM, MIN, MAX.
+
+**Storage**: .patra file format with 4KB pages, B+ tree order-64 index,
+free list page recycling. Values are i64 or 256-byte fixed strings.
+
+**Durability**: Write-ahead logging with automatic crash recovery.
+Transaction API (BEGIN/COMMIT/ROLLBACK). fdatasync on commit. WAL overflow
+detection on transactions exceeding 64 pages.
+
+**Concurrency**: flock advisory locking (exclusive writes, shared reads).
+
+**JSONL**: Append-only JSON Lines mode with field extraction. libro-compatible.
+
+### Validation
+- 274 passed, 0 failed.
+- 2 fuzz harnesses pass (fuzz_file, fuzz_sql).
+- 20 benchmarks.
+- Hardened: indexed UPDATE, DROP+recreate, rollback persistence, multi-page
+  indexed queries all tested.
+
 ## [0.17.0] - 2026-04-15
 
 ### Added
