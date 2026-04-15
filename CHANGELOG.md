@@ -5,6 +5,20 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-04-15
+
+### Changed
+- **Toolchain min raised to 4.9.3** (was 3.3.5). CI updated to 4.10.3.
+- **`cyrius.toml` updated** — added `[deps]` section with stdlib and
+  sakshi deps. Added `[toolchain]` section.
+- **Bundle script** — rewritten from bash to sh. All source files now
+  have includes stripped (`grep -v "^include "`).
+- **`.cyrius-toolchain`** — added, pinned to 4.10.3.
+
+### Validation
+- 240 passed, 0 failed.
+- Bundle compiles clean (3023 lines).
+
 ## [0.14.0] - 2026-04-11
 
 ### Changed

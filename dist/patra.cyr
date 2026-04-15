@@ -1,5 +1,5 @@
 # patra.cyr — structured storage and SQL queries for Cyrius
-# Bundled distribution of patra v0.14.0
+# Bundled distribution of patra v0.15.0
 # Source: https://github.com/MacCracken/patra
 # License: GPL-3.0-only
 #
@@ -10,6 +10,7 @@
 
 
 # --- file.cyr ---
+
 # file.cyr — .patra file format constants, header, flock locking
 
 # ── Constants ────────────────────
@@ -160,6 +161,7 @@ fn _pt_file_open(path) {
 }
 
 # --- wal.cyr ---
+
 # wal.cyr — Write-ahead logging for crash recovery
 #
 # Before modifying a page, the current (before) content is saved to a .wal file.
@@ -271,6 +273,7 @@ fn wal_recover(db_fd, wal_path) {
 }
 
 # --- page.cyr ---
+
 # page.cyr — 4KB page management (alloc, read, write, free list)
 
 # Compute byte offset for page number
@@ -335,6 +338,7 @@ fn page_init_data(buf) {
 }
 
 # --- row.cyr ---
+
 # row.cyr — row encoding/decoding (i64 + fixed-length strings)
 
 # Size in bytes for a column type (INT=8, STR=256)
@@ -391,6 +395,7 @@ fn row_read_str(row, off) {
 }
 
 # --- sql.cyr ---
+
 # sql.cyr — SQL tokenizer and parser (v0.2: WHERE, ORDER BY, LIMIT, UPDATE, DELETE)
 
 # ── Token types ────────────────────
@@ -1134,6 +1139,7 @@ fn sql_parse() {
 }
 
 # --- where.cyr ---
+
 # where.cyr — WHERE clause evaluation
 
 # Resolve column name to index in schema. Returns -1 if not found.
@@ -1240,6 +1246,7 @@ fn where_eval(row, schema, ncols, pr) {
 }
 
 # --- btree.cyr ---
+
 # btree.cyr — B+ tree index (order 64, keys are i64)
 
 enum BtConst {
@@ -1632,6 +1639,7 @@ fn btree_remove_ref(fd, root, key, ref) {
 }
 
 # --- table.cyr ---
+
 # table.cyr — table metadata, create, insert, scan, update, delete
 
 var _tbl_last_ref = 0;
@@ -1952,6 +1960,7 @@ fn tbl_delete(fd, hdr, idx, row_sz, schema, ncols, pr) {
 }
 
 # --- jsonl.cyr ---
+
 # jsonl.cyr — JSON Lines append-only mode (libro compatibility)
 #
 # JSONL files: one JSON object per line, newline-delimited.
@@ -2268,7 +2277,8 @@ fn jsonl_count(fd) {
     return count;
 }
 
-# --- lib.cyr (API) ---
+# --- lib.cyr ---
+
 # lib.cyr — Patra public API
 #
 # Structured storage and SQL queries for Cyrius.
