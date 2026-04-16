@@ -5,6 +5,46 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-04-16
+
+Indexed-query planner improvements. No API changes; on-disk format unchanged.
+
+### Changed
+- **Indexed-ref cap raised 256 → 1024** (`src/lib.cyr`). Range queries
+  returning up to 1024 matching refs now take the index path instead of
+  silently falling back to a full table scan on overflow. The 8KB ref
+  buffer is transient per query (fl_alloc/free).
+- **Selectivity-based planner gate** — after collecting refs from the
+  B-tree, the query engine compares `nrefs` against `TBL_NROWS` (tracked
+  per table). When `nrefs >= 128` **and** the index would return ≥50%
+  of the table's rows, the engine falls back to a full scan. Avoids
+  paying the B-tree walk when the index offers no I/O savings
+  (duplicate-heavy or low-cardinality queries on small tables).
+
+### Added
+- **`select_idx_range_400_of_2000` benchmark** — 2,000 unique keys,
+  range query returning 400 refs (20% selectivity). Demonstrates the
+  #1 cap-raise win: previously capped out at 256 and scanned 2,000
+  rows; now uses the index. Current result: ~274 µs.
+- **21 → 22 benchmarks** (was 20 before 1.1.0 added the unique-keys
+  case).
+
+### Fixed
+- **`select_idx_eq_500` duplicate-heavy workload** — previously relied
+  on the 256-cap overflow fallback as a de-facto planner. With the cap
+  at 1024 that fallback no longer triggered and the duplicate-heavy
+  path became ~30 % slower than scan. The selectivity gate now routes
+  this case to scan explicitly. Result: **~159 µs** (was 185 µs with
+  #1 alone, 142 µs with cap-overflow fallback).
+
+### Validation
+- 274 passed, 0 failed (unchanged).
+- 2 fuzz harnesses pass.
+- 22 benchmarks.
+- `multipage indexed` test still passes (50 rows sharing `id=1`): the
+  selectivity gate correctly sends it to scan, which returns all 50
+  rows as expected.
+
 ## [1.1.0] - 2026-04-16
 
 ### Changed

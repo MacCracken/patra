@@ -1,6 +1,6 @@
 [package]
 name = "patra"
-version = "1.1.0"
+version = "1.1.1"
 description = "Patra — structured storage and SQL queries for Cyrius. The sovereign database."
 license = "GPL-3.0-only"
 language = "cyrius"

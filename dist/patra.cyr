@@ -1,5 +1,5 @@
 # patra.cyr — structured storage and SQL queries for Cyrius
-# Bundled distribution of patra v1.1.0
+# Bundled distribution of patra v1.1.1
 # Source: https://github.com/MacCracken/patra
 # License: GPL-3.0-only
 #
@@ -2996,10 +2996,27 @@ fn patra_query(db, sql) {
                 }
                 if (idx_found != 0) {
                     if (idx_lo <= idx_hi) {
-                        var refs = fl_alloc(2048);
-                        var nrefs = _bt_range(fd, ir, idx_lo, idx_hi, refs, 256);
-                        if (nrefs >= 256) {
+                        # 1024 refs * 8 bytes = 8KB ref buffer
+                        var refs = fl_alloc(8192);
+                        var nrefs = _bt_range(fd, ir, idx_lo, idx_hi, refs, 1024);
+
+                        # Selectivity-based planner: when the index returns
+                        # most of the rows in the table, a full scan reads
+                        # the same pages without the B-tree walk overhead.
+                        # Only triggers for nrefs >= 128 so small result
+                        # sets always take the index. `nrows` comes from
+                        # the table directory and is maintained on every
+                        # insert/delete.
+                        var low_selectivity = 0;
+                        if (nrefs >= 128) {
+                            if (nrefs * 2 >= nrows) { low_selectivity = 1; }
+                        }
+
+                        if (nrefs >= 1024) {
                             # Index returned max refs — may be truncated, fall back to scan
+                            fl_free(refs);
+                        } elif (low_selectivity != 0) {
+                            # Index would return >=50% of rows — scan is cheaper
                             fl_free(refs);
                         } else {
                             used_index = 1;

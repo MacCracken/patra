@@ -304,6 +304,35 @@ fn main() {
     patra_close(_bdb);
     _bcleanup();
 
+    # --- Indexed range query beyond old 256-cap (#1 win case) ---
+    # Unique keys 0..1999; WHERE id < 400 returns 400 refs scattered
+    # across ~27 pages. Pre-1.1.1 this hit the 256-cap and fell back
+    # to scan all 2000 rows. With cap raised to 1024 and selectivity
+    # gate at 50% (400 < 1000), the index path is taken.
+
+    _bdb = patra_open(_bpath);
+    patra_exec(_bdb, "CREATE TABLE idx_r (id INT, val STR)");
+    var _rsql[64];
+    for (var ri2 = 0; ri2 < 2000; ri2 = ri2 + 1) {
+        var _rargs = vec_new();
+        vec_push(_rargs, ri2);
+        fmt_sprintf(&_rsql, 64, "INSERT INTO idx_r VALUES (%d, 'x')", _rargs);
+        patra_exec(_bdb, &_rsql);
+    }
+
+    var b19c = bench_new("select_idx_range_400_of_2000");
+    ri = 0;
+    while (ri < 100) {
+        bench_batch_start(b19c);
+        var rs = patra_query(_bdb, "SELECT * FROM idx_r WHERE id < 400");
+        bench_batch_stop(b19c, 1);
+        patra_result_free(rs);
+        ri = ri + 1;
+    }
+    vec_push(benches, b19c);
+    patra_close(_bdb);
+    _bcleanup();
+
     # --- ORDER BY ---
 
     _bcleanup();

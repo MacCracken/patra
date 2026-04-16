@@ -1,6 +1,6 @@
 # Patra Development Roadmap
 
-> **v1.1.0** — Sovereign database for Cyrius. Stable, DCE-built.
+> **v1.1.1** — Sovereign database for Cyrius. Stable, DCE-built, selectivity-aware planner.
 
 ## Completed
 
@@ -86,14 +86,13 @@
 - `cyrius lint` step added to CI.
 - Dead code removed: `bp_flush()` no-op stub (buffer pool rejected in v0.10.0).
 
+### v1.1.1
+
+- Indexed-ref cap raised 256 → 1024 — legitimate range queries up to 1024 refs now use the index instead of silently falling back to scan on overflow.
+- Selectivity-based planner gate — when `nrefs >= 128` and the index would return ≥50% of the table's rows, the engine scans instead. Avoids paying the B-tree walk when the index offers no I/O savings.
+- New `select_idx_range_400_of_2000` benchmark proves the cap-raise win.
+
 ## Post-1.1 Backlog
-
-### Indexed query perf
-
-| # | Item | Notes |
-|---|------|-------|
-| 1 | Raise indexed-ref cap above 256 | Today `_bt_range` fills a 2KB buffer (256 refs) and the query engine falls back to full scan on overflow (lib.cyr:670). Growing the cap to ~1024 refs pushes the fallback cliff out for moderate-cardinality duplicates. One-line change + retest, modest per-query memory bump. |
-| 2 | Planner duplicate-heavy detection | When the B-tree walk hits many duplicates under one key, the current code still reads the leaf chain before falling back — wasted work. Detect long duplicate runs at leaf-find time and skip the index entirely for that query. Larger change; needs design. |
 
 ### Features
 
