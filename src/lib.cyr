@@ -56,7 +56,6 @@ fn patra_init() {
 # Open or create a .patra database file
 fn patra_open(path) {
     _tbl_lp_idx = 0 - 1;
-    bp_flush();
     var fd = _pt_file_open(path);
     if (fd < 0) {
         fd = _pt_file_create(path);

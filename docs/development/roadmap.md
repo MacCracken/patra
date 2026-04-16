@@ -1,6 +1,6 @@
 # Patra Development Roadmap
 
-> **v1.0.0** — Sovereign database for Cyrius. Stable.
+> **v1.1.0** — Sovereign database for Cyrius. Stable, DCE-built.
 
 ## Completed
 
@@ -77,13 +77,16 @@
 
 - Stable release. Feature-complete, hardened, fuzzed.
 
-## Post-1.0 Backlog
+### v1.1.0
 
-### Optimization
+- Manifest renamed to `cyrius.cyml` (ark/nous/sigil convention). Toolchain pin moved into `[package]`.
+- CI/release workflows rebuilt to mirror ark; toolchain version sourced from `.cyrius-toolchain`.
+- `CYRIUS_DCE=1` applied to every `cyrius build` in CI and release (dead code elimination).
+- Release artifacts now include source tarball, bundled `patra.cyr`, and DCE-built demo.
+- `cyrius lint` step added to CI.
+- Dead code removed: `bp_flush()` no-op stub (buffer pool rejected in v0.10.0).
 
-| # | Item | Notes |
-|---|------|-------|
-| 1 | Binary size reduction | 60KB overhead — investigate dead code elimination |
+## Post-1.1 Backlog
 
 ### Features
 

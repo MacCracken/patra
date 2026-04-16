@@ -7,7 +7,7 @@
 - **Type**: Shared library — database engine for the sovereign stack
 - **License**: GPL-3.0-only
 - **Language**: Cyrius (native)
-- **Version**: 1.0.0
+- **Version**: 1.1.0
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
 
@@ -17,9 +17,9 @@ Own the database. Zero deps. Pure Cyrius. SQL + B-tree + JSONL in a single `incl
 
 ## Current State
 
-- **Source**: 3,103 lines across 10 modules
+- **Source**: ~3,100 lines across 10 modules
 - **Tests**: 274 assertions, 2 fuzz harnesses, 20 benchmarks
-- **Stable**: 1.0 — feature-complete, hardened, fuzzed
+- **Stable**: 1.1 — feature-complete, hardened, fuzzed, DCE-built
 - **Integration**: libro audit log, vidya knowledge index
 - **Index**: B+ tree order-64, auto or explicit CREATE INDEX (16% faster indexed SELECT)
 - **Binary**: 120KB
@@ -88,7 +88,7 @@ Before starting new work on a release, run this audit phase:
 4. IF BROKEN   — Revert, apply ONE change, test, repeat
                  3 failed attempts = defer and document
 5. AUDIT       — Full suite: tests, fuzz, benchmarks, integration
-6. DOCUMENT    — CHANGELOG, roadmap, VERSION, cyrius.toml in sync
+6. DOCUMENT    — CHANGELOG, roadmap, VERSION, cyrius.cyml in sync
 ```
 
 ### Task Sizing
@@ -167,7 +167,7 @@ src/
 ```
 Root files (required):
   README.md, CHANGELOG.md, CLAUDE.md, CONTRIBUTING.md,
-  SECURITY.md, CODE_OF_CONDUCT.md, LICENSE, VERSION, cyrius.toml
+  SECURITY.md, CODE_OF_CONDUCT.md, LICENSE, VERSION, cyrius.cyml
 
 docs/ (required):
   architecture/overview.md — file format spec, page layouts

@@ -20,9 +20,6 @@ fn page_write(fd, num, buf) {
     return PATRA_OK;
 }
 
-# Flush buffer pool (no-op, reserved for future use)
-fn bp_flush() { return 0; }
-
 # Allocate a new page (from free list or extend file)
 fn page_alloc(fd, hdr) {
     var fh = load64(hdr + HDR_FREEHEAD);

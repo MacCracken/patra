@@ -11,11 +11,8 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  CYRIUS_VERSION: "4.10.3"
-
 jobs:
-  build-and-test:
+  build:
     name: Build & Test
     runs-on: ubuntu-latest
     steps:
@@ -23,6 +20,8 @@ jobs:
 
       - name: Install Cyrius toolchain
         run: |
+          CYRIUS_VERSION="${CYRIUS_VERSION:-$(cat .cyrius-toolchain | tr -d '[:space:]')}"
+          echo "Installing Cyrius $CYRIUS_VERSION"
           curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
           tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
           CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
@@ -32,15 +31,21 @@ jobs:
           cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
           chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
           echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
-          echo "Cyrius $CYRIUS_VERSION installed"
+          echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
 
       - name: Setup lib symlink
         run: ln -sf "$HOME/.cyrius/lib" lib
 
-      - name: Build demo
+      - name: Lint
+        run: |
+          for f in src/file.cyr src/wal.cyr src/page.cyr src/row.cyr src/sql.cyr src/where.cyr src/btree.cyr src/table.cyr src/jsonl.cyr src/lib.cyr; do
+            cyrius lint "$f" || true
+          done
+
+      - name: Build demo (DCE)
         run: |
           mkdir -p build
-          cyrius build programs/demo.cyr build/demo
+          CYRIUS_DCE=1 cyrius build programs/demo.cyr build/demo
           echo "demo: $(wc -c < build/demo) bytes"
 
       - name: Verify ELF
@@ -53,21 +58,21 @@ jobs:
         run: |
           for f in fuzz/*.fcyr; do
             name=$(basename "$f" .fcyr)
-            cyrius build "$f" "build/$name"
+            CYRIUS_DCE=1 cyrius build "$f" "build/$name"
             timeout 10 "build/$name" || { echo "FUZZ CRASH: $name"; exit 1; }
             echo "  $name: ok"
           done
 
       - name: Benchmarks
         run: |
-          cyrius build tests/bcyr/patra.bcyr build/bench
+          CYRIUS_DCE=1 cyrius build tests/bcyr/patra.bcyr build/bench
           ./build/bench
 
       - name: Integration tests
         run: |
-          cyrius build programs/test_libro.cyr build/test_libro
+          CYRIUS_DCE=1 cyrius build programs/test_libro.cyr build/test_libro
           ./build/test_libro
-          cyrius build programs/test_vidya.cyr build/test_vidya
+          CYRIUS_DCE=1 cyrius build programs/test_vidya.cyr build/test_vidya
           ./build/test_vidya
 
   security:
@@ -94,14 +99,14 @@ jobs:
       - name: Check required docs
         run: |
           MISSING=0
-          for doc in README.md CHANGELOG.md VERSION CONTRIBUTING.md SECURITY.md LICENSE cyrius.toml; do
+          for doc in README.md CHANGELOG.md VERSION CONTRIBUTING.md SECURITY.md LICENSE cyrius.cyml; do
             if [ -f "$doc" ]; then echo "  OK: $doc"; else echo "  MISSING: $doc"; MISSING=1; fi
           done
           exit $MISSING
       - name: Verify version consistency
         run: |
           FILE_VERSION=$(cat VERSION | tr -d '[:space:]')
-          TOML_VERSION=$(grep '^version = ' cyrius.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
-          [ "$FILE_VERSION" = "$TOML_VERSION" ] || { echo "VERSION ($FILE_VERSION) != cyrius.toml ($TOML_VERSION)"; exit 1; }
+          CYML_VERSION=$(grep '^version = ' cyrius.cyml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          [ "$FILE_VERSION" = "$CYML_VERSION" ] || { echo "VERSION ($FILE_VERSION) != cyrius.cyml ($CYML_VERSION)"; exit 1; }
           grep -q "$FILE_VERSION" CHANGELOG.md || { echo "version not in changelog"; exit 1; }
           echo "Version consistent: $FILE_VERSION"

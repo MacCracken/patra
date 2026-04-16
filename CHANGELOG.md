@@ -5,6 +5,42 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-04-16
+
+### Changed
+- **Manifest renamed** `cyrius.toml` → `cyrius.cyml` to match first-party
+  convention (ark, nous, sigil). Toolchain pin moved into `[package]` as
+  `cyrius = "4.10.3"`; `[toolchain]` section dropped.
+- **CI/release workflows rebuilt** to mirror ark. `CYRIUS_VERSION` is now
+  read from `.cyrius-toolchain` in both workflows (fixes a latent
+  ci.yml/release.yml version mismatch: 4.10.3 vs 3.2.1). Release tag
+  filter tightened from `'*'` to `'[0-9]*'` (semver-only).
+- **Dead code elimination enabled** — every `cyrius build` invocation in
+  CI and release now runs with `CYRIUS_DCE=1`. Applies to demo, fuzz
+  harnesses, benchmarks, and integration binaries. Addresses roadmap
+  backlog #1 ("60KB overhead — investigate dead code elimination").
+- **Release artifacts expanded** — GitHub release now ships the source
+  tarball, the bundled `patra-<tag>.cyr` single-file include, and the
+  DCE-built demo binary, each listed in `SHA256SUMS`.
+
+### Added
+- **`cyrius lint` step in CI** — runs per-source-file lint across all
+  ten `src/*.cyr` modules (non-fatal, advisory output).
+- **Bundle regeneration in release** — `sh scripts/bundle.sh` runs during
+  release to rebuild `dist/patra.cyr` from current sources and publish
+  it as a release asset.
+
+### Removed
+- **`bp_flush()` no-op stub** — 1-line dead function in `src/page.cyr`
+  plus its sole call in `src/lib.cyr:patra_open()`. Reserved for a
+  buffer pool that was investigated and rejected in v0.10.0 (4x slower
+  than OS page cache). No functional change.
+
+### Validation
+- 274 passed, 0 failed (unchanged).
+- 2 fuzz harnesses pass.
+- 20 benchmarks.
+
 ## [1.0.0] - 2026-04-15
 
 Patra 1.0 — the sovereign database is stable.

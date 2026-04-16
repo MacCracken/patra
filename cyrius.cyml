@@ -1,9 +1,15 @@
 [package]
 name = "patra"
-version = "1.0.0"
+version = "1.1.0"
 description = "Patra — structured storage and SQL queries for Cyrius. The sovereign database."
 license = "GPL-3.0-only"
+language = "cyrius"
+cyrius = "4.10.3"
 repository = "https://github.com/MacCracken/patra"
+
+[build]
+entry = "src/lib.cyr"
+output = "patra"
 
 [deps]
 stdlib = ["syscalls", "string", "alloc", "freelist", "io", "fmt", "str", "vec"]
@@ -12,10 +18,3 @@ stdlib = ["syscalls", "string", "alloc", "freelist", "io", "fmt", "str", "vec"]
 git = "https://github.com/MacCracken/sakshi.git"
 tag = "0.9.0"
 modules = ["sakshi.cyr"]
-
-[build]
-src = "src/lib.cyr"
-output = "build/patra"
-
-[toolchain]
-min = "4.9.3"

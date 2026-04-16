@@ -1,5 +1,5 @@
 # patra.cyr — structured storage and SQL queries for Cyrius
-# Bundled distribution of patra v1.0.0
+# Bundled distribution of patra v1.1.0
 # Source: https://github.com/MacCracken/patra
 # License: GPL-3.0-only
 #
@@ -300,9 +300,6 @@ fn page_write(fd, num, buf) {
     if (syscall(SYS_WRITE, fd, buf, PAGE_SIZE) != PAGE_SIZE) { return PATRA_ERR_IO; }
     return PATRA_OK;
 }
-
-# Flush buffer pool (no-op, reserved for future use)
-fn bp_flush() { return 0; }
 
 # Allocate a new page (from free list or extend file)
 fn page_alloc(fd, hdr) {
@@ -2390,7 +2387,6 @@ fn patra_init() {
 # Open or create a .patra database file
 fn patra_open(path) {
     _tbl_lp_idx = 0 - 1;
-    bp_flush();
     var fd = _pt_file_open(path);
     if (fd < 0) {
         fd = _pt_file_create(path);
