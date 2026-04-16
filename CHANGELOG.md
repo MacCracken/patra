@@ -39,7 +39,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Validation
 - 274 passed, 0 failed (unchanged).
 - 2 fuzz harnesses pass.
-- 20 benchmarks.
+- 21 benchmarks (was 20 — see below).
+
+### Benchmarks
+- **New: `select_idx_eq_unique_500`** — indexed equality on 500 rows with
+  distinct keys. Measures the happy path the B-tree was designed for.
+  Result: **61µs** vs `select_scan_500` at 100µs — indexed is ~39% faster.
+- **Kept: `select_idx_eq_500`** — 500 rows all sharing `id=1`. B-tree hits
+  the 256-ref cap, engine falls back to linear scan (correctness guard
+  from v0.16.0). Measures fallback overhead, not index efficacy: 142µs
+  vs scan 100µs — the B-tree walk is wasted work here, by design.
+- The v0.8.0 CHANGELOG's "16% faster indexed SELECT" claim was measured
+  on the duplicate-key benchmark before the v0.16.0 fallback existed and
+  before v0.14.0 grew `COL_STR_SZ` from 64 to 256. No longer representative;
+  superseded by `select_idx_eq_unique_500`.
 
 ## [1.0.0] - 2026-04-15
 

@@ -88,14 +88,21 @@
 
 ## Post-1.1 Backlog
 
+### Indexed query perf
+
+| # | Item | Notes |
+|---|------|-------|
+| 1 | Raise indexed-ref cap above 256 | Today `_bt_range` fills a 2KB buffer (256 refs) and the query engine falls back to full scan on overflow (lib.cyr:670). Growing the cap to ~1024 refs pushes the fallback cliff out for moderate-cardinality duplicates. One-line change + retest, modest per-query memory bump. |
+| 2 | Planner duplicate-heavy detection | When the B-tree walk hits many duplicates under one key, the current code still reads the leaf chain before falling back — wasted work. Detect long duplicate runs at leaf-find time and skip the index entirely for that query. Larger change; needs design. |
+
 ### Features
 
 | # | Item | Notes |
 |---|------|-------|
-| 2 | SELECT column list | Currently SELECT * only |
-| 3 | ALTER TABLE | Schema migration |
-| 4 | B-tree compaction | Reclaim lazy-deleted entries |
-| 5 | LIKE operator | String pattern matching |
+| 3 | SELECT column list | Currently SELECT * only |
+| 4 | ALTER TABLE | Schema migration |
+| 5 | B-tree compaction | Reclaim lazy-deleted entries |
+| 6 | LIKE operator | String pattern matching |
 
 ### Investigated / Rejected
 

@@ -275,6 +275,35 @@ fn main() {
     patra_close(_bdb);
     _bcleanup();
 
+    # --- Indexed SELECT with unique keys (realistic) ---
+    # b18 above uses 500 rows all with id=1 — the B-tree returns >=256 refs
+    # and the overflow fallback scans the table anyway. That's a regression-
+    # coverage case for the fallback, not an honest index-vs-scan comparison.
+    # This bench inserts distinct keys so the indexed path returns one row.
+
+    _bdb = patra_open(_bpath);
+    patra_exec(_bdb, "CREATE TABLE idx_u (id INT, val STR)");
+    var _isql[64];
+    for (var ui = 0; ui < 500; ui = ui + 1) {
+        var _iargs = vec_new();
+        vec_push(_iargs, ui);
+        fmt_sprintf(&_isql, 64, "INSERT INTO idx_u VALUES (%d, 'x')", _iargs);
+        patra_exec(_bdb, &_isql);
+    }
+
+    var b19b = bench_new("select_idx_eq_unique_500");
+    ri = 0;
+    while (ri < 100) {
+        bench_batch_start(b19b);
+        var rs = patra_query(_bdb, "SELECT * FROM idx_u WHERE id = 42");
+        bench_batch_stop(b19b, 1);
+        patra_result_free(rs);
+        ri = ri + 1;
+    }
+    vec_push(benches, b19b);
+    patra_close(_bdb);
+    _bcleanup();
+
     # --- ORDER BY ---
 
     _bcleanup();

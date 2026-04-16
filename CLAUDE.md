@@ -21,7 +21,7 @@ Own the database. Zero deps. Pure Cyrius. SQL + B-tree + JSONL in a single `incl
 - **Tests**: 274 assertions, 2 fuzz harnesses, 20 benchmarks
 - **Stable**: 1.1 — feature-complete, hardened, fuzzed, DCE-built
 - **Integration**: libro audit log, vidya knowledge index
-- **Index**: B+ tree order-64, auto or explicit CREATE INDEX (16% faster indexed SELECT)
+- **Index**: B+ tree order-64, auto or explicit CREATE INDEX (~39% faster equality select on unique keys, 500 rows; overflow-safe fallback on >256 duplicate refs)
 - **Binary**: 120KB
 
 ## Consumers
