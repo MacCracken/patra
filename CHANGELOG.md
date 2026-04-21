@@ -5,6 +5,79 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-04-21
+
+Audit P0 hardening. Six security fixes driven by
+`docs/audit/2026-04-21/security-review.md`. **WAL file format changes**
+— on-disk `.patra` format unchanged, but any stale `.wal` from 1.5.0 or
+earlier is refused rather than replayed (the DB is left intact; only
+uncommitted transactions are lost on upgrade).
+
+### Added
+- **`page_read_checked(fd, hdr, num, buf)`** (page.cyr) — validates
+  `1 ≤ num < HDR_PGCOUNT` before reading. Rejects the Magellan-class
+  OOB-read vector where a malformed `.patra` points a B-tree child at
+  an arbitrary page number. Every recursive B-tree walker switched to
+  the checked variant.
+- **`BT_MAX_DEPTH = 10` recursion cap** (btree.cyr) — `_bt_find_leaf`,
+  `_bt_rwalk`, `_bt_compact_walk`, and `btree_free_all` now take a
+  depth argument and abort at the cap. `_bt_path` enlarged from 48 to
+  80 bytes to match. A malformed tree with a cycle terminates cleanly
+  instead of stack-exhausting.
+- **WAL format v1** (wal.cyr) — 8-byte header (`"PTWA"` magic +
+  version) + per-record 8-byte hash of `(page_num || page_data)`.
+  `_wal_hdr_verify` refuses bare / mis-versioned WAL files;
+  `wal_recover` / `wal_rollback` stop replay on the first hash
+  mismatch (earlier records still apply). Defeats torn writes and the
+  "hostile `.wal` drop" scenario from audit §2.3.
+- **WHERE condition cap** (`WH_MAX = 32`) and **INSERT value cap**
+  (`MAX_COLS = 32`) in the parser — returns
+  `PATRA_ERR_SYNTAX` / `PATRA_ERR_COLCOUNT` before writing past
+  `_sql_pr + PR_WHERE` / `_sql_pr + PR_ITEMS`. Closes audit §2.5 + §2.10
+  heap-corruption vectors.
+- **Extended `patra_hdr_verify`** (file.cyr) — now also checks
+  `HDR_VER == PATRA_VER`, `HDR_PGCOUNT >= 1`,
+  `HDR_TBLCOUNT <= MAX_TABLES`, and `HDR_FREEHEAD < HDR_PGCOUNT`.
+  Returns typed `PATRA_ERR_MAGIC` / `PATRA_ERR_PAGE`. Audit §3.7.
+- **6 new test groups / 12 assertions** (424 → 436): `insert value
+  count bounded`, `where condition count bounded`, `wal bad magic
+  refused`, `wal checksum stops replay`, `hdr verify bad tblcount`
+  (covers version + freehead + zero-pgcount cases), `btree bad child
+  pointer` (deliberate corruption via `page_write`; query must not
+  crash). Mirrors the deterministic invariants listed in audit §4.2
+  #6, 7, 10, 11, and subset of §2.1.
+- **Fuzz harness `fuzz_file.fcyr`** updated to exercise the new
+  rejections (wrong version, over-cap tblcount, out-of-range
+  freehead).
+
+### Changed
+- **B-tree public signatures gain `hdr`**: `btree_search`,
+  `btree_remove_ref`, `btree_compact`, `_bt_range`, `_bt_find_leaf`.
+  Updated callers in `table.cyr`, `lib.cyr`, tests, and benchmarks.
+- **`_bt_path` size**: 48B → 80B (6 → 10 depth slots).
+
+### Breaking (runtime, not source)
+- **Stale `.wal` files from 1.5.0 or earlier are not replayed.** They
+  lack the 1.5.1 magic. Patra refuses to replay and leaves the file on
+  disk for inspection. Any uncommitted transaction in-flight at upgrade
+  is lost; committed data is untouched. Applications that orchestrate
+  patra upgrades should flush/commit before upgrading.
+
+### Validation
+- 436 passed, 0 failed (was 424).
+- 2 fuzz harnesses pass (fuzz_file extended with 2 new invariants).
+- 24 benchmarks within baseline variance.
+- libro (15) + vidya (19) integration unchanged.
+
+### Known (tracked for 1.5.2+)
+- P1 items from the audit remain: `_json_escape` 0x00–0x1F coverage,
+  `jsonl_get_int` overflow guard, `O_NOFOLLOW` on opens,
+  `fdatasync(db_fd)` before WAL unlink, `page_offset` overflow check.
+- P2 + P-1 items: new fuzz harnesses (btree/wal/jsonl/header mutation),
+  salt-based WAL authentication (currently only integrity), NFS/fork
+  SECURITY notes.
+- Cyrius 5.5.x DCE still no-op (ADR 0001).
+
 ## [1.5.0] - 2026-04-21
 
 Whole-tree B-tree page reclaim, Cyrius 5.5.x DCE limitation documented,

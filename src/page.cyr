@@ -12,6 +12,16 @@ fn page_read(fd, num, buf) {
     return PATRA_OK;
 }
 
+# Bounds-checked page read: rejects num == 0 (header) and num >= HDR_PGCOUNT
+# (past end of file). Used on any page number read from on-disk data —
+# closes the Magellan-class OOB-read vector where a malformed .patra file
+# can point a B-tree child at arbitrary page numbers.
+fn page_read_checked(fd, hdr, num, buf) {
+    if (num <= 0) { return PATRA_ERR_PAGE; }
+    if (num >= load64(hdr + HDR_PGCOUNT)) { return PATRA_ERR_PAGE; }
+    return page_read(fd, num, buf);
+}
+
 # Write a page from buffer to file (WAL-logged)
 fn page_write(fd, num, buf) {
     wal_log_page(num);

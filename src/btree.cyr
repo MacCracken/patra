@@ -3,6 +3,7 @@
 enum BtConst {
     BTREE_ORDER = 64;
     BT_MAX_KEYS = 63;
+    BT_MAX_DEPTH = 10;
 }
 
 enum BtOff {
@@ -27,8 +28,8 @@ fn _bt_mkref(pg, slot)  { return pg * 65536 + slot; }
 fn _bt_ref_pg(ref)      { return ref / 65536; }
 fn _bt_ref_slot(ref)    { return ref % 65536; }
 
-# Path stack for insert (max depth 6)
-var _bt_path[48];
+# Path stack for insert (max depth BT_MAX_DEPTH = 10)
+var _bt_path[80];
 var _bt_pdepth = 0;
 
 # ── Create ────────────────────
@@ -47,16 +48,23 @@ fn btree_create(fd, hdr) {
 
 # ── Find leaf (records path) ────────────────────
 
-fn _bt_find_leaf(fd, root, key) {
+fn _bt_find_leaf(fd, hdr, root, key) {
     _bt_pdepth = 0;
     var pg = root;
     var buf = fl_alloc(PAGE_SIZE);
     page_read(fd, pg, buf);
 
     while (load64(buf + BT_LEAF) == 0) {
+        if (_bt_pdepth >= BT_MAX_DEPTH) {
+            # Depth cap reached: malformed tree / cycle → return current page
+            # as if it were a leaf. Caller's key-match logic will find nothing.
+            fl_free(buf);
+            return pg;
+        }
         store64(&_bt_path + _bt_pdepth * 8, pg);
         _bt_pdepth = _bt_pdepth + 1;
         var nk = load64(buf + BT_NKEYS);
+        if (nk > BT_MAX_KEYS) { nk = BT_MAX_KEYS; }
         var ci = nk;
         var ff = 0;
         for (var i = 0; i < nk; i = i + 1) {
@@ -68,7 +76,10 @@ fn _bt_find_leaf(fd, root, key) {
             }
         }
         pg = load64(buf + BT_VALS + ci * 8);
-        page_read(fd, pg, buf);
+        if (page_read_checked(fd, hdr, pg, buf) != PATRA_OK) {
+            fl_free(buf);
+            return root;
+        }
     }
     store64(&_bt_path + _bt_pdepth * 8, pg);
     _bt_pdepth = _bt_pdepth + 1;
@@ -241,7 +252,7 @@ fn _bt_push_up(fd, hdr, root, left_pg, sep, right_pg) {
 
 # Insert key-value into B-tree, returns (possibly new) root
 fn btree_insert(fd, hdr, root, key, val) {
-    var leaf_pg = _bt_find_leaf(fd, root, key);
+    var leaf_pg = _bt_find_leaf(fd, hdr, root, key);
     var buf = fl_alloc(PAGE_SIZE);
     page_read(fd, leaf_pg, buf);
     var nk = load64(buf + BT_NKEYS);
@@ -311,22 +322,27 @@ fn btree_insert(fd, hdr, root, key, val) {
 # ── Search (all refs for key) ──────────────
 
 # Search for all refs matching key
-fn btree_search(fd, root, key, out, max) {
-    return _bt_range(fd, root, key, key, out, max);
+fn btree_search(fd, hdr, root, key, out, max) {
+    return _bt_range(fd, hdr, root, key, key, out, max);
 }
 
 # ── Range scan [lo, hi] — collects refs into out ────────────
 
-fn _bt_range(fd, root, lo, hi, out, max) {
+fn _bt_range(fd, hdr, root, lo, hi, out, max) {
     var cnt = 0;
-    _bt_rwalk(fd, root, lo, hi, out, max, &cnt);
+    _bt_rwalk(fd, hdr, root, lo, hi, out, max, &cnt, 0);
     return cnt;
 }
 
-fn _bt_rwalk(fd, pg, lo, hi, out, max, cp) {
+fn _bt_rwalk(fd, hdr, pg, lo, hi, out, max, cp, depth) {
+    if (depth >= BT_MAX_DEPTH) { return 0; }
     var buf = fl_alloc(PAGE_SIZE);
-    page_read(fd, pg, buf);
+    if (page_read_checked(fd, hdr, pg, buf) != PATRA_OK) {
+        fl_free(buf);
+        return 0;
+    }
     var nk = load64(buf + BT_NKEYS);
+    if (nk > BT_MAX_KEYS) { nk = BT_MAX_KEYS; }
     var leaf = load64(buf + BT_LEAF);
 
     if (leaf != 0) {
@@ -354,7 +370,8 @@ fn _bt_rwalk(fd, pg, lo, hi, out, max, cp) {
         for (var i = first; i <= nk; i = i + 1) {
             if (stop == 0) {
                 if (load64(cp) < max) {
-                    _bt_rwalk(fd, load64(buf + BT_VALS + i * 8), lo, hi, out, max, cp);
+                    _bt_rwalk(fd, hdr, load64(buf + BT_VALS + i * 8),
+                              lo, hi, out, max, cp, depth + 1);
                     if (i < nk) {
                         if (load64(buf + BT_KEYS + i * 8) > hi) {
                             stop = 1;
@@ -365,13 +382,14 @@ fn _bt_rwalk(fd, pg, lo, hi, out, max, cp) {
         }
     }
     fl_free(buf);
+    return 0;
 }
 
 # ── Remove ref (lazy delete — set value to 0) ──────────────
 
 # Lazy-delete: invalidate a specific ref for a key
-fn btree_remove_ref(fd, root, key, ref) {
-    var leaf_pg = _bt_find_leaf(fd, root, key);
+fn btree_remove_ref(fd, hdr, root, key, ref) {
+    var leaf_pg = _bt_find_leaf(fd, hdr, root, key);
     var buf = fl_alloc(PAGE_SIZE);
     page_read(fd, leaf_pg, buf);
     var nk = load64(buf + BT_NKEYS);
@@ -396,9 +414,17 @@ fn btree_remove_ref(fd, root, key, ref) {
 # freeing themselves. Prior to 1.5.0 only the root was freed, leaving all
 # internal and leaf pages unreachable on DROP TABLE / ALTER ADD / ALTER DROP.
 fn btree_free_all(fd, hdr, root) {
+    return _bt_free_walk(fd, hdr, root, 0);
+}
+
+fn _bt_free_walk(fd, hdr, root, depth) {
     if (root == 0) { return 0; }
+    if (depth >= BT_MAX_DEPTH) { return 0; }
     var buf = fl_alloc(PAGE_SIZE);
-    page_read(fd, root, buf);
+    if (page_read_checked(fd, hdr, root, buf) != PATRA_OK) {
+        fl_free(buf);
+        return 0;
+    }
     var leaf = load64(buf + BT_LEAF);
     if (leaf != 0) {
         fl_free(buf);
@@ -406,8 +432,9 @@ fn btree_free_all(fd, hdr, root) {
         return 0;
     }
     var nk = load64(buf + BT_NKEYS);
+    if (nk > BT_MAX_KEYS) { nk = BT_MAX_KEYS; }
     for (var i = 0; i <= nk; i = i + 1) {
-        btree_free_all(fd, hdr, load64(buf + BT_VALS + i * 8));
+        _bt_free_walk(fd, hdr, load64(buf + BT_VALS + i * 8), depth + 1);
     }
     fl_free(buf);
     page_free(fd, hdr, root);
@@ -446,18 +473,25 @@ fn _bt_leaf_compact(fd, pg) {
 
 # Depth-first walk: recurse into internal children, compact every leaf.
 # Returns total reclaimed across all leaves.
-fn _bt_compact_walk(fd, pg) {
+fn _bt_compact_walk(fd, hdr, pg, depth) {
+    if (depth >= BT_MAX_DEPTH) { return 0; }
     var buf = fl_alloc(PAGE_SIZE);
-    page_read(fd, pg, buf);
+    if (page_read_checked(fd, hdr, pg, buf) != PATRA_OK) {
+        fl_free(buf);
+        return 0;
+    }
     var leaf = load64(buf + BT_LEAF);
     if (leaf != 0) {
         fl_free(buf);
         return _bt_leaf_compact(fd, pg);
     }
     var nk = load64(buf + BT_NKEYS);
+    if (nk > BT_MAX_KEYS) { nk = BT_MAX_KEYS; }
     var total = 0;
     for (var i = 0; i <= nk; i = i + 1) {
-        total = total + _bt_compact_walk(fd, load64(buf + BT_VALS + i * 8));
+        total = total + _bt_compact_walk(fd, hdr,
+                                          load64(buf + BT_VALS + i * 8),
+                                          depth + 1);
     }
     fl_free(buf);
     return total;
@@ -465,6 +499,6 @@ fn _bt_compact_walk(fd, pg) {
 
 # Reclaim all tombstoned (lazy-deleted) entries in the tree. Safe to call
 # concurrently with nothing (caller holds write lock). Returns count reclaimed.
-fn btree_compact(fd, root) {
-    return _bt_compact_walk(fd, root);
+fn btree_compact(fd, hdr, root) {
+    return _bt_compact_walk(fd, hdr, root, 0);
 }

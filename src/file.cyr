@@ -114,9 +114,22 @@ fn patra_hdr_write(fd, buf) {
     return PATRA_OK;
 }
 
-# Verify header magic bytes
+# Verify header magic + version + internal bounds. Audit 2026-04-21 §3.7
+# rejects a malformed header that would let `tbl_find` walk past the 63-entry
+# table directory or let `page_alloc` dereference a bogus free-list head.
 fn patra_hdr_verify(buf) {
     if (load32(buf + HDR_MAGIC) != PATRA_MAGIC) { return PATRA_ERR_MAGIC; }
+    if (load32(buf + HDR_VER) != PATRA_VER) { return PATRA_ERR_MAGIC; }
+    var pgc = load64(buf + HDR_PGCOUNT);
+    if (pgc < 1) { return PATRA_ERR_PAGE; }
+    var fh = load64(buf + HDR_FREEHEAD);
+    if (fh != 0) {
+        if (fh >= pgc) { return PATRA_ERR_PAGE; }
+        if (fh < 1) { return PATRA_ERR_PAGE; }
+    }
+    var tc = load64(buf + HDR_TBLCOUNT);
+    if (tc < 0) { return PATRA_ERR_PAGE; }
+    if (tc > MAX_TABLES) { return PATRA_ERR_PAGE; }
     return PATRA_OK;
 }
 

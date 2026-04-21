@@ -3,6 +3,18 @@
 # Before modifying a page, the current (before) content is saved to a .wal file.
 # On commit: WAL is deleted. On crash recovery: WAL is replayed (undo).
 # Integrates with page_write via globals — no call-site changes needed.
+#
+# File format (1.5.1+):
+#   [0..3]     magic "PTWA" (0x41575450 little-endian)
+#   [4..7]     version (currently 1)
+#   [8..]      records, each 4112 bytes:
+#                [0..7]       page_num (i64)
+#                [8..4103]    before-image page (4096 bytes)
+#                [4104..4111] FNV-style hash of (page_num || page_data)
+#   Records with a mismatched hash abort recovery/rollback at that point —
+#   earlier records still apply. Bare WAL files (no magic) are refused and
+#   left in place so a human can inspect them; old 1.4.x WAL files are
+#   therefore discarded rather than replayed.
 
 var _wal_fd = 0 - 1;
 var _wal_db_fd = 0 - 1;
@@ -10,7 +22,26 @@ var _wal_pages = 0;
 var _wal_nlog = 0;
 var _wal_overflow = 0;
 
-enum WalConst { WAL_MAX_PAGES = 64; WAL_REC_SZ = 4104; }
+enum WalConst {
+    WAL_MAX_PAGES = 64;
+    WAL_REC_SZ = 4112;
+    WAL_HDR_SZ = 8;
+    WAL_MAGIC = 0x41575450;
+    WAL_VER = 1;
+}
+
+# Simple djb2-derivative hash over (page_num || page_data). Non-cryptographic:
+# defends against accidental WAL corruption and stale 1.4.x WAL replay, not
+# against an attacker who can read the algorithm. DB-salted auth tracked for
+# a later release (see docs/audit/2026-04-21/security-review.md §3.4).
+fn _wal_hash(pg, page_data) {
+    var h = pg * 2654435761;
+    h = h + 5381;
+    for (var i = 0; i < PAGE_SIZE; i = i + 1) {
+        h = h * 33 + load8(page_data + i);
+    }
+    return h;
+}
 
 # Begin WAL logging for a transaction
 fn wal_start(db_fd, wal_path) {
@@ -21,6 +52,14 @@ fn wal_start(db_fd, wal_path) {
     if (_wal_pages == 0) { _wal_pages = alloc(WAL_MAX_PAGES * 8); }
     _wal_nlog = 0;
     _wal_overflow = 0;
+
+    # Write WAL header before any records
+    var hdr = fl_alloc(WAL_HDR_SZ);
+    memset(hdr, 0, WAL_HDR_SZ);
+    store32(hdr, WAL_MAGIC);
+    store32(hdr + 4, WAL_VER);
+    syscall(SYS_WRITE, _wal_fd, hdr, WAL_HDR_SZ);
+    fl_free(hdr);
     return PATRA_OK;
 }
 
@@ -46,10 +85,13 @@ fn wal_log_page(page_num) {
 
     # Read current page from disk
     var buf = fl_alloc(WAL_REC_SZ);
+    memset(buf, 0, WAL_REC_SZ);
     store64(buf, page_num);
     _pt_seek(_wal_db_fd, page_offset(page_num));
     var nr = syscall(SYS_READ, _wal_db_fd, buf + 8, PAGE_SIZE);
     if (nr < 0) { nr = 0; }
+    # Trailing checksum
+    store64(buf + 8 + PAGE_SIZE, _wal_hash(page_num, buf + 8));
     # Write record to WAL
     syscall(SYS_WRITE, _wal_fd, buf, WAL_REC_SZ);
     fl_free(buf);
@@ -69,17 +111,39 @@ fn wal_commit(wal_path) {
     return 0;
 }
 
-# Rollback: restore before-images from WAL, delete it
+# Verify WAL header. Returns PATRA_OK, or PATRA_ERR_MAGIC on mismatch.
+fn _wal_hdr_verify(fd) {
+    if (syscall(SYS_LSEEK, fd, 0, 0) < 0) { return PATRA_ERR_IO; }
+    var hdr = fl_alloc(WAL_HDR_SZ);
+    var nr = syscall(SYS_READ, fd, hdr, WAL_HDR_SZ);
+    if (nr != WAL_HDR_SZ) { fl_free(hdr); return PATRA_ERR_MAGIC; }
+    if (load32(hdr) != WAL_MAGIC) { fl_free(hdr); return PATRA_ERR_MAGIC; }
+    if (load32(hdr + 4) != WAL_VER) { fl_free(hdr); return PATRA_ERR_MAGIC; }
+    fl_free(hdr);
+    return PATRA_OK;
+}
+
+# Rollback: restore before-images from WAL, delete it. Stops replay on a
+# checksum mismatch — earlier records still apply, the record with the bad
+# hash and everything after it is skipped.
 fn wal_rollback(wal_path) {
     if (_wal_fd < 0) { return 0; }
-    # Replay WAL: restore before-images
-    syscall(SYS_LSEEK, _wal_fd, 0, 0);
+    if (_wal_hdr_verify(_wal_fd) != PATRA_OK) {
+        syscall(SYS_CLOSE, _wal_fd);
+        _wal_fd = 0 - 1;
+        _wal_nlog = 0;
+        syscall(SYS_UNLINK, wal_path);
+        return PATRA_ERR_MAGIC;
+    }
     var buf = fl_alloc(WAL_REC_SZ);
     var done = 0;
     while (done == 0) {
         var nr = syscall(SYS_READ, _wal_fd, buf, WAL_REC_SZ);
         if (nr != WAL_REC_SZ) { done = 1; continue; }
         var pg = load64(buf);
+        var want = load64(buf + 8 + PAGE_SIZE);
+        var got = _wal_hash(pg, buf + 8);
+        if (want != got) { done = 1; continue; }
         _pt_seek(_wal_db_fd, page_offset(pg));
         syscall(SYS_WRITE, _wal_db_fd, buf + 8, PAGE_SIZE);
     }
@@ -92,17 +156,26 @@ fn wal_rollback(wal_path) {
     return 0;
 }
 
-# Recover from crash: if WAL file exists, replay it
+# Recover from crash: if WAL file exists, replay it. Returns 1 on replay
+# attempt (even if bad magic — the file is then left for inspection).
 fn wal_recover(db_fd, wal_path) {
     var wfd = syscall(SYS_OPEN, wal_path, 0, 0);
     if (wfd < 0) { return 0; }
-    # WAL exists — replay
+    if (_wal_hdr_verify(wfd) != PATRA_OK) {
+        # Bad magic / stale format: refuse to replay. Leave the file on disk
+        # so an operator can inspect it; we will not silently corrupt the DB.
+        syscall(SYS_CLOSE, wfd);
+        return 1;
+    }
     var buf = fl_alloc(WAL_REC_SZ);
     var done = 0;
     while (done == 0) {
         var nr = syscall(SYS_READ, wfd, buf, WAL_REC_SZ);
         if (nr != WAL_REC_SZ) { done = 1; continue; }
         var pg = load64(buf);
+        var want = load64(buf + 8 + PAGE_SIZE);
+        var got = _wal_hash(pg, buf + 8);
+        if (want != got) { done = 1; continue; }
         _pt_seek(db_fd, page_offset(pg));
         syscall(SYS_WRITE, db_fd, buf + 8, PAGE_SIZE);
     }

@@ -1,5 +1,5 @@
 # patra.cyr — structured storage and SQL queries for Cyrius
-# Bundled distribution of patra v1.5.0
+# Bundled distribution of patra v1.5.1
 # Source: https://github.com/MacCracken/patra
 # License: GPL-3.0-only
 #
@@ -127,9 +127,22 @@ fn patra_hdr_write(fd, buf) {
     return PATRA_OK;
 }
 
-# Verify header magic bytes
+# Verify header magic + version + internal bounds. Audit 2026-04-21 §3.7
+# rejects a malformed header that would let `tbl_find` walk past the 63-entry
+# table directory or let `page_alloc` dereference a bogus free-list head.
 fn patra_hdr_verify(buf) {
     if (load32(buf + HDR_MAGIC) != PATRA_MAGIC) { return PATRA_ERR_MAGIC; }
+    if (load32(buf + HDR_VER) != PATRA_VER) { return PATRA_ERR_MAGIC; }
+    var pgc = load64(buf + HDR_PGCOUNT);
+    if (pgc < 1) { return PATRA_ERR_PAGE; }
+    var fh = load64(buf + HDR_FREEHEAD);
+    if (fh != 0) {
+        if (fh >= pgc) { return PATRA_ERR_PAGE; }
+        if (fh < 1) { return PATRA_ERR_PAGE; }
+    }
+    var tc = load64(buf + HDR_TBLCOUNT);
+    if (tc < 0) { return PATRA_ERR_PAGE; }
+    if (tc > MAX_TABLES) { return PATRA_ERR_PAGE; }
     return PATRA_OK;
 }
 
@@ -167,6 +180,18 @@ fn _pt_file_open(path) {
 # Before modifying a page, the current (before) content is saved to a .wal file.
 # On commit: WAL is deleted. On crash recovery: WAL is replayed (undo).
 # Integrates with page_write via globals — no call-site changes needed.
+#
+# File format (1.5.1+):
+#   [0..3]     magic "PTWA" (0x41575450 little-endian)
+#   [4..7]     version (currently 1)
+#   [8..]      records, each 4112 bytes:
+#                [0..7]       page_num (i64)
+#                [8..4103]    before-image page (4096 bytes)
+#                [4104..4111] FNV-style hash of (page_num || page_data)
+#   Records with a mismatched hash abort recovery/rollback at that point —
+#   earlier records still apply. Bare WAL files (no magic) are refused and
+#   left in place so a human can inspect them; old 1.4.x WAL files are
+#   therefore discarded rather than replayed.
 
 var _wal_fd = 0 - 1;
 var _wal_db_fd = 0 - 1;
@@ -174,7 +199,26 @@ var _wal_pages = 0;
 var _wal_nlog = 0;
 var _wal_overflow = 0;
 
-enum WalConst { WAL_MAX_PAGES = 64; WAL_REC_SZ = 4104; }
+enum WalConst {
+    WAL_MAX_PAGES = 64;
+    WAL_REC_SZ = 4112;
+    WAL_HDR_SZ = 8;
+    WAL_MAGIC = 0x41575450;
+    WAL_VER = 1;
+}
+
+# Simple djb2-derivative hash over (page_num || page_data). Non-cryptographic:
+# defends against accidental WAL corruption and stale 1.4.x WAL replay, not
+# against an attacker who can read the algorithm. DB-salted auth tracked for
+# a later release (see docs/audit/2026-04-21/security-review.md §3.4).
+fn _wal_hash(pg, page_data) {
+    var h = pg * 2654435761;
+    h = h + 5381;
+    for (var i = 0; i < PAGE_SIZE; i = i + 1) {
+        h = h * 33 + load8(page_data + i);
+    }
+    return h;
+}
 
 # Begin WAL logging for a transaction
 fn wal_start(db_fd, wal_path) {
@@ -185,6 +229,14 @@ fn wal_start(db_fd, wal_path) {
     if (_wal_pages == 0) { _wal_pages = alloc(WAL_MAX_PAGES * 8); }
     _wal_nlog = 0;
     _wal_overflow = 0;
+
+    # Write WAL header before any records
+    var hdr = fl_alloc(WAL_HDR_SZ);
+    memset(hdr, 0, WAL_HDR_SZ);
+    store32(hdr, WAL_MAGIC);
+    store32(hdr + 4, WAL_VER);
+    syscall(SYS_WRITE, _wal_fd, hdr, WAL_HDR_SZ);
+    fl_free(hdr);
     return PATRA_OK;
 }
 
@@ -210,10 +262,13 @@ fn wal_log_page(page_num) {
 
     # Read current page from disk
     var buf = fl_alloc(WAL_REC_SZ);
+    memset(buf, 0, WAL_REC_SZ);
     store64(buf, page_num);
     _pt_seek(_wal_db_fd, page_offset(page_num));
     var nr = syscall(SYS_READ, _wal_db_fd, buf + 8, PAGE_SIZE);
     if (nr < 0) { nr = 0; }
+    # Trailing checksum
+    store64(buf + 8 + PAGE_SIZE, _wal_hash(page_num, buf + 8));
     # Write record to WAL
     syscall(SYS_WRITE, _wal_fd, buf, WAL_REC_SZ);
     fl_free(buf);
@@ -233,17 +288,39 @@ fn wal_commit(wal_path) {
     return 0;
 }
 
-# Rollback: restore before-images from WAL, delete it
+# Verify WAL header. Returns PATRA_OK, or PATRA_ERR_MAGIC on mismatch.
+fn _wal_hdr_verify(fd) {
+    if (syscall(SYS_LSEEK, fd, 0, 0) < 0) { return PATRA_ERR_IO; }
+    var hdr = fl_alloc(WAL_HDR_SZ);
+    var nr = syscall(SYS_READ, fd, hdr, WAL_HDR_SZ);
+    if (nr != WAL_HDR_SZ) { fl_free(hdr); return PATRA_ERR_MAGIC; }
+    if (load32(hdr) != WAL_MAGIC) { fl_free(hdr); return PATRA_ERR_MAGIC; }
+    if (load32(hdr + 4) != WAL_VER) { fl_free(hdr); return PATRA_ERR_MAGIC; }
+    fl_free(hdr);
+    return PATRA_OK;
+}
+
+# Rollback: restore before-images from WAL, delete it. Stops replay on a
+# checksum mismatch — earlier records still apply, the record with the bad
+# hash and everything after it is skipped.
 fn wal_rollback(wal_path) {
     if (_wal_fd < 0) { return 0; }
-    # Replay WAL: restore before-images
-    syscall(SYS_LSEEK, _wal_fd, 0, 0);
+    if (_wal_hdr_verify(_wal_fd) != PATRA_OK) {
+        syscall(SYS_CLOSE, _wal_fd);
+        _wal_fd = 0 - 1;
+        _wal_nlog = 0;
+        syscall(SYS_UNLINK, wal_path);
+        return PATRA_ERR_MAGIC;
+    }
     var buf = fl_alloc(WAL_REC_SZ);
     var done = 0;
     while (done == 0) {
         var nr = syscall(SYS_READ, _wal_fd, buf, WAL_REC_SZ);
         if (nr != WAL_REC_SZ) { done = 1; continue; }
         var pg = load64(buf);
+        var want = load64(buf + 8 + PAGE_SIZE);
+        var got = _wal_hash(pg, buf + 8);
+        if (want != got) { done = 1; continue; }
         _pt_seek(_wal_db_fd, page_offset(pg));
         syscall(SYS_WRITE, _wal_db_fd, buf + 8, PAGE_SIZE);
     }
@@ -256,17 +333,26 @@ fn wal_rollback(wal_path) {
     return 0;
 }
 
-# Recover from crash: if WAL file exists, replay it
+# Recover from crash: if WAL file exists, replay it. Returns 1 on replay
+# attempt (even if bad magic — the file is then left for inspection).
 fn wal_recover(db_fd, wal_path) {
     var wfd = syscall(SYS_OPEN, wal_path, 0, 0);
     if (wfd < 0) { return 0; }
-    # WAL exists — replay
+    if (_wal_hdr_verify(wfd) != PATRA_OK) {
+        # Bad magic / stale format: refuse to replay. Leave the file on disk
+        # so an operator can inspect it; we will not silently corrupt the DB.
+        syscall(SYS_CLOSE, wfd);
+        return 1;
+    }
     var buf = fl_alloc(WAL_REC_SZ);
     var done = 0;
     while (done == 0) {
         var nr = syscall(SYS_READ, wfd, buf, WAL_REC_SZ);
         if (nr != WAL_REC_SZ) { done = 1; continue; }
         var pg = load64(buf);
+        var want = load64(buf + 8 + PAGE_SIZE);
+        var got = _wal_hash(pg, buf + 8);
+        if (want != got) { done = 1; continue; }
         _pt_seek(db_fd, page_offset(pg));
         syscall(SYS_WRITE, db_fd, buf + 8, PAGE_SIZE);
     }
@@ -291,6 +377,16 @@ fn page_read(fd, num, buf) {
     if (_pt_seek(fd, page_offset(num)) < 0) { return PATRA_ERR_IO; }
     if (syscall(SYS_READ, fd, buf, PAGE_SIZE) != PAGE_SIZE) { return PATRA_ERR_IO; }
     return PATRA_OK;
+}
+
+# Bounds-checked page read: rejects num == 0 (header) and num >= HDR_PGCOUNT
+# (past end of file). Used on any page number read from on-disk data —
+# closes the Magellan-class OOB-read vector where a malformed .patra file
+# can point a B-tree child at arbitrary page numbers.
+fn page_read_checked(fd, hdr, num, buf) {
+    if (num <= 0) { return PATRA_ERR_PAGE; }
+    if (num >= load64(hdr + HDR_PGCOUNT)) { return PATRA_ERR_PAGE; }
+    return page_read(fd, num, buf);
 }
 
 # Write a page from buffer to file (WAL-logged)
@@ -544,6 +640,12 @@ enum CmpOp {
 
 # WHERE join type
 enum WhJoin { WH_AND = 0; WH_OR = 1; }
+
+# Hard cap on WHERE conditions per statement. `_sql_pr` is 4096 bytes;
+# PR_WHERE starts at 1024 and entries are 56 bytes, so 32 conditions fit
+# with headroom. Audit 2026-04-21 §2.10 — prevents heap corruption from
+# attacker-supplied `WHERE a=1 AND a=1 AND ...` storms.
+enum WhLim { WH_MAX = 32; }
 
 # ── State ────────────────────
 
@@ -806,6 +908,8 @@ fn _parse_where(pos) {
 
         # col
         if (tt != TK_IDENT) { return 0 - 1; }
+        # Audit 2026-04-21 §2.10: cap condition count before writing
+        if (count >= WH_MAX) { return 0 - 1; }
         var cond = _sql_pr + PR_WHERE + count * WH_ENTRY_SZ;
         store64(cond + WH_COL_PTR, _tok_ptr(pos));
         store64(cond + WH_COL_LEN, _tok_len(pos));
@@ -923,6 +1027,8 @@ fn _parse_insert() {
         var tt = _tok_type(pos);
         if (tt == TK_EOF)    { return PATRA_ERR_SYNTAX; }
         if (tt == TK_RPAREN) { pos = pos + 1; break; }
+        # Audit 2026-04-21 §2.5: cap before writing to PR_ITEMS slot
+        if (nvals >= MAX_COLS) { return PATRA_ERR_COLCOUNT; }
 
         var item = _sql_pr + PR_ITEMS + nvals * IR_SZ;
 
@@ -1464,6 +1570,7 @@ fn where_eval(row, schema, ncols, pr) {
 enum BtConst {
     BTREE_ORDER = 64;
     BT_MAX_KEYS = 63;
+    BT_MAX_DEPTH = 10;
 }
 
 enum BtOff {
@@ -1488,8 +1595,8 @@ fn _bt_mkref(pg, slot)  { return pg * 65536 + slot; }
 fn _bt_ref_pg(ref)      { return ref / 65536; }
 fn _bt_ref_slot(ref)    { return ref % 65536; }
 
-# Path stack for insert (max depth 6)
-var _bt_path[48];
+# Path stack for insert (max depth BT_MAX_DEPTH = 10)
+var _bt_path[80];
 var _bt_pdepth = 0;
 
 # ── Create ────────────────────
@@ -1508,16 +1615,23 @@ fn btree_create(fd, hdr) {
 
 # ── Find leaf (records path) ────────────────────
 
-fn _bt_find_leaf(fd, root, key) {
+fn _bt_find_leaf(fd, hdr, root, key) {
     _bt_pdepth = 0;
     var pg = root;
     var buf = fl_alloc(PAGE_SIZE);
     page_read(fd, pg, buf);
 
     while (load64(buf + BT_LEAF) == 0) {
+        if (_bt_pdepth >= BT_MAX_DEPTH) {
+            # Depth cap reached: malformed tree / cycle → return current page
+            # as if it were a leaf. Caller's key-match logic will find nothing.
+            fl_free(buf);
+            return pg;
+        }
         store64(&_bt_path + _bt_pdepth * 8, pg);
         _bt_pdepth = _bt_pdepth + 1;
         var nk = load64(buf + BT_NKEYS);
+        if (nk > BT_MAX_KEYS) { nk = BT_MAX_KEYS; }
         var ci = nk;
         var ff = 0;
         for (var i = 0; i < nk; i = i + 1) {
@@ -1529,7 +1643,10 @@ fn _bt_find_leaf(fd, root, key) {
             }
         }
         pg = load64(buf + BT_VALS + ci * 8);
-        page_read(fd, pg, buf);
+        if (page_read_checked(fd, hdr, pg, buf) != PATRA_OK) {
+            fl_free(buf);
+            return root;
+        }
     }
     store64(&_bt_path + _bt_pdepth * 8, pg);
     _bt_pdepth = _bt_pdepth + 1;
@@ -1702,7 +1819,7 @@ fn _bt_push_up(fd, hdr, root, left_pg, sep, right_pg) {
 
 # Insert key-value into B-tree, returns (possibly new) root
 fn btree_insert(fd, hdr, root, key, val) {
-    var leaf_pg = _bt_find_leaf(fd, root, key);
+    var leaf_pg = _bt_find_leaf(fd, hdr, root, key);
     var buf = fl_alloc(PAGE_SIZE);
     page_read(fd, leaf_pg, buf);
     var nk = load64(buf + BT_NKEYS);
@@ -1772,22 +1889,27 @@ fn btree_insert(fd, hdr, root, key, val) {
 # ── Search (all refs for key) ──────────────
 
 # Search for all refs matching key
-fn btree_search(fd, root, key, out, max) {
-    return _bt_range(fd, root, key, key, out, max);
+fn btree_search(fd, hdr, root, key, out, max) {
+    return _bt_range(fd, hdr, root, key, key, out, max);
 }
 
 # ── Range scan [lo, hi] — collects refs into out ────────────
 
-fn _bt_range(fd, root, lo, hi, out, max) {
+fn _bt_range(fd, hdr, root, lo, hi, out, max) {
     var cnt = 0;
-    _bt_rwalk(fd, root, lo, hi, out, max, &cnt);
+    _bt_rwalk(fd, hdr, root, lo, hi, out, max, &cnt, 0);
     return cnt;
 }
 
-fn _bt_rwalk(fd, pg, lo, hi, out, max, cp) {
+fn _bt_rwalk(fd, hdr, pg, lo, hi, out, max, cp, depth) {
+    if (depth >= BT_MAX_DEPTH) { return 0; }
     var buf = fl_alloc(PAGE_SIZE);
-    page_read(fd, pg, buf);
+    if (page_read_checked(fd, hdr, pg, buf) != PATRA_OK) {
+        fl_free(buf);
+        return 0;
+    }
     var nk = load64(buf + BT_NKEYS);
+    if (nk > BT_MAX_KEYS) { nk = BT_MAX_KEYS; }
     var leaf = load64(buf + BT_LEAF);
 
     if (leaf != 0) {
@@ -1815,7 +1937,8 @@ fn _bt_rwalk(fd, pg, lo, hi, out, max, cp) {
         for (var i = first; i <= nk; i = i + 1) {
             if (stop == 0) {
                 if (load64(cp) < max) {
-                    _bt_rwalk(fd, load64(buf + BT_VALS + i * 8), lo, hi, out, max, cp);
+                    _bt_rwalk(fd, hdr, load64(buf + BT_VALS + i * 8),
+                              lo, hi, out, max, cp, depth + 1);
                     if (i < nk) {
                         if (load64(buf + BT_KEYS + i * 8) > hi) {
                             stop = 1;
@@ -1826,13 +1949,14 @@ fn _bt_rwalk(fd, pg, lo, hi, out, max, cp) {
         }
     }
     fl_free(buf);
+    return 0;
 }
 
 # ── Remove ref (lazy delete — set value to 0) ──────────────
 
 # Lazy-delete: invalidate a specific ref for a key
-fn btree_remove_ref(fd, root, key, ref) {
-    var leaf_pg = _bt_find_leaf(fd, root, key);
+fn btree_remove_ref(fd, hdr, root, key, ref) {
+    var leaf_pg = _bt_find_leaf(fd, hdr, root, key);
     var buf = fl_alloc(PAGE_SIZE);
     page_read(fd, leaf_pg, buf);
     var nk = load64(buf + BT_NKEYS);
@@ -1857,9 +1981,17 @@ fn btree_remove_ref(fd, root, key, ref) {
 # freeing themselves. Prior to 1.5.0 only the root was freed, leaving all
 # internal and leaf pages unreachable on DROP TABLE / ALTER ADD / ALTER DROP.
 fn btree_free_all(fd, hdr, root) {
+    return _bt_free_walk(fd, hdr, root, 0);
+}
+
+fn _bt_free_walk(fd, hdr, root, depth) {
     if (root == 0) { return 0; }
+    if (depth >= BT_MAX_DEPTH) { return 0; }
     var buf = fl_alloc(PAGE_SIZE);
-    page_read(fd, root, buf);
+    if (page_read_checked(fd, hdr, root, buf) != PATRA_OK) {
+        fl_free(buf);
+        return 0;
+    }
     var leaf = load64(buf + BT_LEAF);
     if (leaf != 0) {
         fl_free(buf);
@@ -1867,8 +1999,9 @@ fn btree_free_all(fd, hdr, root) {
         return 0;
     }
     var nk = load64(buf + BT_NKEYS);
+    if (nk > BT_MAX_KEYS) { nk = BT_MAX_KEYS; }
     for (var i = 0; i <= nk; i = i + 1) {
-        btree_free_all(fd, hdr, load64(buf + BT_VALS + i * 8));
+        _bt_free_walk(fd, hdr, load64(buf + BT_VALS + i * 8), depth + 1);
     }
     fl_free(buf);
     page_free(fd, hdr, root);
@@ -1907,18 +2040,25 @@ fn _bt_leaf_compact(fd, pg) {
 
 # Depth-first walk: recurse into internal children, compact every leaf.
 # Returns total reclaimed across all leaves.
-fn _bt_compact_walk(fd, pg) {
+fn _bt_compact_walk(fd, hdr, pg, depth) {
+    if (depth >= BT_MAX_DEPTH) { return 0; }
     var buf = fl_alloc(PAGE_SIZE);
-    page_read(fd, pg, buf);
+    if (page_read_checked(fd, hdr, pg, buf) != PATRA_OK) {
+        fl_free(buf);
+        return 0;
+    }
     var leaf = load64(buf + BT_LEAF);
     if (leaf != 0) {
         fl_free(buf);
         return _bt_leaf_compact(fd, pg);
     }
     var nk = load64(buf + BT_NKEYS);
+    if (nk > BT_MAX_KEYS) { nk = BT_MAX_KEYS; }
     var total = 0;
     for (var i = 0; i <= nk; i = i + 1) {
-        total = total + _bt_compact_walk(fd, load64(buf + BT_VALS + i * 8));
+        total = total + _bt_compact_walk(fd, hdr,
+                                          load64(buf + BT_VALS + i * 8),
+                                          depth + 1);
     }
     fl_free(buf);
     return total;
@@ -1926,8 +2066,8 @@ fn _bt_compact_walk(fd, pg) {
 
 # Reclaim all tombstoned (lazy-deleted) entries in the tree. Safe to call
 # concurrently with nothing (caller holds write lock). Returns count reclaimed.
-fn btree_compact(fd, root) {
-    return _bt_compact_walk(fd, root);
+fn btree_compact(fd, hdr, root) {
+    return _bt_compact_walk(fd, hdr, root, 0);
 }
 
 # --- table.cyr ---
@@ -2199,7 +2339,7 @@ fn tbl_update(fd, hdr, idx, row_sz, schema, ncols, pr) {
                 if (ui_updating != 0) {
                     if (uir != 0) {
                         var old_key = row_read_int(rptr, uioff);
-                        btree_remove_ref(fd, uir, old_key, _bt_mkref(cur, i));
+                        btree_remove_ref(fd, hdr, uir, old_key, _bt_mkref(cur, i));
                     }
                 }
                 for (var s = 0; s < nsets; s = s + 1) {
@@ -2271,7 +2411,7 @@ fn tbl_delete(fd, hdr, idx, row_sz, schema, ncols, pr) {
                     if (dir != 0) {
                         var dkey = row_read_int(rptr, doff);
                         var dref = _bt_mkref(cur, i);
-                        btree_remove_ref(fd, dir, dkey, dref);
+                        btree_remove_ref(fd, hdr, dir, dkey, dref);
                     }
                 }
                 deleted = deleted + 1;
@@ -3310,7 +3450,7 @@ fn _exec_vacuum(db) {
 
     if (ic >= 0) {
         if (ir != 0) {
-            btree_compact(fd, ir);
+            btree_compact(fd, hdr, ir);
         }
     }
     patra_unlock(fd);
@@ -3667,7 +3807,7 @@ fn patra_query(db, sql) {
                     if (idx_lo <= idx_hi) {
                         # 1024 refs * 8 bytes = 8KB ref buffer
                         var refs = fl_alloc(8192);
-                        var nrefs = _bt_range(fd, ir, idx_lo, idx_hi, refs, 1024);
+                        var nrefs = _bt_range(fd, hdr, ir, idx_lo, idx_hi, refs, 1024);
 
                         # Selectivity-based planner: when the index returns
                         # most of the rows in the table, a full scan reads

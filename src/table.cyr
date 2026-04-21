@@ -265,7 +265,7 @@ fn tbl_update(fd, hdr, idx, row_sz, schema, ncols, pr) {
                 if (ui_updating != 0) {
                     if (uir != 0) {
                         var old_key = row_read_int(rptr, uioff);
-                        btree_remove_ref(fd, uir, old_key, _bt_mkref(cur, i));
+                        btree_remove_ref(fd, hdr, uir, old_key, _bt_mkref(cur, i));
                     }
                 }
                 for (var s = 0; s < nsets; s = s + 1) {
@@ -337,7 +337,7 @@ fn tbl_delete(fd, hdr, idx, row_sz, schema, ncols, pr) {
                     if (dir != 0) {
                         var dkey = row_read_int(rptr, doff);
                         var dref = _bt_mkref(cur, i);
-                        btree_remove_ref(fd, dir, dkey, dref);
+                        btree_remove_ref(fd, hdr, dir, dkey, dref);
                     }
                 }
                 deleted = deleted + 1;

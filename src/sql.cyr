@@ -145,6 +145,12 @@ enum CmpOp {
 # WHERE join type
 enum WhJoin { WH_AND = 0; WH_OR = 1; }
 
+# Hard cap on WHERE conditions per statement. `_sql_pr` is 4096 bytes;
+# PR_WHERE starts at 1024 and entries are 56 bytes, so 32 conditions fit
+# with headroom. Audit 2026-04-21 §2.10 — prevents heap corruption from
+# attacker-supplied `WHERE a=1 AND a=1 AND ...` storms.
+enum WhLim { WH_MAX = 32; }
+
 # ── State ────────────────────
 
 var _sql_toks = 0;
@@ -406,6 +412,8 @@ fn _parse_where(pos) {
 
         # col
         if (tt != TK_IDENT) { return 0 - 1; }
+        # Audit 2026-04-21 §2.10: cap condition count before writing
+        if (count >= WH_MAX) { return 0 - 1; }
         var cond = _sql_pr + PR_WHERE + count * WH_ENTRY_SZ;
         store64(cond + WH_COL_PTR, _tok_ptr(pos));
         store64(cond + WH_COL_LEN, _tok_len(pos));
@@ -523,6 +531,8 @@ fn _parse_insert() {
         var tt = _tok_type(pos);
         if (tt == TK_EOF)    { return PATRA_ERR_SYNTAX; }
         if (tt == TK_RPAREN) { pos = pos + 1; break; }
+        # Audit 2026-04-21 §2.5: cap before writing to PR_ITEMS slot
+        if (nvals >= MAX_COLS) { return PATRA_ERR_COLCOUNT; }
 
         var item = _sql_pr + PR_ITEMS + nvals * IR_SZ;
 

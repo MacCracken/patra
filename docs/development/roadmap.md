@@ -1,6 +1,6 @@
 # Patra Development Roadmap
 
-> **v1.5.0** — Sovereign database for Cyrius. Whole-tree page reclaim, security audit complete (fixes ship 1.5.1).
+> **v1.5.1** — Sovereign database for Cyrius. Audit P0 hardening landed; P1 ships 1.5.2.
 
 ## Completed
 
@@ -147,23 +147,33 @@
   Patra code paths, with disposition for 1.5.1 (P0/P1 fixes) and later.
 - 421 → 424 test assertions (+2 reclaim test groups).
 
-### Planned: v1.5.1 — security hardening from audit
+### v1.5.1
 
-P0 (must-ship):
-- Page-pointer validation wrapper in `page_read` (kills Magellan-class).
-- `_bt_rwalk` / `_bt_compact_walk` recursion depth cap.
-- WAL header + per-record checksum.
-- INSERT/CREATE value-count bound check + WHERE condition-count bound.
-- `patra_hdr_verify` extended to PGCOUNT/TBLCOUNT/FREEHEAD/VER.
+- **Audit P0 hardening** from `docs/audit/2026-04-21/security-review.md`:
+  `page_read_checked` bounds validation, `BT_MAX_DEPTH=10` recursion cap,
+  WAL format v1 (magic + per-record hash), WHERE/INSERT count caps,
+  extended `patra_hdr_verify` (version + pgcount + tblcount + freehead).
+- Breaking: stale WAL files from 1.5.0 and earlier are refused
+  (on-disk `.patra` format unchanged).
+- 424 → 436 test assertions (+6 test groups).
 
-P1:
-- `_json_escape` covers full 0x00–0x1F + explicit-length API.
+### Planned: v1.5.2 — audit P1
+
+- `_json_escape` covers full 0x00–0x1F + explicit-length API (log-forging).
 - `jsonl_get_int` overflow guard.
-- `O_NOFOLLOW` on `_pt_file_open` and `jsonl_open`.
-- `fdatasync(db_fd)` before WAL unlink.
+- `O_NOFOLLOW` on `_pt_file_open` and `jsonl_open` (TOCTOU/symlink).
+- `fdatasync(db_fd)` before WAL unlink (durability ordering).
 - `page_offset` overflow check.
 
-Each P0 / P1 item ships with a deterministic invariant test from
+### Planned: v1.5.3 — audit P2 + P-1 scaffold pass
+
+- New fuzz harnesses: `fuzz_btree`, `fuzz_wal`, `fuzz_jsonl`, `fuzz_header`.
+- Salt-based WAL authentication (header-salted records).
+- NFS / fork caveats in SECURITY.md.
+- Static test that `_sql_pr` math still holds as the parser grows.
+- P(-1) cleanup sweep per CLAUDE.md.
+
+Each P0 / P1 / P2 item ships with a deterministic invariant test from
 `docs/audit/2026-04-21/security-review.md` §4.2.
 
 ## Post-1.5 Backlog

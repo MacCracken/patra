@@ -709,7 +709,7 @@ fn _exec_vacuum(db) {
 
     if (ic >= 0) {
         if (ir != 0) {
-            btree_compact(fd, ir);
+            btree_compact(fd, hdr, ir);
         }
     }
     patra_unlock(fd);
@@ -1066,7 +1066,7 @@ fn patra_query(db, sql) {
                     if (idx_lo <= idx_hi) {
                         # 1024 refs * 8 bytes = 8KB ref buffer
                         var refs = fl_alloc(8192);
-                        var nrefs = _bt_range(fd, ir, idx_lo, idx_hi, refs, 1024);
+                        var nrefs = _bt_range(fd, hdr, ir, idx_lo, idx_hi, refs, 1024);
 
                         # Selectivity-based planner: when the index returns
                         # most of the rows in the table, a full scan reads

@@ -236,7 +236,7 @@ fn main() {
     while (ri < 100) {
         bench_batch_start(b17);
         for (var si = 0; si < 1000; si = si + 1) {
-            btree_search(fd, bt_root, si, bout, 8);
+            btree_search(fd, hdr, bt_root, si, bout, 8);
         }
         bench_batch_stop(b17, 1000);
         ri = ri + 1;

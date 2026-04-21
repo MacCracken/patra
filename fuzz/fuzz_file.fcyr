@@ -127,10 +127,21 @@ syscall(SYS_UNLINK, jpath);
 memset(buf, 255, PAGE_SIZE);
 if (patra_hdr_verify(buf) == PATRA_OK) { syscall(SYS_EXIT, 50); }
 
-# Correct magic but wrong version (still passes verify — verify only checks magic)
+# Correct magic but wrong version — rejected as of 1.5.1 (audit 2026-04-21 §3.7)
 patra_hdr_init(buf);
 store32(buf + 4, 99);
-if (patra_hdr_verify(buf) != PATRA_OK) { syscall(SYS_EXIT, 51); }
+if (patra_hdr_verify(buf) == PATRA_OK) { syscall(SYS_EXIT, 51); }
+
+# Over-cap table count — rejected as of 1.5.1
+patra_hdr_init(buf);
+store64(buf + HDR_TBLCOUNT, 1000);
+if (patra_hdr_verify(buf) == PATRA_OK) { syscall(SYS_EXIT, 52); }
+
+# Out-of-range freehead — rejected as of 1.5.1
+patra_hdr_init(buf);
+store64(buf + HDR_PGCOUNT, 10);
+store64(buf + HDR_FREEHEAD, 99);
+if (patra_hdr_verify(buf) == PATRA_OK) { syscall(SYS_EXIT, 53); }
 
 fl_free(buf);
 syscall(SYS_UNLINK, fpath);

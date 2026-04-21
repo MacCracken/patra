@@ -682,11 +682,11 @@ fn test_btree_basic() {
     root = btree_insert(fd, hdr, root, 15, 150);
 
     var out = fl_alloc(64);
-    assert_eq(btree_search(fd, root, 10, out, 8), 1, "find 10");
+    assert_eq(btree_search(fd, hdr, root, 10, out, 8), 1, "find 10");
     assert_eq(load64(out), 100, "val 100");
-    assert_eq(btree_search(fd, root, 5, out, 8), 1, "find 5");
+    assert_eq(btree_search(fd, hdr, root, 5, out, 8), 1, "find 5");
     assert_eq(load64(out), 50, "val 50");
-    assert_eq(btree_search(fd, root, 99, out, 8), 0, "miss 99");
+    assert_eq(btree_search(fd, hdr, root, 99, out, 8), 0, "miss 99");
 
     fl_free(out);
     fl_free(hdr);
@@ -710,12 +710,12 @@ fn test_btree_split() {
     var out = fl_alloc(64);
     var ok = 1;
     for (var i = 0; i < 100; i = i + 1) {
-        var n = btree_search(fd, root, i, out, 8);
+        var n = btree_search(fd, hdr, root, i, out, 8);
         if (n != 1) { ok = 0; }
         elif (load64(out) != i * 10) { ok = 0; }
     }
     assert(ok, "all 100 found");
-    assert_eq(btree_search(fd, root, 999, out, 8), 0, "miss 999");
+    assert_eq(btree_search(fd, hdr, root, 999, out, 8), 0, "miss 999");
 
     fl_free(out);
     fl_free(hdr);
@@ -735,13 +735,13 @@ fn test_btree_range() {
     }
 
     var out = fl_alloc(512);
-    var n = _bt_range(fd, root, 10, 19, out, 64);
+    var n = _bt_range(fd, hdr, root, 10, 19, out, 64);
     assert_eq(n, 10, "range 10-19: 10");
 
-    n = _bt_range(fd, root, 0, 49, out, 64);
+    n = _bt_range(fd, hdr, root, 0, 49, out, 64);
     assert_eq(n, 50, "range 0-49: 50");
 
-    n = _bt_range(fd, root, 100, 200, out, 64);
+    n = _bt_range(fd, hdr, root, 100, 200, out, 64);
     assert_eq(n, 0, "range miss");
 
     fl_free(out);
@@ -762,7 +762,7 @@ fn test_btree_duplicates() {
     root = btree_insert(fd, hdr, root, 5, 3);
 
     var out = fl_alloc(64);
-    assert_eq(btree_search(fd, root, 5, out, 8), 3, "3 dups");
+    assert_eq(btree_search(fd, hdr, root, 5, out, 8), 3, "3 dups");
 
     fl_free(out);
     fl_free(hdr);
@@ -1317,6 +1317,184 @@ fn test_jsonl_special_chars() {
     fl_free(types);
     jsonl_close(fd);
     jcleanup();
+}
+
+# ── v1.5.1: audit-driven hardening ───────────────────────────
+
+# §4.2 #10 — INSERT with too many values returns PATRA_ERR_COLCOUNT
+# before trampling past PR_ITEMS.
+fn test_insert_value_count_bounded() {
+    test_group("insert value count bounded");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (x INT)");
+    # 200 values into a 1-col table — must reject during parse
+    var sql[4096];
+    memcpy(&sql, "INSERT INTO t VALUES (", 22);
+    var w = 22;
+    for (var i = 0; i < 200; i = i + 1) {
+        if (i > 0) { store8(&sql + w, 44); w = w + 1; store8(&sql + w, 32); w = w + 1; }
+        store8(&sql + w, 49); w = w + 1;  # '1'
+    }
+    store8(&sql + w, 41); w = w + 1;  # ')'
+    store8(&sql + w, 0);
+    assert_eq(patra_exec(db, &sql), PATRA_ERR_COLCOUNT, "200-value insert rejected");
+    patra_close(db);
+}
+
+# §4.2 #11 — WHERE with too many conditions returns an error.
+fn test_where_condition_count_bounded() {
+    test_group("where condition count bounded");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (x INT)");
+    # 100 AND conditions — exceeds WH_MAX=32
+    var sql[4096];
+    memcpy(&sql, "SELECT * FROM t WHERE x = 1", 27);
+    var w = 27;
+    for (var i = 0; i < 100; i = i + 1) {
+        memcpy(&sql + w, " AND x = 1", 10);
+        w = w + 10;
+    }
+    store8(&sql + w, 0);
+    # Beyond cap → parse fails and query returns null
+    var rs = patra_query(db, &sql);
+    assert_eq(rs, 0, "over-capped WHERE rejected");
+    patra_close(db);
+}
+
+# §4.2 #7 (subset) — bare random-bytes WAL is refused, no silent replay.
+fn test_wal_bad_magic_refused() {
+    test_group("wal bad magic refused");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (x INT)");
+    patra_exec(db, "INSERT INTO t VALUES (42)");
+    patra_close(db);
+
+    # Drop a junk .wal next to the DB
+    var wpath = "/tmp/patra_test.patra.wal";
+    var wfd = syscall(SYS_OPEN, wpath, 578, 420);
+    var junk = fl_alloc(WAL_REC_SZ);
+    memset(junk, 0xAA, WAL_REC_SZ);
+    syscall(SYS_WRITE, wfd, junk, WAL_REC_SZ);
+    syscall(SYS_CLOSE, wfd);
+    fl_free(junk);
+
+    # Reopen: wal_recover must refuse and leave the DB intact
+    db = patra_open(_tpath);
+    var rs = patra_query(db, "SELECT * FROM t");
+    assert(rs != 0, "db intact after junk wal");
+    assert_eq(patra_result_count(rs), 1, "row preserved");
+    assert_eq(patra_result_get_int(rs, 0, 0), 42, "value preserved");
+    patra_result_free(rs);
+    patra_close(db);
+    syscall(SYS_UNLINK, wpath);
+}
+
+# §4.2 (new) — valid WAL with a forged tail record (bad checksum) replays
+# up to the bad record and stops.
+fn test_wal_checksum_stops_replay() {
+    test_group("wal checksum stops replay");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (x INT)");
+    patra_exec(db, "INSERT INTO t VALUES (1)");
+    patra_close(db);
+
+    # Craft a minimal well-formed WAL header + one bad-checksum record
+    var wpath = "/tmp/patra_test.patra.wal";
+    var wfd = syscall(SYS_OPEN, wpath, 578, 420);
+    var hdr = fl_alloc(WAL_HDR_SZ);
+    store32(hdr, WAL_MAGIC);
+    store32(hdr + 4, WAL_VER);
+    syscall(SYS_WRITE, wfd, hdr, WAL_HDR_SZ);
+    fl_free(hdr);
+    # Forged record: claims to restore page 1 with zeros, checksum all zero
+    var rec = fl_alloc(WAL_REC_SZ);
+    memset(rec, 0, WAL_REC_SZ);
+    store64(rec, 1);  # page 1
+    syscall(SYS_WRITE, wfd, rec, WAL_REC_SZ);
+    fl_free(rec);
+    syscall(SYS_CLOSE, wfd);
+
+    # Reopen: header is valid, but the record's checksum (0) will not match
+    # _wal_hash(1, zeros). Replay must stop before overwriting page 1.
+    db = patra_open(_tpath);
+    var rs = patra_query(db, "SELECT * FROM t");
+    assert(rs != 0, "db intact");
+    assert_eq(patra_result_count(rs), 1, "row preserved");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+# §4.2 (new) — patra_hdr_verify rejects over-cap table count.
+fn test_hdr_verify_bad_tblcount() {
+    test_group("hdr verify bad tblcount");
+    var buf = fl_alloc(PAGE_SIZE);
+    patra_hdr_init(buf);
+    store64(buf + HDR_TBLCOUNT, 1000);  # > MAX_TABLES (63)
+    assert_eq(patra_hdr_verify(buf), PATRA_ERR_PAGE, "over-max tblcount rejected");
+
+    # FREEHEAD past PGCOUNT also rejected
+    patra_hdr_init(buf);
+    store64(buf + HDR_PGCOUNT, 10);
+    store64(buf + HDR_FREEHEAD, 99);
+    assert_eq(patra_hdr_verify(buf), PATRA_ERR_PAGE, "out-of-range freehead rejected");
+
+    # Zero pgcount rejected
+    patra_hdr_init(buf);
+    store64(buf + HDR_PGCOUNT, 0);
+    assert_eq(patra_hdr_verify(buf), PATRA_ERR_PAGE, "zero pgcount rejected");
+
+    # Wrong version rejected
+    patra_hdr_init(buf);
+    store32(buf + HDR_VER, 999);
+    assert_eq(patra_hdr_verify(buf), PATRA_ERR_MAGIC, "bad version rejected");
+
+    fl_free(buf);
+}
+
+# §4.2 #6 (subset) — malformed B-tree child pointer caught by page_read_checked.
+# We fabricate a root leaf that claims to be internal with a child pointing
+# past end-of-file; the indexed SELECT must not crash.
+fn test_btree_bad_child_pointer() {
+    test_group("btree bad child pointer");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (id INT, x INT)");
+    patra_exec(db, "INSERT INTO t VALUES (1, 10)");
+    patra_exec(db, "INSERT INTO t VALUES (2, 20)");
+
+    # Locate the B-tree root and corrupt it: flip leaf→internal and set
+    # child 0 = huge out-of-range page number.
+    var hdr = _db_hdr(db);
+    var fd = _db_fd(db);
+    var entry = _tbl_entry(hdr, 0);
+    var spg = load64(entry + TBL_SCHEMA);
+    var schema = fl_alloc(PAGE_SIZE);
+    page_read(fd, spg, schema);
+    var ir = load64(schema + SCH_IDX_ROOT);
+    fl_free(schema);
+
+    var buf = fl_alloc(PAGE_SIZE);
+    page_read(fd, ir, buf);
+    store64(buf + BT_LEAF, 0);                         # claim internal
+    store64(buf + BT_NKEYS, 1);
+    store64(buf + BT_VALS, 999999);                    # bogus child 0
+    store64(buf + BT_VALS + 8, 999999);                # bogus child 1
+    page_write(fd, ir, buf);
+    fl_free(buf);
+
+    # Query must return without crashing (bounds check on page_read intercepts
+    # the bogus child pointer; depth cap also provides backstop).
+    var rs = patra_query(db, "SELECT * FROM t WHERE id = 1");
+    # Don't assert a specific count — the tree is deliberately broken.
+    # We only assert patra_query returned without crashing.
+    if (rs != 0) { patra_result_free(rs); }
+    assert(1, "survived bad child pointer");
+
+    patra_close(db);
 }
 
 # ── v1.5: B-tree full-tree page reclaim ──────────────────────
@@ -2490,6 +2668,14 @@ fn main() {
     # v1.5.0 B-tree whole-tree reclaim
     test_btree_page_reclaim_drop();
     test_btree_page_reclaim_alter_add();
+
+    # v1.5.1 audit-driven hardening
+    test_insert_value_count_bounded();
+    test_where_condition_count_bounded();
+    test_wal_bad_magic_refused();
+    test_wal_checksum_stops_replay();
+    test_hdr_verify_bad_tblcount();
+    test_btree_bad_child_pointer();
 
     cleanup();
     return assert_summary();
