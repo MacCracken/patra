@@ -52,7 +52,12 @@ jobs:
           echo "patra demo: $(wc -c < build/demo) bytes"
 
       - name: Regenerate bundle
-        run: sh scripts/bundle.sh
+        # v1.5.5+: bundle generation moved from scripts/bundle.sh to
+        # `cyrius distlib` (reads [lib] modules from cyrius.cyml). The
+        # installed cyrius version must be 5.5.26 or newer, which this
+        # workflow already enforces via the Install step above (the
+        # pin lives in cyrius.cyml's `[package].cyrius` field).
+        run: cyrius distlib
 
       - name: Archive
         run: |
