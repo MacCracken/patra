@@ -84,13 +84,12 @@ fn _json_escape(dst, src, slen) {
 
 # ── JSON object builder ────────────────────
 
-# Build JSON: {"key1": val1, "key2": "str_val", ...}
-# keys: array of n pointers to null-terminated strings
-# vals: array of n i64 (int values) or pointers (string values)
-# types: array of n COL_INT/COL_STR
-# Returns length written (null-terminated).
-# Build JSON object string from key-value arrays
-fn json_build(buf, max, keys, vals, types, n) {
+# Length-aware builder. `vlens` gives explicit byte length for each STR value
+# (entries for COL_INT are ignored). A STR value may therefore contain embedded
+# NUL bytes without being silently truncated by strlen — audit 2026-04-21 §2.6
+# log-forging case. Emits `[NUL]` for any NUL, producing valid JSON in all cases.
+# Pass `vlens = 0` to fall back to strlen on every STR value (legacy behavior).
+fn json_build_lens(buf, max, keys, vals, vlens, types, n) {
     var pos = 0;
     store8(buf + pos, 123); pos = pos + 1;
 
@@ -115,7 +114,9 @@ fn json_build(buf, max, keys, vals, types, n) {
         } else {
             store8(buf + pos, 34); pos = pos + 1;
             var sp = load64(vals + i * 8);
-            var sl = strlen(sp);
+            var sl = 0;
+            if (vlens != 0) { sl = load64(vlens + i * 8); }
+            else { sl = strlen(sp); }
             pos = pos + _json_escape(buf + pos, sp, sl);
             store8(buf + pos, 34); pos = pos + 1;
         }
@@ -126,14 +127,26 @@ fn json_build(buf, max, keys, vals, types, n) {
     return pos;
 }
 
-# Append a JSON object built from key-value pairs
-# Build and append JSON object to JSONL file
-fn jsonl_append_obj(fd, keys, vals, types, n) {
+# Legacy builder — uses strlen for string lengths. Prefer json_build_lens
+# when inputs may contain embedded NUL bytes (audit §2.6).
+fn json_build(buf, max, keys, vals, types, n) {
+    return json_build_lens(buf, max, keys, vals, 0, types, n);
+}
+
+# Length-aware JSONL append. vlens is an array of explicit lengths for STR
+# values (ignored for INT). Added in 1.5.3 to close the embedded-NUL
+# truncation in `jsonl_append_obj` without breaking existing callers.
+fn jsonl_append_obj_lens(fd, keys, vals, vlens, types, n) {
     var buf = fl_alloc(4096);
-    var len = json_build(buf, 4096, keys, vals, types, n);
+    var len = json_build_lens(buf, 4096, keys, vals, vlens, types, n);
     jsonl_append(fd, buf, len);
     fl_free(buf);
     return 0;
+}
+
+# Legacy append — strlen-based. Kept for backward compatibility.
+fn jsonl_append_obj(fd, keys, vals, types, n) {
+    return jsonl_append_obj_lens(fd, keys, vals, 0, types, n);
 }
 
 # ── Read ────────────────────

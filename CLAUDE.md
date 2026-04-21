@@ -7,7 +7,7 @@
 - **Type**: Shared library — database engine for the sovereign stack
 - **License**: GPL-3.0-only
 - **Language**: Cyrius (native)
-- **Version**: 1.5.2
+- **Version**: 1.5.4
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
 
@@ -17,9 +17,9 @@ Own the database. Zero deps. Pure Cyrius. SQL + B-tree + JSONL in a single `incl
 
 ## Current State
 
-- **Source**: ~3,900 lines across 10 modules
-- **Tests**: 467 assertions, 2 fuzz harnesses, 24 benchmarks
-- **Stable**: 1.5.2 — Audit P0+P1 hardening (page/tree/parser/header checks + WAL magic/checksum + full JSON escaping + overflow guards + O_NOFOLLOW + durable-commit ordering). Cyrius 5.5.22.
+- **Source**: ~4,000 lines across 10 modules
+- **Tests**: 475 assertions, 5 fuzz harnesses, 24 benchmarks
+- **Stable**: 1.5.3 — Full 2026-04-21 audit slate (P0+P1+P2+P-1) shipped: bounds-checked page reads, tree depth caps, WAL v2 with salted per-record auth, parser caps, strict header verify, full JSON control-byte escaping, overflow guards, O_NOFOLLOW, durable-commit ordering, explicit-length JSON API, layout invariant check, btree/wal/jsonl fuzz harnesses, SECURITY.md. Cyrius 5.5.22.
 - **Integration**: libro audit log, vidya knowledge index
 - **Index**: B+ tree order-64, auto or explicit CREATE INDEX (~39% faster equality select on unique keys, 500 rows; overflow-safe fallback on >256 duplicate refs)
 - **Binary**: 180KB (DCE)

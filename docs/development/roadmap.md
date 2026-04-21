@@ -1,6 +1,6 @@
 # Patra Development Roadmap
 
-> **v1.5.2** — Sovereign database for Cyrius. Audit P0 + P1 landed; P2/P-1 ships 1.5.3.
+> **v1.5.4** — Sovereign database for Cyrius. `.cyrius-toolchain` dropped; `cyrius.cyml` is the single source of truth.
 
 ## Completed
 
@@ -168,16 +168,39 @@
 - Deferred to 1.5.3: explicit-length API to close embedded-NUL truncation
   in `jsonl_append_obj` (requires consumer-facing API change).
 
-### Planned: v1.5.3 — audit P2 + P-1 scaffold pass
+### v1.5.4
 
-- New fuzz harnesses: `fuzz_btree`, `fuzz_wal`, `fuzz_jsonl`, `fuzz_header`.
-- Salt-based WAL authentication (header-salted records).
-- NFS / fork caveats in SECURITY.md.
-- Static test that `_sql_pr` math still holds as the parser grows.
-- P(-1) cleanup sweep per CLAUDE.md.
+- **`.cyrius-toolchain` removed.** `cyrius.cyml` `[package].cyrius` is
+  the single source of truth for the pinned compiler version. CI and
+  release workflows extract the version from `cyrius.cyml` directly.
 
-Each P0 / P1 / P2 item ships with a deterministic invariant test from
-`docs/audit/2026-04-21/security-review.md` §4.2.
+### v1.5.3
+
+- **Audit P2 + P(-1) scaffold pass** from
+  `docs/audit/2026-04-21/security-review.md`:
+  WAL format v2 with salted per-record auth (`SYS_GETRANDOM`-sourced),
+  explicit-length `json_build_lens` / `jsonl_append_obj_lens` to close
+  the embedded-NUL log-forging vector, three new fuzz harnesses
+  (`fuzz_btree`, `fuzz_wal`, `fuzz_jsonl`), `test_parse_result_layout_invariant`
+  static check, rewritten `SECURITY.md` with threat model and supported/
+  unsupported deployment matrix.
+- Breaking: stale WAL files from 1.5.1 / 1.5.2 refused (version 1→2).
+- 467 → 475 test assertions (+1 test group). 2 → 5 fuzz harnesses.
+
+## Audit slate — complete
+
+All deliverables from `docs/audit/2026-04-21/security-review.md` §4 have
+shipped:
+
+- P0 (1.5.1) — page-read bounds, B-tree depth cap, WAL magic+hash,
+  parser count caps, strict `patra_hdr_verify`.
+- P1 (1.5.2) — full JSON control-byte escaping, `jsonl_get_int` overflow
+  guard, `O_NOFOLLOW`, `fdatasync(db_fd)` before WAL unlink, `page_offset`
+  overflow clamp.
+- P2 + P(-1) (1.5.3) — salted WAL records, explicit-length JSON API,
+  three new fuzz harnesses, layout invariant test, `SECURITY.md`.
+
+## Post-1.5 Backlog
 
 ## Post-1.5 Backlog
 

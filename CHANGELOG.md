@@ -5,6 +5,97 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.4] - 2026-04-21
+
+Drop `.cyrius-toolchain` as the toolchain source of truth. `cyrius.cyml`
+`[package].cyrius` is now the single place the Cyrius compiler version
+lives. No source / format / test changes.
+
+### Removed
+- **`.cyrius-toolchain`** file — historical holdover from before
+  `cyrius.cyml` carried the toolchain pin (introduced in 1.1.0 and
+  kept around for CI convenience). Removing it eliminates the
+  "which one is authoritative?" ambiguity that caused the 1.1.0 latent
+  bug (ci.yml / release.yml version mismatch 4.10.3 vs 3.2.1).
+
+### Changed
+- **`.github/workflows/ci.yml` and `release.yml`** now read the
+  Cyrius version from `cyrius.cyml` via the same
+  `grep '^cyrius = ' … | sed …` pattern already used for the version-
+  consistency check. The `CYRIUS_VERSION` env-var override still works.
+
+### Validation
+- 475 passed, 0 failed (unchanged).
+- 5 fuzz harnesses pass.
+- No runtime behavior changed — this is purely a build-system cleanup.
+
+## [1.5.3] - 2026-04-21
+
+Audit P2 + P(-1) scaffold pass. Closes out the security-review work
+scheduled against the 2026-04-21 external review. On-disk `.patra`
+format unchanged; **WAL format is v2** (salted) — 1.5.2 WALs are refused.
+
+### Added
+- **WAL format v2: salted per-record auth** (wal.cyr). WAL header grows
+  8B → 24B with a pair of 8-byte salts drawn from `SYS_GETRANDOM` on
+  every `wal_start` (time+counter fallback when the syscall is
+  unavailable). The per-record hash is now
+  `djb2-derived(salt1, page_num, page_data) XOR salt2`. Protects
+  against accidental corruption, stale-WAL replay, *and* cross-WAL
+  replay. Audit §3.4 / §4.3. Does not defeat an attacker who can read
+  `.wal` — documented as out of scope in `SECURITY.md`.
+- **`json_build_lens` + `jsonl_append_obj_lens`** (jsonl.cyr). New
+  length-aware JSON builders take a `vlens` array for explicit STR
+  lengths. Embedded NUL bytes now emit as `[NUL]` instead of
+  silently truncating. Audit §2.6 — closes the log-forging primitive.
+  Legacy `json_build` / `jsonl_append_obj` preserved as thin wrappers
+  using `strlen` for backward compatibility.
+- **`SECURITY.md`** rewritten with concrete threat model, per-surface
+  mitigation table, supported / unsupported deployment matrix (NFS:
+  not supported; `fork` without `close`: not supported; non-flock
+  concurrent writers: not supported), known limitations, and
+  pointers to `docs/audit/2026-04-21/`.
+- **Three new fuzz harnesses** (2 → 5 total):
+  - `fuzz_btree.fcyr` — plants 5 pathological B-tree root mutations
+    (NKEYS=2B, bogus child = 999999 / self / header-page, flipped LEAF);
+    asserts `patra_query` returns cleanly.
+  - `fuzz_wal.fcyr` — 5 WAL corruptions (empty, 4B-truncated, 1 MiB
+    garbage, v1 header, v2 header with all-zero records); asserts the
+    DB row-77 invariant survives every run.
+  - `fuzz_jsonl.fcyr` — 7 adversarial JSONL cases (25-digit overflow,
+    exact cutoff, negative, missing key, malformed line, long lines,
+    embedded control bytes).
+- **`test_parse_result_layout_invariant`** — static-assert-equivalent
+  test that `PR_ITEMS + MAX_COLS*{CR,IR,SET,SEL}_SZ` stays within the
+  4096-byte parse-result buffer, `PR_ORDERBY_COLS + OB_MAX*OB_SZ`
+  stays below `PR_WHERE`, and `PR_WHERE + WH_MAX*WH_ENTRY_SZ` stays
+  within 4096. Catches future parser growth that would quietly
+  corrupt adjacent metadata. Audit §4.4.
+
+### Changed
+- `_wal_hash` signature: now takes `(pg, page_data, salt1, salt2)`.
+- WAL header size: 8 → 24 bytes.
+- WAL version: 1 → 2.
+- `SECURITY.md` expanded from 13 lines to a proper policy document.
+
+### Breaking (runtime, not source)
+- **Stale `.wal` files from 1.5.1 or 1.5.2 are refused.** The version
+  byte now requires 2. Committed data is untouched; any in-flight
+  transaction at upgrade is lost.
+
+### Validation
+- 475 passed, 0 failed (was 467 — +5 layout invariants, +2 salt-era
+  WAL paths covered by existing tests, +1 reshape).
+- **5 fuzz harnesses pass** (was 2 — fuzz_btree / fuzz_wal / fuzz_jsonl
+  new; fuzz_file / fuzz_sql unchanged).
+- 24 benchmarks within baseline variance.
+- libro (15) + vidya (19) integration unchanged.
+
+### Known (not scheduled)
+- Cyrius 5.5.x DCE still a no-op (ADR 0001).
+- Consumers still using `jsonl_append_obj` (strlen-based) are unchanged;
+  migration to `jsonl_append_obj_lens` is opt-in.
+
 ## [1.5.2] - 2026-04-21
 
 Audit P1 hardening. Five security fixes driven by

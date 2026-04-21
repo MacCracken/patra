@@ -1,0 +1,121 @@
+# fuzz_btree.fcyr — malformed B-tree page invariants
+#
+# Builds a valid indexed table, corrupts the root B-tree page in specific
+# ways, and asserts Patra returns cleanly rather than crashing or hanging.
+# Audit 2026-04-21 §4.1 #1.
+
+include "src/lib.cyr"
+
+alloc_init();
+fl_init();
+patra_init();
+
+var fpath = "/tmp/patra_fuzz_btree.patra";
+
+fn _cleanup() { syscall(SYS_UNLINK, fpath); return 0; }
+
+fn _root_pg(db) {
+    var hdr = _db_hdr(db);
+    var fd = _db_fd(db);
+    var entry = _tbl_entry(hdr, 0);
+    var spg = load64(entry + TBL_SCHEMA);
+    var schema = fl_alloc(PAGE_SIZE);
+    page_read(fd, spg, schema);
+    var ir = load64(schema + SCH_IDX_ROOT);
+    fl_free(schema);
+    return ir;
+}
+
+# Returns the db fd (doesn't close the handle).
+fn _build_seed() {
+    _cleanup();
+    var db = patra_open(fpath);
+    patra_exec(db, "CREATE TABLE t (id INT, x INT)");
+    patra_exec(db, "INSERT INTO t VALUES (1, 100)");
+    patra_exec(db, "INSERT INTO t VALUES (2, 200)");
+    patra_exec(db, "INSERT INTO t VALUES (3, 300)");
+    return db;
+}
+
+# ── 1. BT_NKEYS set far past legal cap (63) ─────────────────
+
+var db = _build_seed();
+var root = _root_pg(db);
+var fd = _db_fd(db);
+var buf = fl_alloc(PAGE_SIZE);
+page_read(fd, root, buf);
+store64(buf + BT_NKEYS, 2147483647);
+page_write(fd, root, buf);
+
+# Query must clamp to BT_MAX_KEYS and not run 2B iterations
+var rs = patra_query(db, "SELECT * FROM t WHERE id = 1");
+if (rs != 0) { patra_result_free(rs); }
+patra_close(db);
+
+# ── 2. BT_LEAF flipped to non-{0,1} sentinel ────────────────
+
+db = _build_seed();
+root = _root_pg(db);
+fd = _db_fd(db);
+page_read(fd, root, buf);
+store64(buf + BT_LEAF, 0 - 5);
+page_write(fd, root, buf);
+
+rs = patra_query(db, "SELECT * FROM t WHERE id = 1");
+if (rs != 0) { patra_result_free(rs); }
+patra_close(db);
+
+# ── 3. Internal node with child pointing past end-of-file ───
+
+db = _build_seed();
+root = _root_pg(db);
+fd = _db_fd(db);
+page_read(fd, root, buf);
+store64(buf + BT_LEAF, 0);
+store64(buf + BT_NKEYS, 1);
+store64(buf + BT_KEYS, 2);
+store64(buf + BT_VALS, 999999);
+store64(buf + BT_VALS + 8, 999999);
+page_write(fd, root, buf);
+
+rs = patra_query(db, "SELECT * FROM t WHERE id = 2");
+if (rs != 0) { patra_result_free(rs); }
+patra_close(db);
+
+# ── 4. Child pointer = root itself (cycle) ──────────────────
+
+db = _build_seed();
+root = _root_pg(db);
+fd = _db_fd(db);
+page_read(fd, root, buf);
+store64(buf + BT_LEAF, 0);
+store64(buf + BT_NKEYS, 1);
+store64(buf + BT_KEYS, 2);
+store64(buf + BT_VALS, root);
+store64(buf + BT_VALS + 8, root);
+page_write(fd, root, buf);
+
+rs = patra_query(db, "SELECT * FROM t WHERE id = 2");
+if (rs != 0) { patra_result_free(rs); }
+patra_close(db);
+
+# ── 5. Child = 0 (header page) ──────────────────────────────
+
+db = _build_seed();
+root = _root_pg(db);
+fd = _db_fd(db);
+page_read(fd, root, buf);
+store64(buf + BT_LEAF, 0);
+store64(buf + BT_NKEYS, 1);
+store64(buf + BT_KEYS, 2);
+store64(buf + BT_VALS, 0);
+store64(buf + BT_VALS + 8, 0);
+page_write(fd, root, buf);
+
+rs = patra_query(db, "SELECT * FROM t WHERE id = 2");
+if (rs != 0) { patra_result_free(rs); }
+patra_close(db);
+
+fl_free(buf);
+_cleanup();
+syscall(SYS_EXIT, 0);

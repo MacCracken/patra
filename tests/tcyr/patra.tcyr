@@ -1319,6 +1319,45 @@ fn test_jsonl_special_chars() {
     jcleanup();
 }
 
+# ── v1.5.3: audit P2 hardening + layout invariant ────────────
+
+# Guards future parser growth against silently overrunning the 4096-byte
+# `_sql_pr` buffer. Each statement type stores its per-item entries at
+# PR_ITEMS, but only SELECT uses PR_AGG_* / PR_PROJ_N / PR_ORDERBY_COLS
+# — so PR_ITEMS can legitimately overlap those ranges for CREATE / INSERT /
+# UPDATE. The invariants we actually need:
+#   - every PR_ITEMS write for any statement type fits within 4096
+#   - SELECT's projection list (which uses PR_ITEMS) must stop before PR_AGG_TYPE
+#   - PR_ORDERBY_COLS + OB zone ends before PR_WHERE
+#   - PR_WHERE zone ends within 4096
+# Audit §4.4 (static-assert-equivalent test for `_sql_pr` math).
+fn test_parse_result_layout_invariant() {
+    test_group("parse result layout");
+
+    # Every statement's PR_ITEMS-based writes fit in the 4096 buffer
+    assert(PR_ITEMS + MAX_COLS * CR_SZ <= 4096, "CREATE items in 4096");
+    assert(PR_ITEMS + MAX_COLS * IR_SZ <= 4096, "INSERT items in 4096");
+    assert(PR_ITEMS + MAX_COLS * SET_SZ <= 4096, "UPDATE set items in 4096");
+
+    # SELECT projection list shares PR_ITEMS with other statement types but
+    # only SELECT uses PR_AGG_TYPE/PR_PROJ_N — the projection must therefore
+    # fit below PR_AGG_TYPE to avoid overwriting its own aggregate metadata.
+    assert(PR_ITEMS + MAX_COLS * SEL_SZ <= PR_AGG_TYPE,
+           "SELECT projection fits before PR_AGG_TYPE");
+
+    # Aggregate metadata ordering
+    assert(PR_AGG_COL_LEN + 8 <= PR_PROJ_N, "agg metadata before PR_PROJ_N");
+    assert(PR_PROJ_N + 8 <= PR_ORDERBY_COLS, "PR_PROJ_N fits before order-by");
+
+    # ORDER-BY columns zone holds OB_MAX × OB_SZ entries before PR_WHERE
+    assert(PR_ORDERBY_COLS + OB_MAX * OB_SZ <= PR_WHERE,
+           "ORDERBY_COLS fits before PR_WHERE");
+
+    # WHERE condition zone holds WH_MAX × WH_ENTRY_SZ entries within 4096
+    assert(PR_WHERE + WH_MAX * WH_ENTRY_SZ <= 4096,
+           "PR_WHERE * WH_MAX fits in 4096");
+}
+
 # ── v1.5.2: audit P1 hardening ───────────────────────────────
 
 # §4.2 #9 — JSON escape covers all control bytes 0x00–0x1F.
@@ -1328,7 +1367,7 @@ fn test_json_escape_control_chars() {
     var src = fl_alloc(32);
 
     # Insert each 0x00-0x1F byte and verify output
-    # 0x00 (NUL) →  
+    # 0x00 (NUL) → [NUL]
     memset(src, 0, 32);
     store8(src, 0);
     var w = _json_escape(dst, src, 1);
@@ -1352,13 +1391,13 @@ fn test_json_escape_control_chars() {
     assert_eq(w, 2, "\\f is 2 chars");
     assert_eq(load8(dst + 1), 102, "f");
 
-    # 0x01 → 
+    # 0x01 → [NUL]
     store8(src, 1);
     w = _json_escape(dst, src, 1);
     assert_eq(w, 6, "\\u0001 is 6 chars");
     assert_eq(load8(dst + 5), 49, "last hex = '1'");
 
-    # 0x1F → 
+    # 0x1F → [NUL]
     store8(src, 31);
     w = _json_escape(dst, src, 1);
     assert_eq(w, 6, "\\u001f is 6 chars");
@@ -2828,6 +2867,9 @@ fn main() {
     test_symlink_refused();
     test_page_offset_overflow();
     test_wal_commit_durable();
+
+    # v1.5.3 audit P2 + layout invariant
+    test_parse_result_layout_invariant();
 
     cleanup();
     return assert_summary();

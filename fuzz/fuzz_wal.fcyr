@@ -1,0 +1,111 @@
+# fuzz_wal.fcyr — malformed WAL file invariants
+#
+# Plants a variety of corrupt WAL files next to a valid DB and asserts
+# patra_open handles each without crashing and without silently
+# applying attacker-controlled pages. Audit 2026-04-21 §4.1 #2.
+
+include "src/lib.cyr"
+
+alloc_init();
+fl_init();
+patra_init();
+
+var fpath = "/tmp/patra_fuzz_wal.patra";
+var wpath = "/tmp/patra_fuzz_wal.patra.wal";
+
+fn _cleanup() {
+    syscall(SYS_UNLINK, fpath);
+    syscall(SYS_UNLINK, wpath);
+    return 0;
+}
+
+fn _write_wal(bytes, n) {
+    syscall(SYS_UNLINK, wpath);
+    var fd = syscall(SYS_OPEN, wpath, 194, 420);
+    if (n > 0) { syscall(SYS_WRITE, fd, bytes, n); }
+    syscall(SYS_CLOSE, fd);
+    return 0;
+}
+
+# ── Build a valid baseline DB with one row ──────────────────
+
+_cleanup();
+var db = patra_open(fpath);
+patra_exec(db, "CREATE TABLE t (x INT)");
+patra_exec(db, "INSERT INTO t VALUES (77)");
+patra_close(db);
+
+# ── 1. Empty WAL — refused, DB intact ───────────────────────
+
+_write_wal(0, 0);
+db = patra_open(fpath);
+if (db == 0) { syscall(SYS_EXIT, 1); }
+var rs = patra_query(db, "SELECT * FROM t");
+if (patra_result_count(rs) != 1) { syscall(SYS_EXIT, 2); }
+if (patra_result_get_int(rs, 0, 0) != 77) { syscall(SYS_EXIT, 3); }
+patra_result_free(rs);
+patra_close(db);
+
+# ── 2. Truncated header (4 bytes) — refused ─────────────────
+
+var short = fl_alloc(4);
+memset(short, 0, 4);
+_write_wal(short, 4);
+fl_free(short);
+db = patra_open(fpath);
+if (db == 0) { syscall(SYS_EXIT, 10); }
+rs = patra_query(db, "SELECT * FROM t");
+if (patra_result_get_int(rs, 0, 0) != 77) { syscall(SYS_EXIT, 11); }
+patra_result_free(rs);
+patra_close(db);
+
+# ── 3. Garbage 1 MiB — refused, DB intact ───────────────────
+
+var big = fl_alloc(1048576);
+memset(big, 170, 1048576);
+_write_wal(big, 1048576);
+fl_free(big);
+db = patra_open(fpath);
+if (db == 0) { syscall(SYS_EXIT, 20); }
+rs = patra_query(db, "SELECT * FROM t");
+if (patra_result_get_int(rs, 0, 0) != 77) { syscall(SYS_EXIT, 21); }
+patra_result_free(rs);
+patra_close(db);
+
+# ── 4. Valid-looking header but 1.5.2 version (1 instead of 2) → refused ──
+
+var hdr = fl_alloc(WAL_HDR_SZ);
+memset(hdr, 0, WAL_HDR_SZ);
+store32(hdr, WAL_MAGIC);
+store32(hdr + 4, 1);
+_write_wal(hdr, WAL_HDR_SZ);
+fl_free(hdr);
+db = patra_open(fpath);
+if (db == 0) { syscall(SYS_EXIT, 30); }
+rs = patra_query(db, "SELECT * FROM t");
+if (patra_result_get_int(rs, 0, 0) != 77) { syscall(SYS_EXIT, 31); }
+patra_result_free(rs);
+patra_close(db);
+
+# ── 5. Current version but records all zero → hash mismatch, no replay ──
+
+var rec_buf = fl_alloc(WAL_HDR_SZ + WAL_REC_SZ * 3);
+memset(rec_buf, 0, WAL_HDR_SZ + WAL_REC_SZ * 3);
+store32(rec_buf, WAL_MAGIC);
+store32(rec_buf + 4, WAL_VER);
+# salt1/salt2 at [8..23] left as zero; records all zero; hash claim = 0
+# real hash with salts (0,0) is not zero → all records rejected
+store64(rec_buf + WAL_HDR_SZ, 1);
+store64(rec_buf + WAL_HDR_SZ + WAL_REC_SZ, 1);
+store64(rec_buf + WAL_HDR_SZ + WAL_REC_SZ * 2, 1);
+_write_wal(rec_buf, WAL_HDR_SZ + WAL_REC_SZ * 3);
+fl_free(rec_buf);
+db = patra_open(fpath);
+if (db == 0) { syscall(SYS_EXIT, 40); }
+rs = patra_query(db, "SELECT * FROM t");
+if (patra_result_get_int(rs, 0, 0) != 77) { syscall(SYS_EXIT, 41); }
+patra_result_free(rs);
+patra_close(db);
+
+_cleanup();
+syscall(SYS_EXIT, 0);

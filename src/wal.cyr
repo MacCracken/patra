@@ -4,43 +4,72 @@
 # On commit: WAL is deleted. On crash recovery: WAL is replayed (undo).
 # Integrates with page_write via globals — no call-site changes needed.
 #
-# File format (1.5.1+):
-#   [0..3]     magic "PTWA" (0x41575450 little-endian)
-#   [4..7]     version (currently 1)
-#   [8..]      records, each 4112 bytes:
-#                [0..7]       page_num (i64)
-#                [8..4103]    before-image page (4096 bytes)
-#                [4104..4111] FNV-style hash of (page_num || page_data)
-#   Records with a mismatched hash abort recovery/rollback at that point —
-#   earlier records still apply. Bare WAL files (no magic) are refused and
-#   left in place so a human can inspect them; old 1.4.x WAL files are
-#   therefore discarded rather than replayed.
+# File format (1.5.3+, v2):
+#   [0..3]       magic "PTWA" (0x41575450 little-endian)
+#   [4..7]       version (2)
+#   [8..15]      salt1 (i64, fresh per transaction)
+#   [16..23]     salt2 (i64, fresh per transaction)
+#   [24..]       records, each 4112 bytes:
+#                  [0..7]       page_num (i64)
+#                  [8..4103]    before-image page (4096 bytes)
+#                  [4104..4111] djb2-derived hash of (salt1, pg, data, salt2)
+#
+# Salts are drawn from SYS_GETRANDOM with a time+counter fallback, and are
+# re-generated on every wal_start so a WAL from one transaction is useless
+# to inject into another. Records whose hash does not match the header's
+# salts abort replay at that point; earlier records still apply. Bare or
+# old-version WAL files are refused outright and left in place so an
+# operator can inspect them.
 
 var _wal_fd = 0 - 1;
 var _wal_db_fd = 0 - 1;
 var _wal_pages = 0;
 var _wal_nlog = 0;
 var _wal_overflow = 0;
+var _wal_salt1 = 0;
+var _wal_salt2 = 0;
+var _wal_tx_counter = 0;
 
 enum WalConst {
     WAL_MAX_PAGES = 64;
     WAL_REC_SZ = 4112;
-    WAL_HDR_SZ = 8;
+    WAL_HDR_SZ = 24;
     WAL_MAGIC = 0x41575450;
-    WAL_VER = 1;
+    WAL_VER = 2;
+    SYS_GETRANDOM = 318;
 }
 
-# Simple djb2-derivative hash over (page_num || page_data). Non-cryptographic:
-# defends against accidental WAL corruption and stale 1.4.x WAL replay, not
-# against an attacker who can read the algorithm. DB-salted auth tracked for
-# a later release (see docs/audit/2026-04-21/security-review.md §3.4).
-fn _wal_hash(pg, page_data) {
-    var h = pg * 2654435761;
+# Draw 16 bytes of randomness into (salt1, salt2). Prefers SYS_GETRANDOM;
+# if unavailable (very old kernel / restricted container), falls back to
+# a time + tx-counter mix — weaker but still unique per transaction.
+fn _wal_gen_salts() {
+    var buf = fl_alloc(16);
+    var nr = syscall(SYS_GETRANDOM, buf, 16, 0);
+    if (nr == 16) {
+        _wal_salt1 = load64(buf);
+        _wal_salt2 = load64(buf + 8);
+    } else {
+        var t = syscall(201, 0);
+        _wal_tx_counter = _wal_tx_counter + 1;
+        _wal_salt1 = t * 2654435761 + _wal_tx_counter;
+        _wal_salt2 = t + _wal_tx_counter * 1099511628211;
+    }
+    fl_free(buf);
+    return 0;
+}
+
+# djb2-derivative hash seeded with salt1 and mixed with salt2 at the end.
+# Non-cryptographic — defeats accidental corruption, stale-WAL replay, and
+# cross-WAL replay. Does not defeat an attacker who can read .wal and the
+# algorithm simultaneously (same-host read gives them the salts). Any
+# stronger guarantee requires a secret outside the filesystem.
+fn _wal_hash(pg, page_data, salt1, salt2) {
+    var h = salt1 * 2654435761 + pg;
     h = h + 5381;
     for (var i = 0; i < PAGE_SIZE; i = i + 1) {
-        h = h * 33 + load8(page_data + i);
+        h = h * 33 + (load8(page_data + i) & 0xff);
     }
-    return h;
+    return h ^ salt2;
 }
 
 # Begin WAL logging for a transaction
@@ -53,11 +82,15 @@ fn wal_start(db_fd, wal_path) {
     _wal_nlog = 0;
     _wal_overflow = 0;
 
-    # Write WAL header before any records
+    _wal_gen_salts();
+
+    # Write WAL header: magic + version + salt1 + salt2
     var hdr = fl_alloc(WAL_HDR_SZ);
     memset(hdr, 0, WAL_HDR_SZ);
     store32(hdr, WAL_MAGIC);
     store32(hdr + 4, WAL_VER);
+    store64(hdr + 8, _wal_salt1);
+    store64(hdr + 16, _wal_salt2);
     syscall(SYS_WRITE, _wal_fd, hdr, WAL_HDR_SZ);
     fl_free(hdr);
     return PATRA_OK;
@@ -90,8 +123,8 @@ fn wal_log_page(page_num) {
     _pt_seek(_wal_db_fd, page_offset(page_num));
     var nr = syscall(SYS_READ, _wal_db_fd, buf + 8, PAGE_SIZE);
     if (nr < 0) { nr = 0; }
-    # Trailing checksum
-    store64(buf + 8 + PAGE_SIZE, _wal_hash(page_num, buf + 8));
+    # Trailing checksum (salted)
+    store64(buf + 8 + PAGE_SIZE, _wal_hash(page_num, buf + 8, _wal_salt1, _wal_salt2));
     # Write record to WAL
     syscall(SYS_WRITE, _wal_fd, buf, WAL_REC_SZ);
     fl_free(buf);
@@ -117,7 +150,8 @@ fn wal_commit(wal_path) {
     return 0;
 }
 
-# Verify WAL header. Returns PATRA_OK, or PATRA_ERR_MAGIC on mismatch.
+# Verify WAL header and load its salts into the module globals. Returns
+# PATRA_OK, or PATRA_ERR_MAGIC on bad magic / unsupported version / short read.
 fn _wal_hdr_verify(fd) {
     if (syscall(SYS_LSEEK, fd, 0, 0) < 0) { return PATRA_ERR_IO; }
     var hdr = fl_alloc(WAL_HDR_SZ);
@@ -125,6 +159,8 @@ fn _wal_hdr_verify(fd) {
     if (nr != WAL_HDR_SZ) { fl_free(hdr); return PATRA_ERR_MAGIC; }
     if (load32(hdr) != WAL_MAGIC) { fl_free(hdr); return PATRA_ERR_MAGIC; }
     if (load32(hdr + 4) != WAL_VER) { fl_free(hdr); return PATRA_ERR_MAGIC; }
+    _wal_salt1 = load64(hdr + 8);
+    _wal_salt2 = load64(hdr + 16);
     fl_free(hdr);
     return PATRA_OK;
 }
@@ -148,7 +184,7 @@ fn wal_rollback(wal_path) {
         if (nr != WAL_REC_SZ) { done = 1; continue; }
         var pg = load64(buf);
         var want = load64(buf + 8 + PAGE_SIZE);
-        var got = _wal_hash(pg, buf + 8);
+        var got = _wal_hash(pg, buf + 8, _wal_salt1, _wal_salt2);
         if (want != got) { done = 1; continue; }
         _pt_seek(_wal_db_fd, page_offset(pg));
         syscall(SYS_WRITE, _wal_db_fd, buf + 8, PAGE_SIZE);
@@ -180,7 +216,7 @@ fn wal_recover(db_fd, wal_path) {
         if (nr != WAL_REC_SZ) { done = 1; continue; }
         var pg = load64(buf);
         var want = load64(buf + 8 + PAGE_SIZE);
-        var got = _wal_hash(pg, buf + 8);
+        var got = _wal_hash(pg, buf + 8, _wal_salt1, _wal_salt2);
         if (want != got) { done = 1; continue; }
         _pt_seek(db_fd, page_offset(pg));
         syscall(SYS_WRITE, db_fd, buf + 8, PAGE_SIZE);
