@@ -7,7 +7,7 @@
 - **Type**: Shared library — database engine for the sovereign stack
 - **License**: GPL-3.0-only
 - **Language**: Cyrius (native)
-- **Version**: 1.5.1
+- **Version**: 1.5.2
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
 
@@ -17,9 +17,9 @@ Own the database. Zero deps. Pure Cyrius. SQL + B-tree + JSONL in a single `incl
 
 ## Current State
 
-- **Source**: ~3,800 lines across 10 modules
-- **Tests**: 436 assertions, 2 fuzz harnesses, 24 benchmarks
-- **Stable**: 1.5.1 — Audit P0 hardening (bounds-checked page reads, B-tree depth cap, WAL magic + checksum, parser caps, strict header verify). P1 ships 1.5.2.
+- **Source**: ~3,900 lines across 10 modules
+- **Tests**: 467 assertions, 2 fuzz harnesses, 24 benchmarks
+- **Stable**: 1.5.2 — Audit P0+P1 hardening (page/tree/parser/header checks + WAL magic/checksum + full JSON escaping + overflow guards + O_NOFOLLOW + durable-commit ordering). Cyrius 5.5.22.
 - **Integration**: libro audit log, vidya knowledge index
 - **Index**: B+ tree order-64, auto or explicit CREATE INDEX (~39% faster equality select on unique keys, 500 rows; overflow-safe fallback on >256 duplicate refs)
 - **Binary**: 180KB (DCE)

@@ -98,15 +98,21 @@ fn wal_log_page(page_num) {
     return 0;
 }
 
-# Commit transaction: sync WAL, delete it
+# Commit transaction: sync WAL, flush in-place data pages, then delete WAL.
+# Audit 2026-04-21 §2.9: pre-1.5.2 the WAL was unlinked before the data-page
+# writes were durable. A crash in that window lost committed data. Now we
+# fdatasync the DB fd before unlink, guaranteeing that by the time the WAL
+# disappears, the committed pages have reached disk.
 fn wal_commit(wal_path) {
     if (_wal_fd >= 0) {
         syscall(SYS_FDATASYNC, _wal_fd);
         syscall(SYS_CLOSE, _wal_fd);
     }
+    if (_wal_db_fd >= 0) {
+        syscall(SYS_FDATASYNC, _wal_db_fd);
+    }
     _wal_fd = 0 - 1;
     _wal_nlog = 0;
-    # Delete WAL — transaction complete
     syscall(SYS_UNLINK, wal_path);
     return 0;
 }

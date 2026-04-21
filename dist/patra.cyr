@@ -1,5 +1,5 @@
 # patra.cyr — structured storage and SQL queries for Cyrius
-# Bundled distribution of patra v1.5.1
+# Bundled distribution of patra v1.5.2
 # Source: https://github.com/MacCracken/patra
 # License: GPL-3.0-only
 #
@@ -153,10 +153,16 @@ fn _pt_err(msg) {
 
 # ── File create / open ────────────────────
 
-# Create new .patra file (O_RDWR | O_CREAT | O_EXCL = 194, mode 0644 = 420)
-# Create new .patra file with initialized header
+# O_NOFOLLOW on Linux x86_64 = 0x20000 (131072). Prevents `open(2)` from
+# following a symbolic link at the final path component. Audit 2026-04-21
+# §2.8: closes the TOCTOU/symlink plant described in CVE-2025-68146.
+enum OpenFlag { O_NOFOLLOW = 131072; }
+
+# Create new .patra file (O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW,
+# mode 0644 = 420). O_EXCL already refuses an existing target; O_NOFOLLOW
+# additionally refuses a symlink pointed at the target path.
 fn _pt_file_create(path) {
-    var fd = syscall(SYS_OPEN, path, 194, 420);
+    var fd = syscall(SYS_OPEN, path, 194 + O_NOFOLLOW, 420);
     if (fd < 0) { return 0 - 1; }
     var buf = fl_alloc(PAGE_SIZE);
     patra_hdr_init(buf);
@@ -167,10 +173,9 @@ fn _pt_file_create(path) {
     return fd;
 }
 
-# Open existing .patra file (O_RDWR = 2)
-# Open existing .patra file for read-write
+# Open existing .patra file (O_RDWR | O_NOFOLLOW). Refuses symlinked targets.
 fn _pt_file_open(path) {
-    return syscall(SYS_OPEN, path, 2, 0);
+    return syscall(SYS_OPEN, path, 2 + O_NOFOLLOW, 0);
 }
 
 # --- wal.cyr ---
@@ -275,15 +280,21 @@ fn wal_log_page(page_num) {
     return 0;
 }
 
-# Commit transaction: sync WAL, delete it
+# Commit transaction: sync WAL, flush in-place data pages, then delete WAL.
+# Audit 2026-04-21 §2.9: pre-1.5.2 the WAL was unlinked before the data-page
+# writes were durable. A crash in that window lost committed data. Now we
+# fdatasync the DB fd before unlink, guaranteeing that by the time the WAL
+# disappears, the committed pages have reached disk.
 fn wal_commit(wal_path) {
     if (_wal_fd >= 0) {
         syscall(SYS_FDATASYNC, _wal_fd);
         syscall(SYS_CLOSE, _wal_fd);
     }
+    if (_wal_db_fd >= 0) {
+        syscall(SYS_FDATASYNC, _wal_db_fd);
+    }
     _wal_fd = 0 - 1;
     _wal_nlog = 0;
-    # Delete WAL — transaction complete
     syscall(SYS_UNLINK, wal_path);
     return 0;
 }
@@ -367,8 +378,13 @@ fn wal_recover(db_fd, wal_path) {
 
 # page.cyr — 4KB page management (alloc, read, write, free list)
 
-# Compute byte offset for page number
+# Compute byte offset for page number. Returns a negative value on
+# overflow so callers' `_pt_seek` check catches it. Audit 2026-04-21 §2.4:
+# i64 `num * PAGE_SIZE` wraps for num ≥ 2^51; we cap at num ≤ 2^50 to leave
+# headroom.
 fn page_offset(num) {
+    if (num < 0) { return 0 - 1; }
+    if (num > 1125899906842624) { return 0 - 1; }
     return PAGE_SIZE + num * PAGE_SIZE;
 }
 
@@ -2446,10 +2462,10 @@ fn tbl_delete(fd, hdr, idx, row_sz, schema, ncols, pr) {
 
 # ── Open / Close ────────────────────
 
-# O_RDWR | O_CREAT | O_APPEND = 2 + 64 + 1024 = 1090
-# Open JSONL file (O_RDWR | O_CREAT | O_APPEND)
+# O_RDWR | O_CREAT | O_APPEND | O_NOFOLLOW = 2 + 64 + 1024 + 131072 = 132162
+# O_NOFOLLOW added in 1.5.2 (audit §2.8).
 fn jsonl_open(path) {
-    return syscall(SYS_OPEN, path, 1090, 420);
+    return syscall(SYS_OPEN, path, 132162, 420);
 }
 
 # Close JSONL file
@@ -2473,22 +2489,49 @@ fn jsonl_append(fd, data, len) {
 
 # ── JSON string escaping ────────────────────
 
+fn _hex_digit(v) {
+    if (v < 10) { return 48 + v; }
+    return 87 + v;
+}
+
+# Escape src[0..slen) into JSON per RFC 8259 §7. All control bytes 0x00–0x1F
+# are escaped (named shortcuts for \b/\t/\n/\f/\r; \u00XX for the rest).
+# Returns bytes written. Worst-case expansion is 6× (all \u00XX), so callers
+# must size dst accordingly — `json_build`'s 4096B buffer covers any single
+# 256-byte Patra string (max 1536B expanded) plus framing.
+#
+# Audit 2026-04-21 §2.6, §3.6: strict JSON readers (`json.loads`, `jq`,
+# `simdjson` in strict mode) reject raw control bytes. Pre-1.5.2 Patra could
+# emit invalid JSON whenever a STR column contained a byte outside the five
+# originally-escaped chars.
 fn _json_escape(dst, src, slen) {
     var w = 0;
-    var cap = slen * 2;
+    var cap = slen * 6 + 8;
     for (var i = 0; i < slen; i = i + 1) {
-        if (w + 2 > cap) { return w; }
-        var c = load8(src + i);
+        if (w + 6 > cap) { return w; }
+        var c = load8(src + i) & 0xff;
         if (c == 34) {
             store8(dst + w, 92); store8(dst + w + 1, 34); w = w + 2;
         } elif (c == 92) {
             store8(dst + w, 92); store8(dst + w + 1, 92); w = w + 2;
-        } elif (c == 10) {
-            store8(dst + w, 92); store8(dst + w + 1, 110); w = w + 2;
+        } elif (c == 8) {
+            store8(dst + w, 92); store8(dst + w + 1, 98); w = w + 2;
         } elif (c == 9) {
             store8(dst + w, 92); store8(dst + w + 1, 116); w = w + 2;
+        } elif (c == 10) {
+            store8(dst + w, 92); store8(dst + w + 1, 110); w = w + 2;
+        } elif (c == 12) {
+            store8(dst + w, 92); store8(dst + w + 1, 102); w = w + 2;
         } elif (c == 13) {
             store8(dst + w, 92); store8(dst + w + 1, 114); w = w + 2;
+        } elif (c < 32) {
+            store8(dst + w, 92);
+            store8(dst + w + 1, 117);
+            store8(dst + w + 2, 48);
+            store8(dst + w + 3, 48);
+            store8(dst + w + 4, _hex_digit((c / 16) & 0xf));
+            store8(dst + w + 5, _hex_digit(c & 0xf));
+            w = w + 6;
         } else {
             store8(dst + w, c); w = w + 1;
         }
@@ -2712,8 +2755,9 @@ fn jsonl_get_str(line, llen, key, klen, out_len) {
     return line + start;
 }
 
-# Get integer value for key from JSON line. Returns the value, or 0 if not found.
-# Extract integer field from JSON line by key
+# Get integer value for key from JSON line. Returns the value, 0 if not
+# found, or 0 on i64 overflow. Audit 2026-04-21 §2.7: pre-1.5.2 a 25-digit
+# input silently wrapped to an attacker-chosen i64 — flag it and refuse.
 fn jsonl_get_int(line, llen, key, klen) {
     var off = _jl_find_key(line, llen, key, klen);
     if (off < 0) { return 0; }
@@ -2721,15 +2765,22 @@ fn jsonl_get_int(line, llen, key, klen) {
     var neg = 0;
     if (load8(line + off) == 45) { neg = 1; off = off + 1; }
     var val = 0;
+    var ovf = 0;
     var pdone = 0;
+    # 9223372036854775807 / 10 = 922337203685477580 — any val above this
+    # overflows on the next `*10`. Strictly-greater is correct: val=cutoff
+    # leaves room for up to +7, which a single digit can't exceed.
+    var limit = 922337203685477580;
     while (pdone == 0) {
         if (off >= llen) { pdone = 1; continue; }
         var c = load8(line + off);
         if (c < 48) { pdone = 1; continue; }
         if (c > 57) { pdone = 1; continue; }
+        if (val > limit) { ovf = 1; pdone = 1; continue; }
         val = val * 10 + (c - 48);
         off = off + 1;
     }
+    if (ovf != 0) { return 0; }
     if (neg != 0) { val = 0 - val; }
     return val;
 }

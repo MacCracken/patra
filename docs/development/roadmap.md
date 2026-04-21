@@ -1,6 +1,6 @@
 # Patra Development Roadmap
 
-> **v1.5.1** — Sovereign database for Cyrius. Audit P0 hardening landed; P1 ships 1.5.2.
+> **v1.5.2** — Sovereign database for Cyrius. Audit P0 + P1 landed; P2/P-1 ships 1.5.3.
 
 ## Completed
 
@@ -157,13 +157,16 @@
   (on-disk `.patra` format unchanged).
 - 424 → 436 test assertions (+6 test groups).
 
-### Planned: v1.5.2 — audit P1
+### v1.5.2
 
-- `_json_escape` covers full 0x00–0x1F + explicit-length API (log-forging).
-- `jsonl_get_int` overflow guard.
-- `O_NOFOLLOW` on `_pt_file_open` and `jsonl_open` (TOCTOU/symlink).
-- `fdatasync(db_fd)` before WAL unlink (durability ordering).
-- `page_offset` overflow check.
+- **Audit P1 hardening** from `docs/audit/2026-04-21/security-review.md`:
+  `_json_escape` covers all 0x00–0x1F (named shortcuts + `\u00XX`),
+  `jsonl_get_int` overflow guard, `O_NOFOLLOW` on database/JSONL opens,
+  `fdatasync(db_fd)` before WAL unlink, `page_offset` overflow clamp.
+- Cyrius toolchain pin raised 5.5.18 → 5.5.22 to match installed compiler.
+- 436 → 467 test assertions (+5 test groups).
+- Deferred to 1.5.3: explicit-length API to close embedded-NUL truncation
+  in `jsonl_append_obj` (requires consumer-facing API change).
 
 ### Planned: v1.5.3 — audit P2 + P-1 scaffold pass
 

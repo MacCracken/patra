@@ -1,7 +1,12 @@
 # page.cyr — 4KB page management (alloc, read, write, free list)
 
-# Compute byte offset for page number
+# Compute byte offset for page number. Returns a negative value on
+# overflow so callers' `_pt_seek` check catches it. Audit 2026-04-21 §2.4:
+# i64 `num * PAGE_SIZE` wraps for num ≥ 2^51; we cap at num ≤ 2^50 to leave
+# headroom.
 fn page_offset(num) {
+    if (num < 0) { return 0 - 1; }
+    if (num > 1125899906842624) { return 0 - 1; }
     return PAGE_SIZE + num * PAGE_SIZE;
 }
 

@@ -5,6 +5,67 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.2] - 2026-04-21
+
+Audit P1 hardening. Five security fixes driven by
+`docs/audit/2026-04-21/security-review.md`. On-disk `.patra` format
+unchanged; WAL format unchanged since 1.5.1.
+
+### Added
+- **Cyrius toolchain pin raised** 5.5.18 → 5.5.22 to match the
+  installed compiler.
+- **`_json_escape` covers all 0x00–0x1F** (jsonl.cyr). Adds `\b` (0x08)
+  and `\f` (0x0C) shortcuts alongside existing `\t \n \r`, and emits
+  `\u00XX` for every other control byte. `load8` results masked with
+  `& 0xff` so high bytes (≥ 0x80) are not mis-classified as controls.
+  Internal cap widened `slen*2` → `slen*6+8` to accommodate worst-case
+  expansion. Audit §2.6, §3.6 — closes the "emits invalid JSON" vector
+  for STR columns containing control bytes.
+- **`jsonl_get_int` overflow guard** (jsonl.cyr). Any input whose
+  running parse exceeds `MAX_I64 / 10 = 922337203685477580` now returns
+  0 rather than silently wrapping. Audit §2.7.
+- **`O_NOFOLLOW` on all database / JSONL opens** (file.cyr, jsonl.cyr).
+  `_pt_file_create` and `_pt_file_open` now set `O_NOFOLLOW` (Linux
+  flag `0x20000`), as does `jsonl_open`. A symlinked target path
+  causes `open(2)` to fail with `ELOOP`; `patra_open` returns 0.
+  Audit §2.8 — closes the CVE-2025-68146-style TOCTOU/symlink plant.
+- **`fdatasync(db_fd)` before WAL unlink** (wal.cyr `wal_commit`).
+  Data pages are flushed to stable storage before the WAL file is
+  removed. Audit §2.9 — closes the LevelDB-class "committed data
+  lost on crash between WAL unlink and kernel writeback" window.
+- **`page_offset` overflow check** (page.cyr). Returns `-1` for
+  `num < 0` or `num > 2^50`; callers' existing `_pt_seek(...) < 0`
+  guards propagate the error cleanly. Audit §2.4 — defeats the
+  attacker-planted `HDR_FREEHEAD = 0x0040_0000_0000_0001` wrap.
+- **5 new test groups / 31 new assertions** (436 → 467):
+  `json escape control chars` (NUL, 0x01, 0x08, 0x0C, 0x1F, 0x20,
+  0x80), `jsonl_get_int overflow` (25-digit overflow, exact cutoff,
+  MAX+n), `symlink refused` (real DB + symlink → `patra_open` returns
+  0), `page_offset overflow` (cap + negative), `wal commit durable`
+  (begin/insert/commit/close/reopen round-trip).
+
+### Changed
+- `cyrius.cyml` `cyrius` pin: `"5.5.18"` → `"5.5.22"`.
+- `.cyrius-toolchain`: `5.5.18` → `5.5.22`.
+
+### Validation
+- 467 passed, 0 failed (was 436).
+- 2 fuzz harnesses pass.
+- 24 benchmarks within baseline variance.
+- libro (15) + vidya (19) integration unchanged.
+
+### Known (tracked for 1.5.3)
+- **Audit P2 + P-1** items remain: new fuzz harnesses (btree / wal /
+  jsonl / header mutation), salt-based WAL authentication (currently
+  only integrity — attacker who knows the djb2-derived hash can forge
+  records), NFS/fork SECURITY notes, static test that `_sql_pr` math
+  still holds as the parser grows.
+- Cyrius 5.5.x DCE still a no-op (ADR 0001).
+- Embedded NUL in STR column → `strlen`-based `json_build` still
+  silently truncates the tail. Closing this requires an API change
+  (pass explicit lengths to `jsonl_append_obj`); scheduled for 1.5.3
+  once consumer impact is scoped.
+
 ## [1.5.1] - 2026-04-21
 
 Audit P0 hardening. Six security fixes driven by

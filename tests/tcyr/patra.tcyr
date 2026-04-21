@@ -1319,6 +1319,151 @@ fn test_jsonl_special_chars() {
     jcleanup();
 }
 
+# ── v1.5.2: audit P1 hardening ───────────────────────────────
+
+# §4.2 #9 — JSON escape covers all control bytes 0x00–0x1F.
+fn test_json_escape_control_chars() {
+    test_group("json escape control chars");
+    var dst = fl_alloc(256);
+    var src = fl_alloc(32);
+
+    # Insert each 0x00-0x1F byte and verify output
+    # 0x00 (NUL) →  
+    memset(src, 0, 32);
+    store8(src, 0);
+    var w = _json_escape(dst, src, 1);
+    assert_eq(w, 6, "NUL emits 6 chars");
+    assert_eq(load8(dst), 92, "leading backslash");
+    assert_eq(load8(dst + 1), 117, "u");
+    assert_eq(load8(dst + 2), 48, "0");
+    assert_eq(load8(dst + 3), 48, "0");
+    assert_eq(load8(dst + 4), 48, "0");
+    assert_eq(load8(dst + 5), 48, "0");
+
+    # 0x08 → \b
+    store8(src, 8);
+    w = _json_escape(dst, src, 1);
+    assert_eq(w, 2, "\\b is 2 chars");
+    assert_eq(load8(dst + 1), 98, "b");
+
+    # 0x0C → \f
+    store8(src, 12);
+    w = _json_escape(dst, src, 1);
+    assert_eq(w, 2, "\\f is 2 chars");
+    assert_eq(load8(dst + 1), 102, "f");
+
+    # 0x01 → 
+    store8(src, 1);
+    w = _json_escape(dst, src, 1);
+    assert_eq(w, 6, "\\u0001 is 6 chars");
+    assert_eq(load8(dst + 5), 49, "last hex = '1'");
+
+    # 0x1F → 
+    store8(src, 31);
+    w = _json_escape(dst, src, 1);
+    assert_eq(w, 6, "\\u001f is 6 chars");
+    assert_eq(load8(dst + 4), 49, "hex hi = '1'");
+    assert_eq(load8(dst + 5), 102, "hex lo = 'f'");
+
+    # Printable byte 0x20 stays literal
+    store8(src, 32);
+    w = _json_escape(dst, src, 1);
+    assert_eq(w, 1, "space is 1 char");
+    assert_eq(load8(dst), 32, "space preserved");
+
+    # High byte 0x80 stays literal (not mistakenly escaped)
+    store8(src, 128);
+    w = _json_escape(dst, src, 1);
+    assert_eq(w, 1, "0x80 passes through");
+
+    fl_free(src);
+    fl_free(dst);
+}
+
+# §4.2 (new) — jsonl_get_int refuses overflow-inducing input.
+fn test_jsonl_get_int_overflow() {
+    test_group("jsonl_get_int overflow");
+    # 25-digit value overflows i64; pre-1.5.2 silently wrapped.
+    var line = "{\"priority\": 99999999999999999999}";
+    var ll = strlen(line);
+    var v = jsonl_get_int(line, ll, "priority", 8);
+    assert_eq(v, 0, "25-digit overflow returns 0");
+
+    # Normal value still works
+    var line2 = "{\"priority\": 42}";
+    v = jsonl_get_int(line2, strlen(line2), "priority", 8);
+    assert_eq(v, 42, "42 still parses");
+
+    # Exact cutoff: 922337203685477580 (MAX_I64/10) just fits (no overflow
+    # because we check BEFORE the multiply; this value itself is legal).
+    var line3 = "{\"x\": 922337203685477580}";
+    v = jsonl_get_int(line3, strlen(line3), "x", 1);
+    assert_eq(v, 922337203685477580, "cutoff value parses");
+
+    # Any further digit overflows → returns 0
+    var line4 = "{\"x\": 9223372036854775820}";
+    v = jsonl_get_int(line4, strlen(line4), "x", 1);
+    assert_eq(v, 0, "MAX+n overflow rejected");
+}
+
+# §4.2 #14 — O_NOFOLLOW refuses to open a symlinked DB path.
+fn test_symlink_refused() {
+    test_group("symlink refused");
+    var target = "/tmp/patra_nofollow_real.patra";
+    var link = "/tmp/patra_nofollow_link.patra";
+    syscall(SYS_UNLINK, target);
+    syscall(SYS_UNLINK, link);
+
+    # Create a real db at target, then symlink link → target
+    var db = patra_open(target);
+    assert(db != 0, "real db open");
+    patra_close(db);
+    # SYS_SYMLINK = 88 on x86_64 Linux: symlink(target, linkpath)
+    syscall(88, target, link);
+
+    # Open via symlink must fail
+    db = patra_open(link);
+    assert_eq(db, 0, "open via symlink refused");
+
+    syscall(SYS_UNLINK, link);
+    syscall(SYS_UNLINK, target);
+}
+
+# §4.2 #12 — page_offset overflow returns sentinel; page_alloc via
+# corrupted HDR_FREEHEAD does not wild-seek.
+fn test_page_offset_overflow() {
+    test_group("page_offset overflow");
+    # Sane values
+    assert_eq(page_offset(0), 4096, "pg 0 offset");
+    assert_eq(page_offset(1), 8192, "pg 1 offset");
+
+    # Overflow cap (> 2^50) returns -1
+    assert(page_offset(1125899906842625) < 0, "just over cap rejected");
+    assert(page_offset(0 - 5) < 0, "negative rejected");
+}
+
+# §2.9 — wal_commit issues fdatasync on the DB fd before unlink.
+# Hard to test directly without an fsync instrumentation hook; sanity-check
+# that a committed transaction survives close/reopen, which it must.
+fn test_wal_commit_durable() {
+    test_group("wal commit durable");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE wc (id INT, v STR)");
+    patra_begin(db);
+    patra_exec(db, "INSERT INTO wc VALUES (1, 'a')");
+    patra_exec(db, "INSERT INTO wc VALUES (2, 'b')");
+    var rc = patra_commit(db);
+    assert_eq(rc, PATRA_OK, "commit ok");
+    patra_close(db);
+
+    db = patra_open(_tpath);
+    var rs = patra_query(db, "SELECT * FROM wc");
+    assert_eq(patra_result_count(rs), 2, "committed rows persist");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
 # ── v1.5.1: audit-driven hardening ───────────────────────────
 
 # §4.2 #10 — INSERT with too many values returns PATRA_ERR_COLCOUNT
@@ -2676,6 +2821,13 @@ fn main() {
     test_wal_checksum_stops_replay();
     test_hdr_verify_bad_tblcount();
     test_btree_bad_child_pointer();
+
+    # v1.5.2 audit P1 hardening
+    test_json_escape_control_chars();
+    test_jsonl_get_int_overflow();
+    test_symlink_refused();
+    test_page_offset_overflow();
+    test_wal_commit_durable();
 
     cleanup();
     return assert_summary();

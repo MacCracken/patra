@@ -140,10 +140,16 @@ fn _pt_err(msg) {
 
 # ── File create / open ────────────────────
 
-# Create new .patra file (O_RDWR | O_CREAT | O_EXCL = 194, mode 0644 = 420)
-# Create new .patra file with initialized header
+# O_NOFOLLOW on Linux x86_64 = 0x20000 (131072). Prevents `open(2)` from
+# following a symbolic link at the final path component. Audit 2026-04-21
+# §2.8: closes the TOCTOU/symlink plant described in CVE-2025-68146.
+enum OpenFlag { O_NOFOLLOW = 131072; }
+
+# Create new .patra file (O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW,
+# mode 0644 = 420). O_EXCL already refuses an existing target; O_NOFOLLOW
+# additionally refuses a symlink pointed at the target path.
 fn _pt_file_create(path) {
-    var fd = syscall(SYS_OPEN, path, 194, 420);
+    var fd = syscall(SYS_OPEN, path, 194 + O_NOFOLLOW, 420);
     if (fd < 0) { return 0 - 1; }
     var buf = fl_alloc(PAGE_SIZE);
     patra_hdr_init(buf);
@@ -154,8 +160,7 @@ fn _pt_file_create(path) {
     return fd;
 }
 
-# Open existing .patra file (O_RDWR = 2)
-# Open existing .patra file for read-write
+# Open existing .patra file (O_RDWR | O_NOFOLLOW). Refuses symlinked targets.
 fn _pt_file_open(path) {
-    return syscall(SYS_OPEN, path, 2, 0);
+    return syscall(SYS_OPEN, path, 2 + O_NOFOLLOW, 0);
 }

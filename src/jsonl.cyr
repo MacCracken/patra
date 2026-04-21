@@ -5,10 +5,10 @@
 
 # ── Open / Close ────────────────────
 
-# O_RDWR | O_CREAT | O_APPEND = 2 + 64 + 1024 = 1090
-# Open JSONL file (O_RDWR | O_CREAT | O_APPEND)
+# O_RDWR | O_CREAT | O_APPEND | O_NOFOLLOW = 2 + 64 + 1024 + 131072 = 132162
+# O_NOFOLLOW added in 1.5.2 (audit §2.8).
 fn jsonl_open(path) {
-    return syscall(SYS_OPEN, path, 1090, 420);
+    return syscall(SYS_OPEN, path, 132162, 420);
 }
 
 # Close JSONL file
@@ -32,22 +32,49 @@ fn jsonl_append(fd, data, len) {
 
 # ── JSON string escaping ────────────────────
 
+fn _hex_digit(v) {
+    if (v < 10) { return 48 + v; }
+    return 87 + v;
+}
+
+# Escape src[0..slen) into JSON per RFC 8259 §7. All control bytes 0x00–0x1F
+# are escaped (named shortcuts for \b/\t/\n/\f/\r; \u00XX for the rest).
+# Returns bytes written. Worst-case expansion is 6× (all \u00XX), so callers
+# must size dst accordingly — `json_build`'s 4096B buffer covers any single
+# 256-byte Patra string (max 1536B expanded) plus framing.
+#
+# Audit 2026-04-21 §2.6, §3.6: strict JSON readers (`json.loads`, `jq`,
+# `simdjson` in strict mode) reject raw control bytes. Pre-1.5.2 Patra could
+# emit invalid JSON whenever a STR column contained a byte outside the five
+# originally-escaped chars.
 fn _json_escape(dst, src, slen) {
     var w = 0;
-    var cap = slen * 2;
+    var cap = slen * 6 + 8;
     for (var i = 0; i < slen; i = i + 1) {
-        if (w + 2 > cap) { return w; }
-        var c = load8(src + i);
+        if (w + 6 > cap) { return w; }
+        var c = load8(src + i) & 0xff;
         if (c == 34) {
             store8(dst + w, 92); store8(dst + w + 1, 34); w = w + 2;
         } elif (c == 92) {
             store8(dst + w, 92); store8(dst + w + 1, 92); w = w + 2;
-        } elif (c == 10) {
-            store8(dst + w, 92); store8(dst + w + 1, 110); w = w + 2;
+        } elif (c == 8) {
+            store8(dst + w, 92); store8(dst + w + 1, 98); w = w + 2;
         } elif (c == 9) {
             store8(dst + w, 92); store8(dst + w + 1, 116); w = w + 2;
+        } elif (c == 10) {
+            store8(dst + w, 92); store8(dst + w + 1, 110); w = w + 2;
+        } elif (c == 12) {
+            store8(dst + w, 92); store8(dst + w + 1, 102); w = w + 2;
         } elif (c == 13) {
             store8(dst + w, 92); store8(dst + w + 1, 114); w = w + 2;
+        } elif (c < 32) {
+            store8(dst + w, 92);
+            store8(dst + w + 1, 117);
+            store8(dst + w + 2, 48);
+            store8(dst + w + 3, 48);
+            store8(dst + w + 4, _hex_digit((c / 16) & 0xf));
+            store8(dst + w + 5, _hex_digit(c & 0xf));
+            w = w + 6;
         } else {
             store8(dst + w, c); w = w + 1;
         }
@@ -271,8 +298,9 @@ fn jsonl_get_str(line, llen, key, klen, out_len) {
     return line + start;
 }
 
-# Get integer value for key from JSON line. Returns the value, or 0 if not found.
-# Extract integer field from JSON line by key
+# Get integer value for key from JSON line. Returns the value, 0 if not
+# found, or 0 on i64 overflow. Audit 2026-04-21 §2.7: pre-1.5.2 a 25-digit
+# input silently wrapped to an attacker-chosen i64 — flag it and refuse.
 fn jsonl_get_int(line, llen, key, klen) {
     var off = _jl_find_key(line, llen, key, klen);
     if (off < 0) { return 0; }
@@ -280,15 +308,22 @@ fn jsonl_get_int(line, llen, key, klen) {
     var neg = 0;
     if (load8(line + off) == 45) { neg = 1; off = off + 1; }
     var val = 0;
+    var ovf = 0;
     var pdone = 0;
+    # 9223372036854775807 / 10 = 922337203685477580 — any val above this
+    # overflows on the next `*10`. Strictly-greater is correct: val=cutoff
+    # leaves room for up to +7, which a single digit can't exceed.
+    var limit = 922337203685477580;
     while (pdone == 0) {
         if (off >= llen) { pdone = 1; continue; }
         var c = load8(line + off);
         if (c < 48) { pdone = 1; continue; }
         if (c > 57) { pdone = 1; continue; }
+        if (val > limit) { ovf = 1; pdone = 1; continue; }
         val = val * 10 + (c - 48);
         off = off + 1;
     }
+    if (ovf != 0) { return 0; }
     if (neg != 0) { val = 0 - val; }
     return val;
 }
