@@ -1,6 +1,6 @@
 # Patra Development Roadmap
 
-> **v1.2.0** — Sovereign database for Cyrius. Cyrius 5.5 toolchain, SELECT column-list projection.
+> **v1.3.0** — Sovereign database for Cyrius. LIKE operator, VACUUM (B-tree compaction).
 
 ## Completed
 
@@ -102,15 +102,26 @@
   4.x → 5.x toolchain jump; no source changes required.
 - 274 → 314 test assertions (+5 test groups, +1 parser test group).
 
-## Post-1.2 Backlog
+### v1.3.0
+
+- **`LIKE` operator** (backlog #6) — `WHERE name LIKE 'a%b_c%'` with `%`
+  (zero+ chars) and `_` (one char). Iterative backtracking match, works
+  in any WHERE clause that accepts string comparisons.
+- **`VACUUM table_name`** (backlog #5) — reclaims lazy-deleted B-tree
+  entries in-leaf. Empty leaves are left in-tree by design; future
+  inserts refill the key range. Point-query impact is minimal (the
+  v0.16.0 lazy-delete design already skips tombstones cheaply); the
+  structural benefit is leaf headroom for future inserts and cleaner
+  selectivity-gate behavior on range queries.
+- 314 → 345 test assertions (+9 test groups). +2 benchmarks.
+
+## Post-1.3 Backlog
 
 ### Features
 
 | # | Item | Notes |
 |---|------|-------|
-| 4 | ALTER TABLE | Schema migration |
-| 5 | B-tree compaction | Reclaim lazy-deleted entries |
-| 6 | LIKE operator | String pattern matching |
+| 4 | ALTER TABLE | Schema migration — large; file-format impact |
 
 ### Investigated / Rejected
 

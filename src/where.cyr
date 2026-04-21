@@ -41,10 +41,70 @@ fn _strcmp_pl(ns, ptr, len) {
     return slen - len;
 }
 
+# SQL LIKE: `%` matches zero or more chars, `_` matches exactly one.
+# Iterative backtracking on the last `%` seen. row_str is null-terminated;
+# pat is ptr+len (from a SQL string literal, not null-terminated).
+fn _like_match(row_str, pat_ptr, pat_len) {
+    var slen = strlen(row_str);
+    var si = 0;
+    var pi = 0;
+    var star_s = 0 - 1;
+    var star_p = 0 - 1;
+    var done = 0;
+    var matched = 0;
+
+    while (done == 0) {
+        if (si >= slen) {
+            # String consumed — pattern must be only trailing %'s
+            var tail_ok = 1;
+            var ti = pi;
+            while (ti < pat_len) {
+                if (load8(pat_ptr + ti) != 37) { tail_ok = 0; ti = pat_len; continue; }
+                ti = ti + 1;
+            }
+            matched = tail_ok;
+            done = 1;
+            continue;
+        }
+        if (pi < pat_len) {
+            var pc = load8(pat_ptr + pi);
+            if (pc == 37) {
+                # '%' — record backtrack point, advance pattern
+                star_p = pi;
+                star_s = si;
+                pi = pi + 1;
+                continue;
+            }
+            if (pc == 95) {
+                # '_' — match any single char
+                si = si + 1;
+                pi = pi + 1;
+                continue;
+            }
+            if (pc == load8(row_str + si)) {
+                si = si + 1;
+                pi = pi + 1;
+                continue;
+            }
+        }
+        # Mismatch or pattern exhausted with string remaining — backtrack
+        if (star_p >= 0) {
+            star_s = star_s + 1;
+            si = star_s;
+            pi = star_p + 1;
+            continue;
+        }
+        matched = 0;
+        done = 1;
+    }
+    return matched;
+}
+
 # Compare string column value against WHERE condition value
 fn _cmp_str(row_str, cmp_ptr, cmp_len, op) {
     if (op == CMP_EQ)  { return _streq_pl(row_str, cmp_ptr, cmp_len); }
     if (op == CMP_NEQ) { if (_streq_pl(row_str, cmp_ptr, cmp_len)) { return 0; } return 1; }
+    if (op == CMP_LIKE) { return _like_match(row_str, cmp_ptr, cmp_len); }
     var c = _strcmp_pl(row_str, cmp_ptr, cmp_len);
     if (op == CMP_LT)  { if (c < 0)  { return 1; } return 0; }
     if (op == CMP_GT)  { if (c > 0)  { return 1; } return 0; }

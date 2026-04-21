@@ -322,6 +322,37 @@ fn _exec_drop(db) {
     return r;
 }
 
+# ── Exec: VACUUM ────────────────────
+
+fn _exec_vacuum(db) {
+    var fd = _db_fd(db);
+    var hdr = _db_hdr(db);
+
+    patra_lock_ex(fd);
+    patra_hdr_read(fd, hdr);
+
+    var tname = load64(_sql_pr + PR_TNAME);
+    var tnlen = load64(_sql_pr + PR_TNLEN);
+    var idx = tbl_find(hdr, tname, tnlen);
+    if (idx < 0) { patra_unlock(fd); return PATRA_ERR_NOTFOUND; }
+
+    var entry = _tbl_entry(hdr, idx);
+    var spg = load64(entry + TBL_SCHEMA);
+    var schema = fl_alloc(PAGE_SIZE);
+    page_read(fd, spg, schema);
+    var ic = load64(schema + SCH_IDX_COL);
+    var ir = load64(schema + SCH_IDX_ROOT);
+    fl_free(schema);
+
+    if (ic >= 0) {
+        if (ir != 0) {
+            btree_compact(fd, ir);
+        }
+    }
+    patra_unlock(fd);
+    return PATRA_OK;
+}
+
 # ── Exec: CREATE INDEX ────────────────────
 
 fn _exec_create_index(db) {
@@ -437,6 +468,7 @@ fn patra_exec(db, sql) {
     if (stmt == STMT_DELETE) { return _exec_delete(db); }
     if (stmt == STMT_CREATE_INDEX) { return _exec_create_index(db); }
     if (stmt == STMT_DROP) { return _exec_drop(db); }
+    if (stmt == STMT_VACUUM) { return _exec_vacuum(db); }
     return PATRA_ERR_SYNTAX;
 }
 

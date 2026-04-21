@@ -5,6 +5,52 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-04-20
+
+LIKE operator + B-tree compaction (VACUUM). On-disk format unchanged.
+
+### Added
+- **`LIKE` operator** (roadmap backlog #6) — new comparison operator for
+  string columns. Supports `%` (zero or more chars) and `_` (exactly one
+  char). Implemented as iterative backtracking on the last `%` seen.
+  Works alongside other WHERE conditions (`AND`/`OR`). Available in
+  `SELECT`, `UPDATE`, and `DELETE` WHERE clauses.
+- **`VACUUM table_name`** (roadmap backlog #5) — reclaims lazy-deleted
+  B-tree entries for a table. DELETE and UPDATE tombstone index entries
+  (val=-1) rather than structurally remove them; VACUUM walks all leaves
+  and shifts live entries forward, updating `BT_NKEYS`. Empty leaves are
+  left in-tree by design (avoids full B-tree delete rebalance). Point
+  queries are already efficient over tombstones; the structural benefit
+  is leaf headroom for future inserts and cleaner selectivity-gate
+  inputs.
+- **2 new benchmarks**: `parse_like` (~14µs) and
+  `select_idx_500_tombstones` / `select_idx_500_vacuumed` pair
+  (~410µs each — tombstone overhead on point lookups is within noise,
+  confirming the v0.16.0 lazy-delete design was sound).
+- **15 new test assertions across 9 test groups** — LIKE prefix,
+  suffix, contains, underscore, literal, parse; VACUUM reclaim + parser
+  + no-index + unknown-table. Total 331 → 345.
+
+### Changed
+- **`CmpOp` extended** with `CMP_LIKE = 6`. String comparison routes LIKE
+  patterns to the new `_like_match` helper; all other ops unchanged.
+- **`TokType`/`StmtType` extended** with `TK_LIKE`, `TK_VACUUM`,
+  `STMT_VACUUM`.
+
+### Validation
+- 345 passed, 0 failed (was 314).
+- 2 fuzz harnesses pass.
+- 24 benchmarks (was 22). Existing benchmarks within baseline variance.
+- libro (15 pass) + vidya (19 pass) integration unchanged.
+
+### Known
+- **`CYRIUS_DCE=1` appears to be a no-op under Cyrius 5.5.x** — DCE and
+  non-DCE builds of `build/demo` are byte-identical (180KB vs 130KB on
+  1.2.0 / Cyrius 4.10.3). The compiler still reports 219 dead functions
+  but does not remove them. This is a toolchain-side concern, not a
+  Patra regression, but it inflates the binary and warrants a follow-up
+  once the Cyrius 5.x DCE pass is understood.
+
 ## [1.2.0] - 2026-04-20
 
 SELECT column-list projection + Cyrius 5.5 toolchain. On-disk format unchanged.

@@ -46,6 +46,8 @@ enum TokType {
     TK_INDEX = 40;
     TK_ON = 41;
     TK_DROP = 42;
+    TK_LIKE = 43;
+    TK_VACUUM = 44;
 }
 
 enum StmtType {
@@ -57,6 +59,7 @@ enum StmtType {
     STMT_DELETE = 5;
     STMT_CREATE_INDEX = 6;
     STMT_DROP = 7;
+    STMT_VACUUM = 8;
 }
 
 enum AggType { AGG_NONE = 0; AGG_COUNT = 1; AGG_SUM = 2; AGG_MIN = 3; AGG_MAX = 4; }
@@ -127,6 +130,7 @@ enum CmpOp {
     CMP_GT = 3;
     CMP_LTE = 4;
     CMP_GTE = 5;
+    CMP_LIKE = 6;
 }
 
 # WHERE join type
@@ -227,6 +231,8 @@ fn _classify_ident(ptr, len) {
     if (_kw_eq(ptr, len, "INDEX")) { return TK_INDEX; }
     if (_kw_eq(ptr, len, "ON"))    { return TK_ON; }
     if (_kw_eq(ptr, len, "DROP"))  { return TK_DROP; }
+    if (_kw_eq(ptr, len, "LIKE"))  { return TK_LIKE; }
+    if (_kw_eq(ptr, len, "VACUUM")) { return TK_VACUUM; }
     return TK_IDENT;
 }
 
@@ -364,6 +370,7 @@ fn _tok_to_cmpop(pos) {
     if (tt == TK_GT)  { return CMP_GT; }
     if (tt == TK_LTE) { return CMP_LTE; }
     if (tt == TK_GTE) { return CMP_GTE; }
+    if (tt == TK_LIKE) { return CMP_LIKE; }
     return 0 - 1;
 }
 
@@ -764,6 +771,18 @@ fn _parse_drop() {
     return PATRA_OK;
 }
 
+fn _parse_vacuum() {
+    # VACUUM tblname — reclaim B-tree tombstones for a table
+    var pos = 0;
+    if (_tok_type(pos) != TK_VACUUM) { return PATRA_ERR_SYNTAX; }
+    pos = pos + 1;
+    if (_tok_type(pos) != TK_IDENT) { return PATRA_ERR_SYNTAX; }
+    store64(_sql_pr + PR_STMT, STMT_VACUUM);
+    store64(_sql_pr + PR_TNAME, _tok_ptr(pos));
+    store64(_sql_pr + PR_TNLEN, _tok_len(pos));
+    return PATRA_OK;
+}
+
 # Parse tokenized SQL into parse result
 fn sql_parse() {
     memset(_sql_pr, 0, 4096);
@@ -777,5 +796,6 @@ fn sql_parse() {
     if (tt == TK_UPDATE) { return _parse_update(); }
     if (tt == TK_DELETE) { return _parse_delete(); }
     if (tt == TK_DROP)   { return _parse_drop(); }
+    if (tt == TK_VACUUM) { return _parse_vacuum(); }
     return PATRA_ERR_SYNTAX;
 }

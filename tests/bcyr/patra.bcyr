@@ -15,6 +15,7 @@ fn work_parse_select() { sql_tokenize("SELECT * FROM users"); sql_parse(); retur
 fn work_parse_create() { sql_tokenize("CREATE TABLE t (id INT, name STR, age INT)"); sql_parse(); return 0; }
 fn work_parse_where() { sql_tokenize("SELECT * FROM t WHERE age > 25 AND id < 100"); sql_parse(); return 0; }
 fn work_parse_update() { sql_tokenize("UPDATE t SET age = 31 WHERE name = 'alice'"); sql_parse(); return 0; }
+fn work_parse_like() { sql_tokenize("SELECT * FROM t WHERE name LIKE '%ab_cd%'"); sql_parse(); return 0; }
 
 fn main() {
     alloc_init();
@@ -46,6 +47,10 @@ fn main() {
     var b5 = bench_new("parse_update");
     bench_run(b5, &work_parse_update, N);
     vec_push(benches, b5);
+
+    var b5b = bench_new("parse_like");
+    bench_run(b5b, &work_parse_like, N);
+    vec_push(benches, b5b);
 
     # --- Row encoding ---
 
@@ -330,6 +335,48 @@ fn main() {
         ri = ri + 1;
     }
     vec_push(benches, b19c);
+    patra_close(_bdb);
+    _bcleanup();
+
+    # --- Indexed point query on tombstone-heavy tree (pre-VACUUM vs post-VACUUM) ---
+    # 1000 rows, delete 500 → leaves littered with tombstones. Measure point
+    # lookup with and without compaction to show the VACUUM win.
+
+    _bcleanup();
+    _bdb = patra_open(_bpath);
+    patra_exec(_bdb, "CREATE TABLE vt (id INT, val STR)");
+    var _vtsql[64];
+    for (var vi = 0; vi < 1000; vi = vi + 1) {
+        var _vtargs = vec_new();
+        vec_push(_vtargs, vi);
+        fmt_sprintf(&_vtsql, 64, "INSERT INTO vt VALUES (%d, 'x')", _vtargs);
+        patra_exec(_bdb, &_vtsql);
+    }
+    patra_exec(_bdb, "DELETE FROM vt WHERE id < 500");
+
+    var b_pre = bench_new("select_idx_500_tombstones");
+    ri = 0;
+    while (ri < 100) {
+        bench_batch_start(b_pre);
+        var rsp = patra_query(_bdb, "SELECT * FROM vt WHERE id = 750");
+        bench_batch_stop(b_pre, 1);
+        patra_result_free(rsp);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_pre);
+
+    patra_exec(_bdb, "VACUUM vt");
+
+    var b_post = bench_new("select_idx_500_vacuumed");
+    ri = 0;
+    while (ri < 100) {
+        bench_batch_start(b_post);
+        var rsv = patra_query(_bdb, "SELECT * FROM vt WHERE id = 750");
+        bench_batch_stop(b_post, 1);
+        patra_result_free(rsv);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_post);
     patra_close(_bdb);
     _bcleanup();
 

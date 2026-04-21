@@ -1319,6 +1319,235 @@ fn test_jsonl_special_chars() {
     jcleanup();
 }
 
+# ── v1.3: VACUUM / B-tree compaction ─────────────────────────
+
+fn _count_leaf_entries(fd, pg, inc_tombs) {
+    var buf = fl_alloc(PAGE_SIZE);
+    page_read(fd, pg, buf);
+    var leaf = load64(buf + BT_LEAF);
+    var nk = load64(buf + BT_NKEYS);
+    var total = 0;
+    if (leaf != 0) {
+        if (inc_tombs != 0) { total = nk; }
+        else {
+            for (var i = 0; i < nk; i = i + 1) {
+                if (load64(buf + BT_VALS + i * 8) != (0 - 1)) { total = total + 1; }
+            }
+        }
+    } else {
+        for (var i = 0; i <= nk; i = i + 1) {
+            total = total + _count_leaf_entries(fd, load64(buf + BT_VALS + i * 8), inc_tombs);
+        }
+    }
+    fl_free(buf);
+    return total;
+}
+
+fn _tbl_idx_root(db, tname, tnlen) {
+    var hdr = _db_hdr(db);
+    var idx = tbl_find(hdr, tname, tnlen);
+    var entry = _tbl_entry(hdr, idx);
+    var spg = load64(entry + TBL_SCHEMA);
+    var schema = fl_alloc(PAGE_SIZE);
+    page_read(_db_fd(db), spg, schema);
+    var ir = load64(schema + SCH_IDX_ROOT);
+    fl_free(schema);
+    return ir;
+}
+
+fn test_parse_vacuum() {
+    test_group("parse vacuum");
+    sql_tokenize("VACUUM people");
+    assert_eq(sql_parse(), PATRA_OK, "parse ok");
+    assert_eq(load64(_sql_pr + PR_STMT), STMT_VACUUM, "stmt vacuum");
+
+    sql_tokenize("VACUUM");
+    assert_eq(sql_parse(), PATRA_ERR_SYNTAX, "requires table name");
+}
+
+fn test_vacuum_reclaims() {
+    test_group("vacuum reclaims");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE vac (id INT, name STR)");
+    var _vsql[96];
+    for (var i = 0; i < 100; i = i + 1) {
+        var _vargs = vec_new();
+        vec_push(_vargs, i + 1);
+        fmt_sprintf(&_vsql, 96, "INSERT INTO vac VALUES (%d, 'x')", _vargs);
+        patra_exec(db, &_vsql);
+    }
+
+    var ir = _tbl_idx_root(db, "vac", 3);
+    var live_before = _count_leaf_entries(_db_fd(db), ir, 0);
+    var all_before = _count_leaf_entries(_db_fd(db), ir, 1);
+    assert_eq(live_before, 100, "100 live pre-delete");
+    assert_eq(all_before, 100, "100 total pre-delete");
+
+    # Delete 30 rows (ids 10-39). These get lazy-deleted in the B-tree.
+    patra_exec(db, "DELETE FROM vac WHERE id >= 10 AND id < 40");
+
+    var live_after_del = _count_leaf_entries(_db_fd(db), ir, 0);
+    var all_after_del = _count_leaf_entries(_db_fd(db), ir, 1);
+    assert_eq(live_after_del, 70, "70 live post-delete");
+    assert_eq(all_after_del, 100, "100 total incl tombstones");
+
+    # VACUUM reclaims the tombstones
+    assert_eq(patra_exec(db, "VACUUM vac"), PATRA_OK, "vacuum ok");
+
+    var all_post_vac = _count_leaf_entries(_db_fd(db), ir, 1);
+    assert_eq(all_post_vac, 70, "tombstones reclaimed");
+
+    # Queries still correct
+    var rs = patra_query(db, "SELECT * FROM vac WHERE id = 50");
+    assert_eq(patra_result_count(rs), 1, "surviving row findable");
+    patra_result_free(rs);
+
+    rs = patra_query(db, "SELECT * FROM vac WHERE id = 20");
+    assert_eq(patra_result_count(rs), 0, "deleted row not findable");
+    patra_result_free(rs);
+
+    rs = patra_query(db, "SELECT COUNT(*) FROM vac");
+    assert_eq(patra_result_get_int(rs, 0, 0), 70, "count=70");
+    patra_result_free(rs);
+
+    patra_close(db);
+}
+
+fn test_vacuum_no_index() {
+    test_group("vacuum no index");
+    cleanup();
+    var db = patra_open(_tpath);
+    # STR-only table has no auto-index and no CREATE INDEX → VACUUM is a no-op
+    patra_exec(db, "CREATE TABLE s (name STR)");
+    patra_exec(db, "INSERT INTO s VALUES ('a')");
+    assert_eq(patra_exec(db, "VACUUM s"), PATRA_OK, "no-op ok");
+    patra_close(db);
+}
+
+fn test_vacuum_unknown_table() {
+    test_group("vacuum unknown table");
+    cleanup();
+    var db = patra_open(_tpath);
+    assert_eq(patra_exec(db, "VACUUM ghost"), PATRA_ERR_NOTFOUND, "unknown");
+    patra_close(db);
+}
+
+# ── v1.3: LIKE operator ──────────────────────────────────────
+
+fn test_parse_like() {
+    test_group("parse like");
+    sql_tokenize("SELECT * FROM t WHERE name LIKE 'a%'");
+    assert_eq(sql_parse(), PATRA_OK, "like parse ok");
+    assert_eq(load64(_sql_pr + PR_WHERE_N), 1, "1 cond");
+    var cond = _sql_pr + PR_WHERE;
+    assert_eq(load64(cond + WH_CMP_OP), CMP_LIKE, "op=LIKE");
+    assert_eq(load64(cond + WH_VAL_TYPE), COL_STR, "str value");
+}
+
+fn test_like_prefix() {
+    test_group("like prefix");
+    cleanup();
+    var db = patra_open(_tpath);
+    _setup_people(db);
+
+    # Prefix match: names starting with 'a' or 'b'
+    var rs = patra_query(db, "SELECT * FROM people WHERE name LIKE 'a%'");
+    assert_eq(patra_result_count(rs), 1, "alice");
+    assert_streq(patra_result_get_str(rs, 0, 1), "alice", "matched alice");
+    patra_result_free(rs);
+
+    rs = patra_query(db, "SELECT * FROM people WHERE name LIKE 'b%'");
+    assert_eq(patra_result_count(rs), 1, "bob");
+    patra_result_free(rs);
+
+    # No match
+    rs = patra_query(db, "SELECT * FROM people WHERE name LIKE 'z%'");
+    assert_eq(patra_result_count(rs), 0, "no z");
+    patra_result_free(rs);
+
+    patra_close(db);
+}
+
+fn test_like_suffix() {
+    test_group("like suffix");
+    cleanup();
+    var db = patra_open(_tpath);
+    _setup_people(db);
+
+    # Suffix match
+    var rs = patra_query(db, "SELECT * FROM people WHERE name LIKE '%e'");
+    # alice, carol, eve, dave? alice(a-l-i-c-e) ends 'e'; eve ends 'e'; dave ends 'e'; carol ends 'l'; bob ends 'b'
+    assert_eq(patra_result_count(rs), 3, "alice, eve, dave");
+    patra_result_free(rs);
+
+    patra_close(db);
+}
+
+fn test_like_contains() {
+    test_group("like contains");
+    cleanup();
+    var db = patra_open(_tpath);
+    _setup_people(db);
+
+    # %a% → names containing 'a'
+    var rs = patra_query(db, "SELECT * FROM people WHERE name LIKE '%a%'");
+    # alice, carol, dave all contain 'a'; bob, eve don't
+    assert_eq(patra_result_count(rs), 3, "3 contain a");
+    patra_result_free(rs);
+
+    # %l% → alice, carol
+    rs = patra_query(db, "SELECT * FROM people WHERE name LIKE '%l%'");
+    assert_eq(patra_result_count(rs), 2, "2 contain l");
+    patra_result_free(rs);
+
+    patra_close(db);
+}
+
+fn test_like_underscore() {
+    test_group("like underscore");
+    cleanup();
+    var db = patra_open(_tpath);
+    _setup_people(db);
+
+    # b_b → exactly 3 chars, starts with b, ends with b
+    var rs = patra_query(db, "SELECT * FROM people WHERE name LIKE 'b_b'");
+    assert_eq(patra_result_count(rs), 1, "matched bob");
+    assert_streq(patra_result_get_str(rs, 0, 1), "bob", "is bob");
+    patra_result_free(rs);
+
+    # 3 chars, any
+    rs = patra_query(db, "SELECT * FROM people WHERE name LIKE '___'");
+    assert_eq(patra_result_count(rs), 2, "3-char names: bob, eve");
+    patra_result_free(rs);
+
+    patra_close(db);
+}
+
+fn test_like_literal() {
+    test_group("like literal");
+    cleanup();
+    var db = patra_open(_tpath);
+    _setup_people(db);
+
+    # No wildcards → exact equality semantics
+    var rs = patra_query(db, "SELECT * FROM people WHERE name LIKE 'alice'");
+    assert_eq(patra_result_count(rs), 1, "exact alice");
+    patra_result_free(rs);
+
+    # Empty pattern matches empty string only
+    rs = patra_query(db, "SELECT * FROM people WHERE name LIKE ''");
+    assert_eq(patra_result_count(rs), 0, "empty pattern no match");
+    patra_result_free(rs);
+
+    # % alone matches all
+    rs = patra_query(db, "SELECT * FROM people WHERE name LIKE '%'");
+    assert_eq(patra_result_count(rs), 5, "% matches all");
+    patra_result_free(rs);
+
+    patra_close(db);
+}
+
 # ── v1.2: SELECT column list ─────────────────────────────────
 
 fn test_select_col_single() {
@@ -1790,6 +2019,20 @@ fn main() {
     test_select_col_where_order_limit();
     test_select_col_unknown();
     test_select_col_duplicate();
+
+    # v1.3 LIKE operator
+    test_parse_like();
+    test_like_prefix();
+    test_like_suffix();
+    test_like_contains();
+    test_like_underscore();
+    test_like_literal();
+
+    # v1.3 VACUUM / B-tree compaction
+    test_parse_vacuum();
+    test_vacuum_reclaims();
+    test_vacuum_no_index();
+    test_vacuum_unknown_table();
 
     cleanup();
     return assert_summary();

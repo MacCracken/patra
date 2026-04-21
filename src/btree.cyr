@@ -388,3 +388,58 @@ fn btree_remove_ref(fd, root, key, ref) {
     fl_free(buf);
     return 0;
 }
+
+# ── Compaction: reclaim lazy-deleted entries ──────────────
+
+# Compact a single leaf in place: keep only entries with valid refs (val != -1).
+# Shifts survivors forward, updates BT_NKEYS. Returns reclaimed count.
+# Structural rebalancing (empty-leaf removal) is intentionally out of scope —
+# future inserts into the leaf's key range will refill the slots.
+fn _bt_leaf_compact(fd, pg) {
+    var buf = fl_alloc(PAGE_SIZE);
+    page_read(fd, pg, buf);
+    var nk = load64(buf + BT_NKEYS);
+    var kept = 0;
+    for (var i = 0; i < nk; i = i + 1) {
+        var v = load64(buf + BT_VALS + i * 8);
+        if (v != (0 - 1)) {
+            if (kept != i) {
+                store64(buf + BT_KEYS + kept * 8, load64(buf + BT_KEYS + i * 8));
+                store64(buf + BT_VALS + kept * 8, v);
+            }
+            kept = kept + 1;
+        }
+    }
+    var reclaimed = nk - kept;
+    if (reclaimed > 0) {
+        store64(buf + BT_NKEYS, kept);
+        page_write(fd, pg, buf);
+    }
+    fl_free(buf);
+    return reclaimed;
+}
+
+# Depth-first walk: recurse into internal children, compact every leaf.
+# Returns total reclaimed across all leaves.
+fn _bt_compact_walk(fd, pg) {
+    var buf = fl_alloc(PAGE_SIZE);
+    page_read(fd, pg, buf);
+    var leaf = load64(buf + BT_LEAF);
+    if (leaf != 0) {
+        fl_free(buf);
+        return _bt_leaf_compact(fd, pg);
+    }
+    var nk = load64(buf + BT_NKEYS);
+    var total = 0;
+    for (var i = 0; i <= nk; i = i + 1) {
+        total = total + _bt_compact_walk(fd, load64(buf + BT_VALS + i * 8));
+    }
+    fl_free(buf);
+    return total;
+}
+
+# Reclaim all tombstoned (lazy-deleted) entries in the tree. Safe to call
+# concurrently with nothing (caller holds write lock). Returns count reclaimed.
+fn btree_compact(fd, root) {
+    return _bt_compact_walk(fd, root);
+}
