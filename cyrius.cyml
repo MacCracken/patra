@@ -4,7 +4,7 @@ version = "1.5.5"
 description = "Patra — structured storage and SQL queries for Cyrius. The sovereign database."
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "5.5.26"
+cyrius = "5.5.26-1"
 repository = "https://github.com/MacCracken/patra"
 
 [build]
@@ -12,13 +12,9 @@ entry = "src/lib.cyr"
 output = "patra"
 
 [lib]
-# `cyrius distlib` reads this to build dist/patra.cyr. Listed in the
-# order src/lib.cyr already expects. The v5.5.26 distlib update
-# preserves `lib/...` stdlib includes inside each module while
-# stripping `src/...` self-references, so the bundle carries its
-# stdlib prerequisites at the top (via src/lib.cyr's includes) —
-# making patra safe for cyrius's dep-auto-prepend path (which
-# injects deps before the consumer's own includes).
+# `cyrius distlib` reads this section to build dist/patra.cyr.
+# Order matches src/lib.cyr's concatenation order. Bundle shape
+# is unchanged from the old scripts/bundle.sh (retired in v1.5.5).
 modules = [
     "src/file.cyr",
     "src/wal.cyr",
