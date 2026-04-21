@@ -4,7 +4,7 @@
 
 ## What It Does
 
-- **SQL subset** — CREATE TABLE, CREATE INDEX, ALTER TABLE (ADD COLUMN + RENAMEs), DROP TABLE, INSERT, SELECT (*, column list, aggregates), WHERE (including LIKE), UPDATE, DELETE, ORDER BY, LIMIT, VACUUM
+- **SQL subset** — CREATE TABLE, CREATE INDEX, ALTER TABLE (ADD / DROP COLUMN + RENAMEs), DROP TABLE, INSERT, SELECT (*, column list, aggregates), WHERE (including LIKE), UPDATE, DELETE, ORDER BY, LIMIT, VACUUM
 - **Aggregates** — COUNT(*), SUM, MIN, MAX with WHERE support
 - **B-tree storage** — pages in a single `.patra` file, crash-safe with WAL + flock
 - **Transactions** — BEGIN/COMMIT/ROLLBACK with write-ahead logging
@@ -92,6 +92,7 @@ DELETE FROM name WHERE col = val
 SELECT * FROM name WHERE str_col LIKE 'a%_b'
 VACUUM name
 ALTER TABLE name ADD COLUMN col INT
+ALTER TABLE name DROP COLUMN col
 ALTER TABLE name RENAME TO new_name
 ALTER TABLE name RENAME COLUMN old TO new
 ```

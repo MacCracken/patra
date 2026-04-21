@@ -5,6 +5,98 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-04-21
+
+Whole-tree B-tree page reclaim, Cyrius 5.5.x DCE limitation documented,
+and a security audit landed in `docs/audit/2026-04-21/`. On-disk format
+unchanged.
+
+### Added
+- **`btree_free_all(fd, hdr, root)`** — depth-first walk of every page
+  in a B-tree, freeing leaves and internals before the root. Replaces
+  the single-page `page_free(fd, hdr, ir)` calls in `tbl_drop`,
+  `_exec_alter_add`, and `_exec_alter_drop_col`. Closes the
+  long-standing leak where `DROP TABLE` and `ALTER TABLE ADD/DROP
+  COLUMN` only freed the B-tree root and left every internal/leaf page
+  permanently allocated.
+- **2 new test groups** (424 → 424 incl. fuzz, +2 to unit suite):
+  `btree reclaim on drop` (verifies the free-list grows by ≥5 pages
+  on a 300-row drop with a multi-level tree) and `btree reclaim on
+  alter add` (verifies file growth ≤3 pages after ALTER ADD COLUMN
+  INT on a 200-row indexed table — the rebuild reuses freed pages
+  instead of extending the file).
+- **`docs/adr/0001-cyrius-5-5-dce-toolchain-limitation.md`** —
+  documents the investigation into why `CYRIUS_DCE=1` produces
+  byte-identical builds under Cyrius 5.5.x. Decision: keep the
+  env var in CI/release for forward compatibility, accept the
+  inflated binary size, track upstream.
+- **`docs/audit/2026-04-21/security-review.md`** — external research
+  cataloging 15 CVEs/incidents most-relevant to Patra's scope (SQLite
+  Magellan, MongoBleed, LMDB, LevelDB durability, flock TOCTOU, etc.),
+  10 bug classes with concrete reproductions, module-by-module
+  concerns, and 14 next-step actions. Findings are scheduled by
+  severity for **1.5.1** (P0/P1 fixes) and later.
+
+### Changed
+- `tbl_drop` (table.cyr), `_exec_alter_add`, `_exec_alter_drop_col`
+  (lib.cyr) all switched from single-page `page_free` to
+  `btree_free_all`.
+
+### Validation
+- 424 passed, 0 failed (was 421 — 421 carried + 3 reclaim assertions
+  recombined into 2 groups, plus a tightened ALTER add bound).
+- 2 fuzz harnesses pass.
+- 24 benchmarks within baseline variance.
+- libro (15) + vidya (19) integration unchanged.
+
+### Known
+- **Cyrius 5.5.x DCE no-op** stands. Demo binary remains ~190KB
+  rather than the ~120KB baseline from Cyrius 4.10.3. Tracked in
+  `docs/adr/0001-cyrius-5-5-dce-toolchain-limitation.md`.
+
+## [1.4.1] - 2026-04-21
+
+ALTER TABLE DROP COLUMN — completes roadmap backlog #4. On-disk format
+unchanged.
+
+### Added
+- **`ALTER TABLE t DROP COLUMN name`** — removes a column and rewrites
+  every row, dropping the column's bytes. Schema entries after the
+  dropped position shift left by one. Returns `PATRA_ERR_COLCOUNT` when
+  the table has only one column (can't leave zero-column tables).
+  Returns `PATRA_ERR_NOTFOUND` for unknown column / unknown table.
+- **Index handling**:
+  - If the dropped column was the indexed column → index is torn down
+    (`SCH_IDX_COL = -1`, root freed). Queries fall back to scan; a new
+    `CREATE INDEX` can be issued afterward.
+  - If the dropped column precedes the indexed column → `SCH_IDX_COL`
+    shifts left by one and the B-tree is rebuilt.
+  - If the dropped column follows the indexed column → position
+    unchanged and the B-tree is rebuilt (refs change with row rewriting).
+- **6 new test groups / 32 new assertions** (389 → 421): parser
+  refresh, drop middle col (data + index intact), drop indexed col
+  (index torn down, can re-CREATE INDEX), drop col before indexed
+  (index position shifts), drop-last-col rejected, drop unknown
+  col/table rejected, persistence across reopen.
+
+### Changed
+- **`StmtType`** extended with `STMT_ALTER_DROP_COL`.
+- **`test_parse_alter`** updated: the 1.4.0 "DROP not supported"
+  assertion is replaced with one that verifies the new parse path
+  succeeds, plus a new "missing COLUMN keyword" syntax-error case.
+
+### Known
+- **B-tree internal/leaf pages leak** on DROP COLUMN when the dropped
+  column was indexed or when the table was indexed on another column —
+  same pre-existing pattern as ADD COLUMN and `tbl_drop`. Tree-wide
+  page reclaim is a separate cleanup.
+
+### Validation
+- 421 passed, 0 failed (was 389).
+- 2 fuzz harnesses pass.
+- 24 benchmarks within baseline variance.
+- libro (15) + vidya (19) integration unchanged.
+
 ## [1.4.0] - 2026-04-21
 
 ALTER TABLE (partial — ADD COLUMN + RENAMEs). On-disk format unchanged;

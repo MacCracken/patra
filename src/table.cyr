@@ -105,7 +105,7 @@ fn tbl_drop(fd, hdr, idx) {
     if (ic >= 0) {
         var ir = load64(sbuf + SCH_IDX_ROOT);
         if (ir != 0) {
-            page_free(fd, hdr, ir);
+            btree_free_all(fd, hdr, ir);
         }
     }
     fl_free(sbuf);

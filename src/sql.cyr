@@ -68,6 +68,7 @@ enum StmtType {
     STMT_ALTER_ADD = 9;
     STMT_ALTER_RENAME_TBL = 10;
     STMT_ALTER_RENAME_COL = 11;
+    STMT_ALTER_DROP_COL = 12;
 }
 
 enum AggType { AGG_NONE = 0; AGG_COUNT = 1; AGG_SUM = 2; AGG_MIN = 3; AGG_MAX = 4; }
@@ -813,6 +814,17 @@ fn _parse_alter() {
         elif (tt == TK_KW_STR) { store64(item + CR_TYPE, COL_STR); }
         else { return PATRA_ERR_SYNTAX; }
         store64(_sql_pr + PR_STMT, STMT_ALTER_ADD);
+        return PATRA_OK;
+    }
+    if (nxt == TK_DROP) {
+        pos = pos + 1;
+        if (_tok_type(pos) != TK_COLUMN) { return PATRA_ERR_SYNTAX; }
+        pos = pos + 1;
+        if (_tok_type(pos) != TK_IDENT) { return PATRA_ERR_SYNTAX; }
+        var itemd = _sql_pr + PR_ITEMS;
+        store64(itemd + CR_NPTR, _tok_ptr(pos));
+        store64(itemd + CR_NLEN, _tok_len(pos));
+        store64(_sql_pr + PR_STMT, STMT_ALTER_DROP_COL);
         return PATRA_OK;
     }
     if (nxt == TK_RENAME) {

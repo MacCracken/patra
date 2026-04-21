@@ -1,6 +1,6 @@
 # Patra Development Roadmap
 
-> **v1.4.0** — Sovereign database for Cyrius. ALTER TABLE (ADD COLUMN + RENAMEs).
+> **v1.5.0** — Sovereign database for Cyrius. Whole-tree page reclaim, security audit complete (fixes ship 1.5.1).
 
 ## Completed
 
@@ -125,17 +125,52 @@
   Collisions and unknown-target cases all return typed errors.
 - 345 → 389 test assertions (+8 test groups).
 
-### Planned: v1.4.1
+### v1.4.1
 
-- **ALTER TABLE DROP COLUMN** — completes roadmap item #4. Requires
-  column-shift row rewriting and index teardown when the dropped column
-  was indexed.
+- **ALTER TABLE DROP COLUMN** — closes roadmap item #4 fully.
+  Column-shift row rewriting; index is torn down if the dropped column
+  was indexed, or rebuilt at its new position otherwise. Rejects drop
+  when the table has only one column.
+- 389 → 421 test assertions (+6 test groups).
 
-## Post-1.4 Backlog
+### v1.5.0
 
-All numbered roadmap items are complete or scheduled. Future features
-will be driven by consumer needs (libro, vidya, daimon, agnoshi, mela,
-hoosh).
+- **B-tree whole-tree page reclaim** — `btree_free_all` walks the tree
+  depth-first and frees every page on `DROP TABLE` and `ALTER TABLE
+  ADD/DROP COLUMN`. Closes the long-standing leak where only the root
+  was freed.
+- **Cyrius 5.5.x DCE limitation documented** in
+  `docs/adr/0001-cyrius-5-5-dce-toolchain-limitation.md`. Toolchain-side
+  concern; tracked for upstream resolution.
+- **Security audit landed** in `docs/audit/2026-04-21/security-review.md`
+  — 15 most-relevant CVEs from comparable systems mapped onto specific
+  Patra code paths, with disposition for 1.5.1 (P0/P1 fixes) and later.
+- 421 → 424 test assertions (+2 reclaim test groups).
+
+### Planned: v1.5.1 — security hardening from audit
+
+P0 (must-ship):
+- Page-pointer validation wrapper in `page_read` (kills Magellan-class).
+- `_bt_rwalk` / `_bt_compact_walk` recursion depth cap.
+- WAL header + per-record checksum.
+- INSERT/CREATE value-count bound check + WHERE condition-count bound.
+- `patra_hdr_verify` extended to PGCOUNT/TBLCOUNT/FREEHEAD/VER.
+
+P1:
+- `_json_escape` covers full 0x00–0x1F + explicit-length API.
+- `jsonl_get_int` overflow guard.
+- `O_NOFOLLOW` on `_pt_file_open` and `jsonl_open`.
+- `fdatasync(db_fd)` before WAL unlink.
+- `page_offset` overflow check.
+
+Each P0 / P1 item ships with a deterministic invariant test from
+`docs/audit/2026-04-21/security-review.md` §4.2.
+
+## Post-1.5 Backlog
+
+All numbered roadmap items (#3 SELECT col list, #4 ALTER TABLE,
+#5 B-tree compaction, #6 LIKE) are complete. Future features are
+driven by consumer needs (libro, vidya, daimon, agnoshi, mela, hoosh).
 
 ### Investigated / Rejected
 

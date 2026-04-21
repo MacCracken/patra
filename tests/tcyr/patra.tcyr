@@ -1319,6 +1319,90 @@ fn test_jsonl_special_chars() {
     jcleanup();
 }
 
+# ── v1.5: B-tree full-tree page reclaim ──────────────────────
+
+fn _free_list_len(db) {
+    var hdr = _db_hdr(db);
+    var fd = _db_fd(db);
+    var cnt = 0;
+    var cur = load64(hdr + HDR_FREEHEAD);
+    var buf = fl_alloc(PAGE_SIZE);
+    while (cur != 0) {
+        page_read(fd, cur, buf);
+        cur = load64(buf + FP_NEXT);
+        cnt = cnt + 1;
+    }
+    fl_free(buf);
+    return cnt;
+}
+
+fn test_btree_page_reclaim_drop() {
+    test_group("btree reclaim on drop");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE r (id INT, name STR)");
+
+    # 300 unique keys force the order-64 tree past one leaf
+    # (split at 32, so ~10 leaves + at least one internal level)
+    var _rsql[64];
+    for (var ri = 0; ri < 300; ri = ri + 1) {
+        var _rargs = vec_new();
+        vec_push(_rargs, ri);
+        fmt_sprintf(&_rsql, 64, "INSERT INTO r VALUES (%d, 'x')", _rargs);
+        patra_exec(db, &_rsql);
+    }
+
+    var free_before = _free_list_len(db);
+    patra_exec(db, "DROP TABLE r");
+    var free_after = _free_list_len(db);
+
+    # Pre-1.5.0: tbl_drop only freed the B-tree root → delta dominated by
+    # a handful of data pages. Post-1.5.0: every internal + leaf page is
+    # reclaimed too. For 300 keys we expect well over 5 B-tree pages alone.
+    assert(free_after - free_before >= 5, "multi-level b-tree pages reclaimed");
+
+    patra_close(db);
+}
+
+fn test_btree_page_reclaim_alter_add() {
+    test_group("btree reclaim on alter add");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE a (id INT, x INT)");
+    var _asql[64];
+    for (var ai = 0; ai < 200; ai = ai + 1) {
+        var _aargs = vec_new();
+        vec_push(_aargs, ai);
+        fmt_sprintf(&_asql, 64, "INSERT INTO a VALUES (%d, 0)", _aargs);
+        patra_exec(db, &_asql);
+    }
+
+    # Record free list depth before ALTER. With 200 inserts pgcount has grown;
+    # free list is typically empty at this point (no drops/vacuums yet).
+    var hdr = _db_hdr(db);
+    var fd = _db_fd(db);
+    var pgcount_before = load64(hdr + HDR_PGCOUNT);
+
+    # ALTER ADD INT has minimal row-size impact (8 bytes) — the new B-tree
+    # rebuild's page demand is almost identical to the old tree's freed pages.
+    patra_exec(db, "ALTER TABLE a ADD COLUMN y INT");
+
+    var pgcount_after = load64(hdr + HDR_PGCOUNT);
+
+    # Pre-1.5.0: tbl_drop-style single-root free leaked ~7 internal+leaf
+    # B-tree pages, forcing the rebuild to extend the file by that amount
+    # plus at least 1 data page. Post-1.5.0: whole-tree reclaim feeds the
+    # rebuild entirely from the free list; file growth should be small.
+    assert(pgcount_after - pgcount_before <= 3, "alter add reuses freed pages");
+
+    # Sanity: queries still correct
+    var rs = patra_query(db, "SELECT * FROM a WHERE id = 100");
+    assert_eq(patra_result_count(rs), 1, "indexed query post-alter-add");
+    patra_result_free(rs);
+
+    patra_close(db);
+}
+
 # ── v1.4: ALTER TABLE ────────────────────────────────────────
 
 fn test_parse_alter() {
@@ -1339,7 +1423,146 @@ fn test_parse_alter() {
     assert_eq(sql_parse(), PATRA_ERR_SYNTAX, "missing COLUMN keyword");
 
     sql_tokenize("ALTER TABLE t DROP COLUMN id");
-    assert_eq(sql_parse(), PATRA_ERR_SYNTAX, "DROP not supported in 1.4.0");
+    assert_eq(sql_parse(), PATRA_OK, "drop col parse");
+    assert_eq(load64(_sql_pr + PR_STMT), STMT_ALTER_DROP_COL, "stmt=DROP_COL");
+
+    sql_tokenize("ALTER TABLE t DROP id");
+    assert_eq(sql_parse(), PATRA_ERR_SYNTAX, "missing COLUMN keyword");
+}
+
+fn test_alter_drop_middle() {
+    test_group("alter drop middle col");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE m (id INT, name STR, age INT)");
+    patra_exec(db, "INSERT INTO m VALUES (1, 'alice', 30)");
+    patra_exec(db, "INSERT INTO m VALUES (2, 'bob', 25)");
+    patra_exec(db, "INSERT INTO m VALUES (3, 'carol', 35)");
+
+    assert_eq(patra_exec(db, "ALTER TABLE m DROP COLUMN name"), PATRA_OK, "drop middle");
+
+    var rs = patra_query(db, "SELECT * FROM m");
+    assert_eq(patra_result_cols(rs), 2, "2 cols remain");
+    assert_eq(patra_result_count(rs), 3, "3 rows preserved");
+    assert_eq(patra_result_get_int(rs, 0, 0), 1, "r0 id");
+    assert_eq(patra_result_get_int(rs, 0, 1), 30, "r0 age (shifted left)");
+    assert_eq(patra_result_get_int(rs, 2, 1), 35, "r2 age");
+    assert_streq(patra_result_col_name(rs, 1), "age", "col1 name");
+    patra_result_free(rs);
+
+    # Index on id still resolves (indexed col precedes dropped col)
+    rs = patra_query(db, "SELECT * FROM m WHERE id = 2");
+    assert_eq(patra_result_count(rs), 1, "index still works");
+    assert_eq(patra_result_get_int(rs, 0, 1), 25, "bob age");
+    patra_result_free(rs);
+
+    patra_close(db);
+}
+
+fn test_alter_drop_indexed_col() {
+    test_group("alter drop indexed col");
+    cleanup();
+    var db = patra_open(_tpath);
+    # id is auto-indexed (first INT col)
+    patra_exec(db, "CREATE TABLE di (id INT, name STR, age INT)");
+    patra_exec(db, "INSERT INTO di VALUES (1, 'a', 10)");
+    patra_exec(db, "INSERT INTO di VALUES (2, 'b', 20)");
+
+    # Drop the indexed column → index torn down
+    assert_eq(patra_exec(db, "ALTER TABLE di DROP COLUMN id"), PATRA_OK, "drop indexed");
+
+    var rs = patra_query(db, "SELECT * FROM di");
+    assert_eq(patra_result_cols(rs), 2, "2 cols");
+    assert_streq(patra_result_col_name(rs, 0), "name", "col0 now name");
+    assert_streq(patra_result_get_str(rs, 0, 0), "a", "r0 name");
+    assert_eq(patra_result_get_int(rs, 0, 1), 10, "r0 age");
+    patra_result_free(rs);
+
+    # age is INT but not indexed (index was torn down and first remaining INT col
+    # is age but we don't auto-reindex). Query still works via scan.
+    rs = patra_query(db, "SELECT * FROM di WHERE age = 20");
+    assert_eq(patra_result_count(rs), 1, "scan works");
+    patra_result_free(rs);
+
+    # Can re-index explicitly
+    assert_eq(patra_exec(db, "CREATE INDEX ON di (age)"), PATRA_OK, "new index ok");
+    rs = patra_query(db, "SELECT * FROM di WHERE age = 10");
+    assert_eq(patra_result_count(rs), 1, "new indexed query ok");
+    patra_result_free(rs);
+
+    patra_close(db);
+}
+
+fn test_alter_drop_before_indexed() {
+    test_group("alter drop before indexed col");
+    cleanup();
+    var db = patra_open(_tpath);
+    # Create with STR first so indexed col is not at 0. Then CREATE INDEX on id.
+    patra_exec(db, "CREATE TABLE bi (tag STR, id INT, age INT)");
+    patra_exec(db, "CREATE INDEX ON bi (id)");
+    patra_exec(db, "INSERT INTO bi VALUES ('x', 1, 10)");
+    patra_exec(db, "INSERT INTO bi VALUES ('y', 2, 20)");
+    patra_exec(db, "INSERT INTO bi VALUES ('z', 3, 30)");
+
+    # Drop tag (col 0). Indexed col id shifts from 1 → 0.
+    assert_eq(patra_exec(db, "ALTER TABLE bi DROP COLUMN tag"), PATRA_OK, "drop col0");
+
+    # Indexed query on id still works with the rebuilt index at its new position
+    var rs = patra_query(db, "SELECT * FROM bi WHERE id = 2");
+    assert_eq(patra_result_count(rs), 1, "indexed query post-shift");
+    assert_eq(patra_result_get_int(rs, 0, 0), 2, "id=2");
+    assert_eq(patra_result_get_int(rs, 0, 1), 20, "age=20");
+    patra_result_free(rs);
+
+    patra_close(db);
+}
+
+fn test_alter_drop_last_col_rejected() {
+    test_group("alter drop last col rejected");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE sole (id INT)");
+    assert_eq(patra_exec(db, "ALTER TABLE sole DROP COLUMN id"),
+              PATRA_ERR_COLCOUNT, "can't go to 0 cols");
+
+    # 2-col table: drop one is fine, can't drop the other
+    patra_exec(db, "CREATE TABLE two (id INT, name STR)");
+    assert_eq(patra_exec(db, "ALTER TABLE two DROP COLUMN name"), PATRA_OK, "2→1 ok");
+    assert_eq(patra_exec(db, "ALTER TABLE two DROP COLUMN id"),
+              PATRA_ERR_COLCOUNT, "1→0 rejected");
+    patra_close(db);
+}
+
+fn test_alter_drop_unknown() {
+    test_group("alter drop unknown col");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE u (id INT, name STR)");
+    assert_eq(patra_exec(db, "ALTER TABLE u DROP COLUMN ghost"),
+              PATRA_ERR_NOTFOUND, "unknown col");
+    assert_eq(patra_exec(db, "ALTER TABLE ghost DROP COLUMN x"),
+              PATRA_ERR_NOTFOUND, "unknown table");
+    patra_close(db);
+}
+
+fn test_alter_drop_persists() {
+    test_group("alter drop persists");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE dp (id INT, name STR, age INT)");
+    patra_exec(db, "INSERT INTO dp VALUES (1, 'alice', 30)");
+    patra_exec(db, "INSERT INTO dp VALUES (2, 'bob', 25)");
+    patra_exec(db, "ALTER TABLE dp DROP COLUMN name");
+    patra_close(db);
+
+    db = patra_open(_tpath);
+    var rs = patra_query(db, "SELECT * FROM dp");
+    assert_eq(patra_result_cols(rs), 2, "2 cols after reopen");
+    assert_eq(patra_result_count(rs), 2, "2 rows");
+    assert_eq(patra_result_get_int(rs, 0, 1), 30, "r0 age preserved");
+    assert_streq(patra_result_col_name(rs, 1), "age", "col1 name");
+    patra_result_free(rs);
+    patra_close(db);
 }
 
 fn test_alter_rename_table() {
@@ -2255,6 +2478,18 @@ fn main() {
     test_alter_add_column_str_default();
     test_alter_add_column_collision();
     test_alter_add_persists();
+
+    # v1.4.1 ALTER TABLE DROP COLUMN
+    test_alter_drop_middle();
+    test_alter_drop_indexed_col();
+    test_alter_drop_before_indexed();
+    test_alter_drop_last_col_rejected();
+    test_alter_drop_unknown();
+    test_alter_drop_persists();
+
+    # v1.5.0 B-tree whole-tree reclaim
+    test_btree_page_reclaim_drop();
+    test_btree_page_reclaim_alter_add();
 
     cleanup();
     return assert_summary();

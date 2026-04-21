@@ -389,6 +389,31 @@ fn btree_remove_ref(fd, root, key, ref) {
     return 0;
 }
 
+# ── Whole-tree free (depth-first page reclaim) ─────────────
+
+# Free every page in the B-tree rooted at `root` via depth-first recursion:
+# leaves get freed directly; internal nodes recurse into children before
+# freeing themselves. Prior to 1.5.0 only the root was freed, leaving all
+# internal and leaf pages unreachable on DROP TABLE / ALTER ADD / ALTER DROP.
+fn btree_free_all(fd, hdr, root) {
+    if (root == 0) { return 0; }
+    var buf = fl_alloc(PAGE_SIZE);
+    page_read(fd, root, buf);
+    var leaf = load64(buf + BT_LEAF);
+    if (leaf != 0) {
+        fl_free(buf);
+        page_free(fd, hdr, root);
+        return 0;
+    }
+    var nk = load64(buf + BT_NKEYS);
+    for (var i = 0; i <= nk; i = i + 1) {
+        btree_free_all(fd, hdr, load64(buf + BT_VALS + i * 8));
+    }
+    fl_free(buf);
+    page_free(fd, hdr, root);
+    return 0;
+}
+
 # ── Compaction: reclaim lazy-deleted entries ──────────────
 
 # Compact a single leaf in place: keep only entries with valid refs (val != -1).
