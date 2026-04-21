@@ -322,6 +322,224 @@ fn _exec_drop(db) {
     return r;
 }
 
+# ── Exec: ALTER TABLE ────────────────────
+
+# ALTER TABLE t RENAME TO new
+fn _exec_alter_rename_tbl(db) {
+    var fd = _db_fd(db);
+    var hdr = _db_hdr(db);
+
+    patra_lock_ex(fd);
+    patra_hdr_read(fd, hdr);
+
+    var tname = load64(_sql_pr + PR_TNAME);
+    var tnlen = load64(_sql_pr + PR_TNLEN);
+    var idx = tbl_find(hdr, tname, tnlen);
+    if (idx < 0) { patra_unlock(fd); return PATRA_ERR_NOTFOUND; }
+
+    var it = _sql_pr + PR_ITEMS;
+    var new_ptr = load64(it + CR_NPTR);
+    var new_len = load64(it + CR_NLEN);
+
+    # Reject if new name collides with any existing table
+    if (tbl_find(hdr, new_ptr, new_len) >= 0) {
+        patra_unlock(fd);
+        return PATRA_ERR_EXISTS;
+    }
+
+    var entry = _tbl_entry(hdr, idx);
+    var nn = new_len;
+    if (nn > TBL_NAME_MAX - 1) { nn = TBL_NAME_MAX - 1; }
+    memset(entry + TBL_NAME, 0, TBL_NAME_MAX);
+    memcpy(entry + TBL_NAME, new_ptr, nn);
+    store8(entry + TBL_NAME + nn, 0);
+
+    patra_hdr_write(fd, hdr);
+    patra_unlock(fd);
+    return PATRA_OK;
+}
+
+# ALTER TABLE t RENAME COLUMN old TO new
+fn _exec_alter_rename_col(db) {
+    var fd = _db_fd(db);
+    var hdr = _db_hdr(db);
+
+    patra_lock_ex(fd);
+    patra_hdr_read(fd, hdr);
+
+    var tname = load64(_sql_pr + PR_TNAME);
+    var tnlen = load64(_sql_pr + PR_TNLEN);
+    var idx = tbl_find(hdr, tname, tnlen);
+    if (idx < 0) { patra_unlock(fd); return PATRA_ERR_NOTFOUND; }
+
+    var entry = _tbl_entry(hdr, idx);
+    var spg = load64(entry + TBL_SCHEMA);
+    var schema = fl_alloc(PAGE_SIZE);
+    page_read(fd, spg, schema);
+    var ncols = load64(schema + SCH_NCOLS);
+
+    var it_old = _sql_pr + PR_ITEMS;
+    var it_new = _sql_pr + PR_ITEMS + CR_SZ;
+    var old_ptr = load64(it_old + CR_NPTR);
+    var old_len = load64(it_old + CR_NLEN);
+    var new_ptr = load64(it_new + CR_NPTR);
+    var new_len = load64(it_new + CR_NLEN);
+
+    var ci = _wh_resolve_col(schema, ncols, old_ptr, old_len);
+    if (ci < 0) { fl_free(schema); patra_unlock(fd); return PATRA_ERR_NOTFOUND; }
+
+    # Reject if new name collides with another existing column
+    var collide = _wh_resolve_col(schema, ncols, new_ptr, new_len);
+    if (collide >= 0) {
+        if (collide != ci) {
+            fl_free(schema);
+            patra_unlock(fd);
+            return PATRA_ERR_EXISTS;
+        }
+    }
+
+    var cn = new_len;
+    if (cn > SCH_CNAME_MAX - 1) { cn = SCH_CNAME_MAX - 1; }
+    var coff = SCH_START + ci * SCH_ENTRY_SZ + SCH_CNAME;
+    memset(schema + coff, 0, SCH_CNAME_MAX);
+    memcpy(schema + coff, new_ptr, cn);
+    store8(schema + coff + cn, 0);
+
+    page_write(fd, spg, schema);
+    fl_free(schema);
+    patra_unlock(fd);
+    return PATRA_OK;
+}
+
+# ALTER TABLE t ADD COLUMN name INT|STR
+# Gathers all rows, frees old data+btree pages, rewrites schema, re-inserts rows
+# with the default value (0 / empty string) in the new trailing column. The B-tree
+# is rebuilt when the table had an index.
+fn _exec_alter_add(db) {
+    var fd = _db_fd(db);
+    var hdr = _db_hdr(db);
+
+    patra_lock_ex(fd);
+    patra_hdr_read(fd, hdr);
+
+    var tname = load64(_sql_pr + PR_TNAME);
+    var tnlen = load64(_sql_pr + PR_TNLEN);
+    var idx = tbl_find(hdr, tname, tnlen);
+    if (idx < 0) { patra_unlock(fd); return PATRA_ERR_NOTFOUND; }
+
+    var entry = _tbl_entry(hdr, idx);
+    var spg = load64(entry + TBL_SCHEMA);
+    var schema = fl_alloc(PAGE_SIZE);
+    page_read(fd, spg, schema);
+    var ncols_old = load64(schema + SCH_NCOLS);
+    if (ncols_old >= MAX_COLS) {
+        fl_free(schema);
+        patra_unlock(fd);
+        return PATRA_ERR_COLCOUNT;
+    }
+
+    var it = _sql_pr + PR_ITEMS;
+    var nc_ptr = load64(it + CR_NPTR);
+    var nc_len = load64(it + CR_NLEN);
+    var nc_type = load64(it + CR_TYPE);
+
+    # Reject if the new column name already exists
+    if (_wh_resolve_col(schema, ncols_old, nc_ptr, nc_len) >= 0) {
+        fl_free(schema);
+        patra_unlock(fd);
+        return PATRA_ERR_EXISTS;
+    }
+
+    var rsz_old = row_compute_size(schema, ncols_old);
+    var rsz_new = rsz_old + row_col_size(nc_type);
+    var nrows = load64(entry + TBL_NROWS);
+
+    # Stage rows into a scratch buffer with the default (zero) trailing field
+    var scratch = 0;
+    if (nrows > 0) {
+        scratch = fl_alloc(nrows * rsz_new);
+        memset(scratch, 0, nrows * rsz_new);
+    }
+    var buf = fl_alloc(PAGE_SIZE);
+    var cur = load64(entry + TBL_ROOT);
+    var written = 0;
+    while (cur != 0) {
+        page_read(fd, cur, buf);
+        var pn = load64(buf + DP_NROWS);
+        for (var i = 0; i < pn; i = i + 1) {
+            memcpy(scratch + written * rsz_new,
+                   buf + DP_DATA + i * rsz_old, rsz_old);
+            written = written + 1;
+        }
+        cur = load64(buf + DP_NEXT);
+    }
+
+    # Release old data pages
+    _tbl_lp_idx = 0 - 1;
+    cur = load64(entry + TBL_ROOT);
+    while (cur != 0) {
+        page_read(fd, cur, buf);
+        var nx = load64(buf + DP_NEXT);
+        page_free(fd, hdr, cur);
+        cur = nx;
+    }
+    fl_free(buf);
+
+    # Release B-tree root (internal/leaf pages leak — matches tbl_drop behavior)
+    var ic = load64(schema + SCH_IDX_COL);
+    var ir_old = load64(schema + SCH_IDX_ROOT);
+    if (ic >= 0) {
+        if (ir_old != 0) { page_free(fd, hdr, ir_old); }
+    }
+
+    # Append new column entry to schema
+    var soff = SCH_START + ncols_old * SCH_ENTRY_SZ;
+    memset(schema + soff, 0, SCH_ENTRY_SZ);
+    var cn = nc_len;
+    if (cn > SCH_CNAME_MAX - 1) { cn = SCH_CNAME_MAX - 1; }
+    memcpy(schema + soff + SCH_CNAME, nc_ptr, cn);
+    store8(schema + soff + SCH_CNAME + cn, 0);
+    store64(schema + soff + SCH_CTYPE, nc_type);
+    var ncols_new = ncols_old + 1;
+    store64(schema + SCH_NCOLS, ncols_new);
+
+    # Fresh empty data page as root, fresh B-tree if originally indexed
+    var new_root = page_alloc(fd, hdr);
+    var nbuf = fl_alloc(PAGE_SIZE);
+    page_init_data(nbuf);
+    page_write(fd, new_root, nbuf);
+    fl_free(nbuf);
+    if (ic >= 0) {
+        var bt_new = btree_create(fd, hdr);
+        store64(schema + SCH_IDX_ROOT, bt_new);
+    }
+
+    store64(entry + TBL_NCOLS, ncols_new);
+    store64(entry + TBL_ROOT, new_root);
+    store64(entry + TBL_NROWS, 0);
+
+    # Re-insert rows; each insert updates TBL_NROWS and the B-tree
+    for (var ri = 0; ri < nrows; ri = ri + 1) {
+        var rp = scratch + ri * rsz_new;
+        tbl_insert(fd, hdr, idx, rp, rsz_new);
+        if (ic >= 0) {
+            var ir_now = load64(schema + SCH_IDX_ROOT);
+            if (ir_now != 0) {
+                var ikey = row_read_int(rp, row_field_offset(schema, ncols_new, ic));
+                var nr = btree_insert(fd, hdr, ir_now, ikey, _tbl_last_ref);
+                if (nr != ir_now) { store64(schema + SCH_IDX_ROOT, nr); }
+            }
+        }
+    }
+
+    page_write(fd, spg, schema);
+    if (nrows > 0) { fl_free(scratch); }
+    fl_free(schema);
+    patra_hdr_write(fd, hdr);
+    patra_unlock(fd);
+    return PATRA_OK;
+}
+
 # ── Exec: VACUUM ────────────────────
 
 fn _exec_vacuum(db) {
@@ -469,6 +687,9 @@ fn patra_exec(db, sql) {
     if (stmt == STMT_CREATE_INDEX) { return _exec_create_index(db); }
     if (stmt == STMT_DROP) { return _exec_drop(db); }
     if (stmt == STMT_VACUUM) { return _exec_vacuum(db); }
+    if (stmt == STMT_ALTER_ADD) { return _exec_alter_add(db); }
+    if (stmt == STMT_ALTER_RENAME_TBL) { return _exec_alter_rename_tbl(db); }
+    if (stmt == STMT_ALTER_RENAME_COL) { return _exec_alter_rename_col(db); }
     return PATRA_ERR_SYNTAX;
 }
 

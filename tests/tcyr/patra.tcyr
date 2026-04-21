@@ -1319,6 +1319,218 @@ fn test_jsonl_special_chars() {
     jcleanup();
 }
 
+# ── v1.4: ALTER TABLE ────────────────────────────────────────
+
+fn test_parse_alter() {
+    test_group("parse alter");
+    sql_tokenize("ALTER TABLE t ADD COLUMN age INT");
+    assert_eq(sql_parse(), PATRA_OK, "add col parse");
+    assert_eq(load64(_sql_pr + PR_STMT), STMT_ALTER_ADD, "stmt=ADD");
+
+    sql_tokenize("ALTER TABLE t RENAME TO people");
+    assert_eq(sql_parse(), PATRA_OK, "rename to parse");
+    assert_eq(load64(_sql_pr + PR_STMT), STMT_ALTER_RENAME_TBL, "stmt=RENAME_TBL");
+
+    sql_tokenize("ALTER TABLE t RENAME COLUMN id TO pk");
+    assert_eq(sql_parse(), PATRA_OK, "rename col parse");
+    assert_eq(load64(_sql_pr + PR_STMT), STMT_ALTER_RENAME_COL, "stmt=RENAME_COL");
+
+    sql_tokenize("ALTER TABLE t ADD age INT");
+    assert_eq(sql_parse(), PATRA_ERR_SYNTAX, "missing COLUMN keyword");
+
+    sql_tokenize("ALTER TABLE t DROP COLUMN id");
+    assert_eq(sql_parse(), PATRA_ERR_SYNTAX, "DROP not supported in 1.4.0");
+}
+
+fn test_alter_rename_table() {
+    test_group("alter rename table");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE orig (id INT, name STR)");
+    patra_exec(db, "INSERT INTO orig VALUES (1, 'a')");
+    patra_exec(db, "INSERT INTO orig VALUES (2, 'b')");
+
+    assert_eq(patra_exec(db, "ALTER TABLE orig RENAME TO renamed"), PATRA_OK, "rename ok");
+
+    # Old name gone
+    assert_eq(patra_exec(db, "INSERT INTO orig VALUES (3, 'c')"), PATRA_ERR_NOTFOUND, "old name gone");
+
+    # New name works
+    var rs = patra_query(db, "SELECT * FROM renamed");
+    assert_eq(patra_result_count(rs), 2, "data preserved");
+    patra_result_free(rs);
+
+    # Collision rejected
+    patra_exec(db, "CREATE TABLE other (id INT)");
+    assert_eq(patra_exec(db, "ALTER TABLE renamed RENAME TO other"),
+              PATRA_ERR_EXISTS, "collision rejected");
+
+    # Unknown source
+    assert_eq(patra_exec(db, "ALTER TABLE ghost RENAME TO x"),
+              PATRA_ERR_NOTFOUND, "unknown source");
+
+    patra_close(db);
+}
+
+fn test_alter_rename_column() {
+    test_group("alter rename column");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE r (id INT, name STR, age INT)");
+    patra_exec(db, "INSERT INTO r VALUES (1, 'alice', 30)");
+    patra_exec(db, "INSERT INTO r VALUES (2, 'bob', 25)");
+    patra_exec(db, "INSERT INTO r VALUES (3, 'carol', 35)");
+
+    # Rename name → label
+    assert_eq(patra_exec(db, "ALTER TABLE r RENAME COLUMN name TO label"),
+              PATRA_OK, "rename ok");
+
+    # WHERE on new name works
+    var rs = patra_query(db, "SELECT * FROM r WHERE label = 'bob'");
+    assert_eq(patra_result_count(rs), 1, "new name usable in WHERE");
+    patra_result_free(rs);
+
+    # WHERE on old name no longer resolves — returns no matches
+    rs = patra_query(db, "SELECT * FROM r WHERE name = 'bob'");
+    assert_eq(patra_result_count(rs), 0, "old name no longer resolves");
+    patra_result_free(rs);
+
+    # Column-list projection picks up the new name
+    rs = patra_query(db, "SELECT label FROM r");
+    assert_eq(patra_result_count(rs), 3, "project new name");
+    assert_streq(patra_result_col_name(rs, 0), "label", "col name updated");
+    patra_result_free(rs);
+
+    # B-tree on id (first INT col) still works after rename of another col
+    rs = patra_query(db, "SELECT * FROM r WHERE id = 2");
+    assert_eq(patra_result_count(rs), 1, "index on id unaffected");
+    patra_result_free(rs);
+
+    # Rename to existing col name rejected
+    assert_eq(patra_exec(db, "ALTER TABLE r RENAME COLUMN label TO age"),
+              PATRA_ERR_EXISTS, "collision rejected");
+
+    # Rename unknown col rejected
+    assert_eq(patra_exec(db, "ALTER TABLE r RENAME COLUMN ghost TO x"),
+              PATRA_ERR_NOTFOUND, "unknown col rejected");
+
+    patra_close(db);
+}
+
+fn test_alter_add_column_empty() {
+    test_group("alter add column empty");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE e (id INT)");
+
+    assert_eq(patra_exec(db, "ALTER TABLE e ADD COLUMN name STR"),
+              PATRA_OK, "add col on empty");
+
+    # Insert with the new shape
+    assert_eq(patra_exec(db, "INSERT INTO e VALUES (1, 'hello')"),
+              PATRA_OK, "insert 2-col");
+
+    var rs = patra_query(db, "SELECT * FROM e");
+    assert_eq(patra_result_cols(rs), 2, "2 cols post-alter");
+    assert_eq(patra_result_get_int(rs, 0, 0), 1, "id");
+    assert_streq(patra_result_get_str(rs, 0, 1), "hello", "name");
+    patra_result_free(rs);
+
+    patra_close(db);
+}
+
+fn test_alter_add_column_populated() {
+    test_group("alter add column populated");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE p (id INT, name STR)");
+    patra_exec(db, "INSERT INTO p VALUES (1, 'alice')");
+    patra_exec(db, "INSERT INTO p VALUES (2, 'bob')");
+    patra_exec(db, "INSERT INTO p VALUES (3, 'carol')");
+
+    assert_eq(patra_exec(db, "ALTER TABLE p ADD COLUMN age INT"),
+              PATRA_OK, "add col ok");
+
+    # Existing rows keep their values; new col defaults to 0
+    var rs = patra_query(db, "SELECT * FROM p");
+    assert_eq(patra_result_count(rs), 3, "3 rows");
+    assert_eq(patra_result_cols(rs), 3, "3 cols");
+    assert_eq(patra_result_get_int(rs, 0, 0), 1, "r0 id");
+    assert_streq(patra_result_get_str(rs, 0, 1), "alice", "r0 name");
+    assert_eq(patra_result_get_int(rs, 0, 2), 0, "r0 age default");
+    assert_eq(patra_result_get_int(rs, 2, 0), 3, "r2 id");
+    assert_streq(patra_result_get_str(rs, 2, 1), "carol", "r2 name");
+    patra_result_free(rs);
+
+    # Index on id still works (rebuilt)
+    rs = patra_query(db, "SELECT * FROM p WHERE id = 2");
+    assert_eq(patra_result_count(rs), 1, "index rebuilt");
+    assert_streq(patra_result_get_str(rs, 0, 1), "bob", "bob found");
+    patra_result_free(rs);
+
+    # Can now insert 3-col rows
+    patra_exec(db, "INSERT INTO p VALUES (4, 'dave', 28)");
+    rs = patra_query(db, "SELECT * FROM p WHERE id = 4");
+    assert_eq(patra_result_get_int(rs, 0, 2), 28, "dave age=28");
+    patra_result_free(rs);
+
+    # UPDATE new col on old row works
+    patra_exec(db, "UPDATE p SET age = 30 WHERE id = 1");
+    rs = patra_query(db, "SELECT * FROM p WHERE id = 1");
+    assert_eq(patra_result_get_int(rs, 0, 2), 30, "alice age updated");
+    patra_result_free(rs);
+
+    patra_close(db);
+}
+
+fn test_alter_add_column_str_default() {
+    test_group("alter add column str default");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE s (id INT)");
+    patra_exec(db, "INSERT INTO s VALUES (1)");
+    patra_exec(db, "INSERT INTO s VALUES (2)");
+
+    assert_eq(patra_exec(db, "ALTER TABLE s ADD COLUMN tag STR"), PATRA_OK, "add str");
+
+    # Default string is empty (null-terminated at position 0)
+    var rs = patra_query(db, "SELECT * FROM s WHERE id = 1");
+    assert_streq(patra_result_get_str(rs, 0, 1), "", "default empty");
+    patra_result_free(rs);
+
+    patra_close(db);
+}
+
+fn test_alter_add_column_collision() {
+    test_group("alter add column collision");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE c (id INT, name STR)");
+    assert_eq(patra_exec(db, "ALTER TABLE c ADD COLUMN id INT"),
+              PATRA_ERR_EXISTS, "duplicate col rejected");
+    assert_eq(patra_exec(db, "ALTER TABLE ghost ADD COLUMN x INT"),
+              PATRA_ERR_NOTFOUND, "unknown table");
+    patra_close(db);
+}
+
+fn test_alter_add_persists() {
+    test_group("alter add persists");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE pz (id INT, name STR)");
+    patra_exec(db, "INSERT INTO pz VALUES (1, 'alice')");
+    patra_exec(db, "ALTER TABLE pz ADD COLUMN age INT");
+    patra_exec(db, "UPDATE pz SET age = 42 WHERE id = 1");
+    patra_close(db);
+
+    db = patra_open(_tpath);
+    var rs = patra_query(db, "SELECT * FROM pz");
+    assert_eq(patra_result_cols(rs), 3, "3 cols after reopen");
+    assert_eq(patra_result_get_int(rs, 0, 2), 42, "age persisted");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
 # ── v1.3: VACUUM / B-tree compaction ─────────────────────────
 
 fn _count_leaf_entries(fd, pg, inc_tombs) {
@@ -2033,6 +2245,16 @@ fn main() {
     test_vacuum_reclaims();
     test_vacuum_no_index();
     test_vacuum_unknown_table();
+
+    # v1.4 ALTER TABLE
+    test_parse_alter();
+    test_alter_rename_table();
+    test_alter_rename_column();
+    test_alter_add_column_empty();
+    test_alter_add_column_populated();
+    test_alter_add_column_str_default();
+    test_alter_add_column_collision();
+    test_alter_add_persists();
 
     cleanup();
     return assert_summary();

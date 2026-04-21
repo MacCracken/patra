@@ -48,6 +48,11 @@ enum TokType {
     TK_DROP = 42;
     TK_LIKE = 43;
     TK_VACUUM = 44;
+    TK_ALTER = 45;
+    TK_ADD = 46;
+    TK_COLUMN = 47;
+    TK_RENAME = 48;
+    TK_TO = 49;
 }
 
 enum StmtType {
@@ -60,6 +65,9 @@ enum StmtType {
     STMT_CREATE_INDEX = 6;
     STMT_DROP = 7;
     STMT_VACUUM = 8;
+    STMT_ALTER_ADD = 9;
+    STMT_ALTER_RENAME_TBL = 10;
+    STMT_ALTER_RENAME_COL = 11;
 }
 
 enum AggType { AGG_NONE = 0; AGG_COUNT = 1; AGG_SUM = 2; AGG_MIN = 3; AGG_MAX = 4; }
@@ -233,6 +241,11 @@ fn _classify_ident(ptr, len) {
     if (_kw_eq(ptr, len, "DROP"))  { return TK_DROP; }
     if (_kw_eq(ptr, len, "LIKE"))  { return TK_LIKE; }
     if (_kw_eq(ptr, len, "VACUUM")) { return TK_VACUUM; }
+    if (_kw_eq(ptr, len, "ALTER"))  { return TK_ALTER; }
+    if (_kw_eq(ptr, len, "ADD"))    { return TK_ADD; }
+    if (_kw_eq(ptr, len, "COLUMN")) { return TK_COLUMN; }
+    if (_kw_eq(ptr, len, "RENAME")) { return TK_RENAME; }
+    if (_kw_eq(ptr, len, "TO"))     { return TK_TO; }
     return TK_IDENT;
 }
 
@@ -771,6 +784,70 @@ fn _parse_drop() {
     return PATRA_OK;
 }
 
+fn _parse_alter() {
+    # ALTER TABLE t ADD COLUMN name INT|STR
+    # ALTER TABLE t RENAME TO new_name
+    # ALTER TABLE t RENAME COLUMN old TO new
+    var pos = 0;
+    if (_tok_type(pos) != TK_ALTER) { return PATRA_ERR_SYNTAX; }
+    pos = pos + 1;
+    if (_tok_type(pos) != TK_TABLE) { return PATRA_ERR_SYNTAX; }
+    pos = pos + 1;
+    if (_tok_type(pos) != TK_IDENT) { return PATRA_ERR_SYNTAX; }
+    store64(_sql_pr + PR_TNAME, _tok_ptr(pos));
+    store64(_sql_pr + PR_TNLEN, _tok_len(pos));
+    pos = pos + 1;
+
+    var nxt = _tok_type(pos);
+    if (nxt == TK_ADD) {
+        pos = pos + 1;
+        if (_tok_type(pos) != TK_COLUMN) { return PATRA_ERR_SYNTAX; }
+        pos = pos + 1;
+        if (_tok_type(pos) != TK_IDENT) { return PATRA_ERR_SYNTAX; }
+        var item = _sql_pr + PR_ITEMS;
+        store64(item + CR_NPTR, _tok_ptr(pos));
+        store64(item + CR_NLEN, _tok_len(pos));
+        pos = pos + 1;
+        var tt = _tok_type(pos);
+        if (tt == TK_KW_INT)   { store64(item + CR_TYPE, COL_INT); }
+        elif (tt == TK_KW_STR) { store64(item + CR_TYPE, COL_STR); }
+        else { return PATRA_ERR_SYNTAX; }
+        store64(_sql_pr + PR_STMT, STMT_ALTER_ADD);
+        return PATRA_OK;
+    }
+    if (nxt == TK_RENAME) {
+        pos = pos + 1;
+        var rt = _tok_type(pos);
+        if (rt == TK_TO) {
+            pos = pos + 1;
+            if (_tok_type(pos) != TK_IDENT) { return PATRA_ERR_SYNTAX; }
+            var item2 = _sql_pr + PR_ITEMS;
+            store64(item2 + CR_NPTR, _tok_ptr(pos));
+            store64(item2 + CR_NLEN, _tok_len(pos));
+            store64(_sql_pr + PR_STMT, STMT_ALTER_RENAME_TBL);
+            return PATRA_OK;
+        }
+        if (rt == TK_COLUMN) {
+            pos = pos + 1;
+            if (_tok_type(pos) != TK_IDENT) { return PATRA_ERR_SYNTAX; }
+            var item3 = _sql_pr + PR_ITEMS;
+            store64(item3 + CR_NPTR, _tok_ptr(pos));
+            store64(item3 + CR_NLEN, _tok_len(pos));
+            pos = pos + 1;
+            if (_tok_type(pos) != TK_TO) { return PATRA_ERR_SYNTAX; }
+            pos = pos + 1;
+            if (_tok_type(pos) != TK_IDENT) { return PATRA_ERR_SYNTAX; }
+            var item4 = _sql_pr + PR_ITEMS + CR_SZ;
+            store64(item4 + CR_NPTR, _tok_ptr(pos));
+            store64(item4 + CR_NLEN, _tok_len(pos));
+            store64(_sql_pr + PR_STMT, STMT_ALTER_RENAME_COL);
+            return PATRA_OK;
+        }
+        return PATRA_ERR_SYNTAX;
+    }
+    return PATRA_ERR_SYNTAX;
+}
+
 fn _parse_vacuum() {
     # VACUUM tblname — reclaim B-tree tombstones for a table
     var pos = 0;
@@ -797,5 +874,6 @@ fn sql_parse() {
     if (tt == TK_DELETE) { return _parse_delete(); }
     if (tt == TK_DROP)   { return _parse_drop(); }
     if (tt == TK_VACUUM) { return _parse_vacuum(); }
+    if (tt == TK_ALTER)  { return _parse_alter(); }
     return PATRA_ERR_SYNTAX;
 }

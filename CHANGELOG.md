@@ -5,6 +5,53 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-04-21
+
+ALTER TABLE (partial — ADD COLUMN + RENAMEs). On-disk format unchanged;
+schema-page layout unchanged. Closes roadmap backlog #4 for the common
+migration operations. `ALTER TABLE ... DROP COLUMN` lands in 1.4.1.
+
+### Added
+- **`ALTER TABLE t ADD COLUMN name INT|STR`** — appends a column to the
+  end of the schema. Existing rows get the default value (0 for INT,
+  empty string for STR). Implementation: gather all rows into a scratch
+  buffer with the default appended, free the old data-page chain and
+  B-tree root, rewrite the schema page with the new column, allocate a
+  fresh data root + B-tree (if the table was indexed), then reinsert
+  every row via the normal path (which maintains TBL_NROWS, last-page
+  cache, and B-tree). Refs in the rebuilt B-tree reflect the new row
+  positions.
+- **`ALTER TABLE t RENAME TO new_name`** — updates `TBL_NAME` in the
+  table directory. Collisions with existing tables are rejected.
+- **`ALTER TABLE t RENAME COLUMN old TO new`** — updates `SCH_CNAME` in
+  the schema page. WHERE/ORDER BY/projection resolve against the new
+  name; the existing B-tree index is unaffected (indexed by column
+  position, not name).
+- **8 new test groups / 44 new assertions** (345 → 389): parser,
+  RENAME TO + collision + unknown-table, RENAME COLUMN + index-unaffected
+  + collision + unknown-col, ADD COLUMN on empty table, ADD COLUMN on
+  populated table with index rebuild + subsequent insert + UPDATE on new
+  col, ADD COLUMN STR default, ADD COLUMN collision / unknown table,
+  ADD COLUMN persistence across reopen.
+
+### Changed
+- **`TokType` + `StmtType` extended** with `TK_ALTER/ADD/COLUMN/RENAME/TO`
+  and `STMT_ALTER_ADD/RENAME_TBL/RENAME_COL`.
+
+### Known
+- **DROP COLUMN** is not supported in 1.4.0 — `ALTER TABLE t DROP COLUMN x`
+  still returns `PATRA_ERR_SYNTAX`. Lands in 1.4.1.
+- **B-tree internal/leaf pages leak on ADD COLUMN** when the table had
+  an index — matches the pre-existing `tbl_drop` behavior (only the root
+  page is freed). Acceptable for now; whole-tree page reclaim is a
+  separate cleanup.
+
+### Validation
+- 389 passed, 0 failed (was 345).
+- 2 fuzz harnesses pass.
+- 24 benchmarks within baseline variance.
+- libro (15) + vidya (19) integration unchanged.
+
 ## [1.3.0] - 2026-04-20
 
 LIKE operator + B-tree compaction (VACUUM). On-disk format unchanged.

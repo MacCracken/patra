@@ -1,6 +1,6 @@
 # Patra Development Roadmap
 
-> **v1.3.0** — Sovereign database for Cyrius. LIKE operator, VACUUM (B-tree compaction).
+> **v1.4.0** — Sovereign database for Cyrius. ALTER TABLE (ADD COLUMN + RENAMEs).
 
 ## Completed
 
@@ -115,13 +115,27 @@
   selectivity-gate behavior on range queries.
 - 314 → 345 test assertions (+9 test groups). +2 benchmarks.
 
-## Post-1.3 Backlog
+### v1.4.0
 
-### Features
+- **ALTER TABLE (ADD COLUMN + RENAMEs)** (backlog #4, partial) —
+  `ALTER TABLE t ADD COLUMN name INT|STR` rewrites all rows with a
+  default (0 / empty) in the appended column and rebuilds the B-tree.
+  `ALTER TABLE t RENAME TO new` updates the table directory entry.
+  `ALTER TABLE t RENAME COLUMN old TO new` updates the schema page.
+  Collisions and unknown-target cases all return typed errors.
+- 345 → 389 test assertions (+8 test groups).
 
-| # | Item | Notes |
-|---|------|-------|
-| 4 | ALTER TABLE | Schema migration — large; file-format impact |
+### Planned: v1.4.1
+
+- **ALTER TABLE DROP COLUMN** — completes roadmap item #4. Requires
+  column-shift row rewriting and index teardown when the dropped column
+  was indexed.
+
+## Post-1.4 Backlog
+
+All numbered roadmap items are complete or scheduled. Future features
+will be driven by consumer needs (libro, vidya, daimon, agnoshi, mela,
+hoosh).
 
 ### Investigated / Rejected
 
