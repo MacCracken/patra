@@ -4,7 +4,7 @@
 
 ## What It Does
 
-- **SQL subset** — CREATE TABLE, CREATE INDEX, INSERT, SELECT, WHERE, UPDATE, DELETE, ORDER BY, LIMIT
+- **SQL subset** — CREATE TABLE, CREATE INDEX, INSERT, SELECT (*, column list, aggregates), WHERE, UPDATE, DELETE, ORDER BY, LIMIT
 - **Aggregates** — COUNT(*), SUM, MIN, MAX with WHERE support
 - **B-tree storage** — pages in a single `.patra` file, crash-safe with WAL + flock
 - **Transactions** — BEGIN/COMMIT/ROLLBACK with write-ahead logging
@@ -80,6 +80,7 @@ DROP TABLE name
 CREATE INDEX ON name (col)
 INSERT INTO name VALUES (val1, val2, ...)
 SELECT * FROM name
+SELECT col1, col2 FROM name
 SELECT * FROM name WHERE col = val
 SELECT * FROM name WHERE col > val AND col2 = val2
 SELECT COUNT(*) FROM name

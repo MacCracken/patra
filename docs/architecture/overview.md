@@ -52,7 +52,7 @@ SQL string
     → parse statement (sql.cyr)
       → CREATE → create table in directory
       → INSERT → encode row, insert into B-tree
-      → SELECT → evaluate WHERE, collect matching rows
+      → SELECT → [B-tree or scan] evaluate WHERE → ORDER BY → LIMIT → project cols
       → UPDATE → find rows, modify in place
       → DELETE → find rows, mark deleted
 ```

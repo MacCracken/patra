@@ -764,6 +764,90 @@ fn patra_query(db, sql) {
         }
     }
 
+    # Projection (SELECT col1, col2, ...). PR_PROJ_N = 0 is SELECT *, returned as-is.
+    # Runs after ORDER BY / LIMIT so sort can reference columns not in the projection.
+    var pjn = load64(_sql_pr + PR_PROJ_N);
+    if (pjn > 0) {
+        var pj_idxs = fl_alloc(pjn * 8);
+        var pj_types = fl_alloc(pjn * 8);
+        var pj_offs = fl_alloc(pjn * 8);
+        var pj_names_src = load64(rs + RS_NAMES);
+        var pj_types_src = load64(rs + RS_TYPES);
+        var pj_valid = 1;
+        for (var pji = 0; pji < pjn; pji = pji + 1) {
+            var pj_item = _sql_pr + PR_ITEMS + pji * SEL_SZ;
+            var pj_p = load64(pj_item + SEL_PTR);
+            var pj_l = load64(pj_item + SEL_LEN);
+            var pj_ci = 0 - 1;
+            for (var pj_c = 0; pj_c < ncols; pj_c = pj_c + 1) {
+                var pj_cn = pj_names_src + pj_c * SCH_CNAME_MAX;
+                if (strlen(pj_cn) == pj_l) {
+                    if (memeq(pj_cn, pj_p, pj_l)) { pj_ci = pj_c; }
+                }
+            }
+            if (pj_ci < 0) { pj_valid = 0; }
+            store64(pj_idxs + pji * 8, pj_ci);
+            if (pj_ci >= 0) {
+                store64(pj_types + pji * 8, load64(pj_types_src + pj_ci * 8));
+                store64(pj_offs + pji * 8, _rs_field_off(rs, pj_ci));
+            }
+        }
+        if (pj_valid == 0) {
+            fl_free(pj_idxs);
+            fl_free(pj_types);
+            fl_free(pj_offs);
+            fl_free(rs);
+            return 0;
+        }
+
+        var pj_new_rsz = 0;
+        for (var pji2 = 0; pji2 < pjn; pji2 = pji2 + 1) {
+            pj_new_rsz = pj_new_rsz + row_col_size(load64(pj_types + pji2 * 8));
+        }
+
+        var pj_out_n = load64(rs + RS_NROWS);
+        var pj_total = RS_HDR_SZ + pjn * 8 + pjn * SCH_CNAME_MAX + pj_out_n * pj_new_rsz;
+        if (pj_total < RS_HDR_SZ + 64) { pj_total = RS_HDR_SZ + 64; }
+        var rs2 = fl_alloc(pj_total);
+        memset(rs2, 0, pj_total);
+        var pj_t = rs2 + RS_HDR_SZ;
+        var pj_nm = pj_t + pjn * 8;
+        var pj_d = pj_nm + pjn * SCH_CNAME_MAX;
+        store64(rs2 + RS_NCOLS, pjn);
+        store64(rs2 + RS_NROWS, pj_out_n);
+        store64(rs2 + RS_TYPES, pj_t);
+        store64(rs2 + RS_NAMES, pj_nm);
+        store64(rs2 + RS_ROWSZ, pj_new_rsz);
+        store64(rs2 + RS_DATA, pj_d);
+
+        for (var pji3 = 0; pji3 < pjn; pji3 = pji3 + 1) {
+            var pj_ci3 = load64(pj_idxs + pji3 * 8);
+            store64(pj_t + pji3 * 8, load64(pj_types + pji3 * 8));
+            memcpy(pj_nm + pji3 * SCH_CNAME_MAX,
+                   pj_names_src + pj_ci3 * SCH_CNAME_MAX, SCH_CNAME_MAX);
+        }
+
+        var pj_old_data = load64(rs + RS_DATA);
+        var pj_old_rsz = load64(rs + RS_ROWSZ);
+        for (var pj_ri = 0; pj_ri < pj_out_n; pj_ri = pj_ri + 1) {
+            var pj_src = pj_old_data + pj_ri * pj_old_rsz;
+            var pj_dst = pj_d + pj_ri * pj_new_rsz;
+            var pj_dst_off = 0;
+            for (var pji4 = 0; pji4 < pjn; pji4 = pji4 + 1) {
+                var pj_so = load64(pj_offs + pji4 * 8);
+                var pj_fsz = row_col_size(load64(pj_types + pji4 * 8));
+                memcpy(pj_dst + pj_dst_off, pj_src + pj_so, pj_fsz);
+                pj_dst_off = pj_dst_off + pj_fsz;
+            }
+        }
+
+        fl_free(pj_idxs);
+        fl_free(pj_types);
+        fl_free(pj_offs);
+        fl_free(rs);
+        return rs2;
+    }
+
     return rs;
 }
 

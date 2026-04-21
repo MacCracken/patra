@@ -7,7 +7,7 @@
 - **Type**: Shared library — database engine for the sovereign stack
 - **License**: GPL-3.0-only
 - **Language**: Cyrius (native)
-- **Version**: 1.1.1
+- **Version**: 1.2.0
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
 
@@ -17,12 +17,12 @@ Own the database. Zero deps. Pure Cyrius. SQL + B-tree + JSONL in a single `incl
 
 ## Current State
 
-- **Source**: ~3,100 lines across 10 modules
-- **Tests**: 274 assertions, 2 fuzz harnesses, 20 benchmarks
-- **Stable**: 1.1 — feature-complete, hardened, fuzzed, DCE-built
+- **Source**: ~3,200 lines across 10 modules
+- **Tests**: 314 assertions, 2 fuzz harnesses, 22 benchmarks
+- **Stable**: 1.2 — feature-complete, hardened, fuzzed, DCE-built, Cyrius 5.5
 - **Integration**: libro audit log, vidya knowledge index
 - **Index**: B+ tree order-64, auto or explicit CREATE INDEX (~39% faster equality select on unique keys, 500 rows; overflow-safe fallback on >256 duplicate refs)
-- **Binary**: 120KB
+- **Binary**: 130KB (DCE)
 
 ## Consumers
 
@@ -111,7 +111,7 @@ src/
   file.cyr      — .patra format, header, flock, fdatasync, constants
   page.cyr      — 4KB page alloc/read/write/free list + WAL integration
   row.cyr       — row encoding: i64 + 64-byte strings
-  sql.cyr       — tokenizer + recursive descent parser (CREATE/INSERT/SELECT/UPDATE/DELETE/CREATE INDEX, aggregates)
+  sql.cyr       — tokenizer + recursive descent parser (CREATE/INSERT/SELECT/UPDATE/DELETE/CREATE INDEX, aggregates, column-list projection)
   where.cyr     — WHERE evaluation: 6 operators, AND/OR
   wal.cyr       — Write-ahead logging: page before-images, crash recovery
   btree.cyr     — B+ tree: order-64, insert/split/search/range/lazy delete
@@ -126,7 +126,7 @@ src/
 - **4KB pages** — standard page size, B-tree nodes fit one page
 - **flock for concurrency** — `syscall(73, fd, LOCK_EX/LOCK_UN)` advisory locking
 - **No floating point** — integer comparisons only in WHERE clauses
-- **SQL subset only** — CREATE TABLE, CREATE INDEX, DROP TABLE, INSERT, SELECT (with COUNT/SUM/MIN/MAX aggregates), UPDATE, DELETE. No JOINs or subqueries
+- **SQL subset only** — CREATE TABLE, CREATE INDEX, DROP TABLE, INSERT, SELECT (with `*` / column-list projection / COUNT/SUM/MIN/MAX aggregates), UPDATE, DELETE. No JOINs or subqueries
 
 ## Cyrius Conventions
 

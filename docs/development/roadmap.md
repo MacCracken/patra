@@ -1,6 +1,6 @@
 # Patra Development Roadmap
 
-> **v1.1.1** — Sovereign database for Cyrius. Stable, DCE-built, selectivity-aware planner.
+> **v1.2.0** — Sovereign database for Cyrius. Cyrius 5.5 toolchain, SELECT column-list projection.
 
 ## Completed
 
@@ -92,13 +92,22 @@
 - Selectivity-based planner gate — when `nrefs >= 128` and the index would return ≥50% of the table's rows, the engine scans instead. Avoids paying the B-tree walk when the index offers no I/O savings.
 - New `select_idx_range_400_of_2000` benchmark proves the cap-raise win.
 
-## Post-1.1 Backlog
+### v1.2.0
+
+- **SELECT column-list projection** (backlog #3) — `SELECT col1, col2 FROM t`
+  now supported. Projection runs after WHERE/ORDER BY/LIMIT, so sorts and
+  filters can reference columns outside the projection. Duplicates allowed;
+  unknown columns yield a null result.
+- **Cyrius toolchain pinned to 5.5.18** (`.cyrius-toolchain`, `cyrius.cyml`).
+  4.x → 5.x toolchain jump; no source changes required.
+- 274 → 314 test assertions (+5 test groups, +1 parser test group).
+
+## Post-1.2 Backlog
 
 ### Features
 
 | # | Item | Notes |
 |---|------|-------|
-| 3 | SELECT column list | Currently SELECT * only |
 | 4 | ALTER TABLE | Schema migration |
 | 5 | B-tree compaction | Reclaim lazy-deleted entries |
 | 6 | LIKE operator | String pattern matching |

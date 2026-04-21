@@ -5,6 +5,34 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-04-20
+
+SELECT column-list projection + Cyrius 5.5 toolchain. On-disk format unchanged.
+
+### Added
+- **SELECT column list** (`SELECT col1, col2 FROM t`) — roadmap backlog #3.
+  Projection runs after WHERE, ORDER BY, and LIMIT, so sorts and filters can
+  reference columns not in the projection. Up to `MAX_COLS` (32) projected
+  columns per query. Duplicate columns are allowed and emitted twice.
+  Unknown column names cause `patra_query` to return 0 (null result set).
+  `SELECT *` and aggregates are unchanged (`PR_PROJ_N = 0`).
+- **5 new integration test groups + 1 parser test group** — 40 new
+  assertions covering single-col, multi-col, reordered projection,
+  WHERE/ORDER BY/LIMIT on non-projected cols, unknown col, and duplicate
+  cols. 274 → 314 passed.
+
+### Changed
+- **Cyrius toolchain pin raised 4.10.3 → 5.5.18** (`.cyrius-toolchain`,
+  `cyrius.cyml`). Clean compile, all tests/fuzz/benchmarks pass on the
+  new toolchain. No source changes required.
+
+### Validation
+- 314 passed, 0 failed (was 274).
+- 2 fuzz harnesses pass.
+- 22 benchmarks within baseline variance (no projection-path regressions
+  on existing `SELECT *` queries).
+- libro (15 pass) + vidya (19 pass) integration unchanged.
+
 ## [1.1.1] - 2026-04-16
 
 Indexed-query planner improvements. No API changes; on-disk format unchanged.

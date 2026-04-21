@@ -62,6 +62,10 @@ enum StmtType {
 enum AggType { AGG_NONE = 0; AGG_COUNT = 1; AGG_SUM = 2; AGG_MIN = 3; AGG_MAX = 4; }
 enum AggOff { PR_AGG_TYPE = 768; PR_AGG_COL_PTR = 776; PR_AGG_COL_LEN = 784; }
 
+# SELECT column-list projection item: 16 bytes (ptr, len). Stored in PR_ITEMS.
+# PR_PROJ_N = 0 means SELECT * (or aggregate query).
+enum SelOff { SEL_PTR = 0; SEL_LEN = 8; SEL_SZ = 16; PR_PROJ_N = 792; }
+
 # Token layout: 24 bytes (type, ptr, len)
 enum TokOff { TOK_TYPE = 0; TOK_PTR = 8; TOK_LEN = 16; TOK_SZ = 24; }
 enum TokLim { MAX_TOKENS = 128; }
@@ -573,6 +577,22 @@ fn _parse_select() {
         pos = pos + 1;
     } elif (tt == TK_STAR) {
         pos = pos + 1;
+    } elif (tt == TK_IDENT) {
+        # Column-list projection: col1 [, col2 ...]
+        var pn = 0;
+        var pdone = 0;
+        while (pdone == 0) {
+            if (_tok_type(pos) != TK_IDENT) { return PATRA_ERR_SYNTAX; }
+            if (pn >= MAX_COLS) { return PATRA_ERR_COLCOUNT; }
+            var pitem = _sql_pr + PR_ITEMS + pn * SEL_SZ;
+            store64(pitem + SEL_PTR, _tok_ptr(pos));
+            store64(pitem + SEL_LEN, _tok_len(pos));
+            pos = pos + 1;
+            pn = pn + 1;
+            if (_tok_type(pos) == TK_COMMA) { pos = pos + 1; }
+            else { pdone = 1; }
+        }
+        store64(_sql_pr + PR_PROJ_N, pn);
     } else {
         return PATRA_ERR_SYNTAX;
     }
