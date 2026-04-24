@@ -1,0 +1,128 @@
+# fuzz_bytes.fcyr — malformed BYTES chain invariants
+#
+# Builds a table with a BYTES column, plants chain-corrupting mutations on
+# the blob's head page, and asserts Patra returns cleanly rather than
+# crashing, hanging, or reading past the chain. The read path must survive
+# bad BY_TYPE markers, overflow BY_LEN values, cycles, and NULL children.
+
+include "src/lib.cyr"
+
+alloc_init();
+fl_init();
+patra_init();
+
+var fpath = "/tmp/patra_fuzz_bytes.patra";
+
+# Module-level state shared by the seed/read helpers. Vars must be
+# declared before any function that references them.
+var _g_db = 0;
+var _g_fp = 0;
+
+fn _cleanup() { syscall(SYS_UNLINK, fpath); return 0; }
+
+# Insert a single (hash STR, content BYTES) row with a deterministic
+# payload, return the first chain page of the content column.
+fn _seed_one_blob() {
+    _cleanup();
+    var db = patra_open(fpath);
+    patra_exec(db, "CREATE TABLE t (hash STR, content BYTES)");
+
+    var sz = 5000;  # two chain pages
+    var payload = fl_alloc(sz);
+    for (var i = 0; i < sz; i = i + 1) { store8(payload + i, i & 255); }
+
+    var types = fl_alloc(16);
+    var ivals = fl_alloc(16);
+    var sptrs = fl_alloc(16);
+    var slens = fl_alloc(16);
+    var bptrs = fl_alloc(16);
+    var blens = fl_alloc(16);
+    memset(ivals, 0, 16); memset(sptrs, 0, 16); memset(slens, 0, 16);
+    memset(bptrs, 0, 16); memset(blens, 0, 16);
+    store64(types + 0, COL_STR);
+    store64(sptrs + 0, "h");
+    store64(slens + 0, 1);
+    store64(types + 8, COL_BYTES);
+    store64(bptrs + 8, payload);
+    store64(blens + 8, sz);
+    patra_insert_row(db, "t", 1, 2, types, ivals, sptrs, slens, bptrs, blens);
+
+    var rs = patra_query(db, "SELECT * FROM t");
+    var data = load64(rs + RS_DATA);
+    var first_pg = load64(data + _rs_field_off(rs, 1) + BR_PAGE);
+    patra_result_free(rs);
+
+    fl_free(types); fl_free(ivals); fl_free(sptrs);
+    fl_free(slens); fl_free(bptrs); fl_free(blens); fl_free(payload);
+    # Return (db handle, first_pg) via module-level vars — caller closes.
+    _g_db = db;
+    _g_fp = first_pg;
+    return 0;
+}
+
+fn _try_read() {
+    var rs = patra_query(_g_db, "SELECT * FROM t");
+    if (rs == 0) { return 0; }
+    var out = fl_alloc(16384);
+    memset(out, 0, 16384);
+    # Ignore return — the invariant is "don't crash / hang".
+    patra_result_read_bytes(_g_db, rs, 0, 1, out);
+    fl_free(out);
+    patra_result_free(rs);
+    return 0;
+}
+
+# ── 1. BY_TYPE overwritten to a non-PAGE_BYTES sentinel ─────
+
+_seed_one_blob();
+var fd = _db_fd(_g_db);
+var buf = fl_alloc(PAGE_SIZE);
+page_read(fd, _g_fp, buf);
+store64(buf + BY_TYPE, PAGE_DATA);
+page_write(fd, _g_fp, buf);
+_try_read();
+patra_close(_g_db);
+
+# ── 2. BY_LEN set far past BY_DATA_MAX (must be rejected) ───
+
+_seed_one_blob();
+fd = _db_fd(_g_db);
+page_read(fd, _g_fp, buf);
+store64(buf + BY_LEN, 999999999);
+page_write(fd, _g_fp, buf);
+_try_read();
+patra_close(_g_db);
+
+# ── 3. BY_NEXT pointing to itself (cycle) ───────────────────
+
+_seed_one_blob();
+fd = _db_fd(_g_db);
+page_read(fd, _g_fp, buf);
+store64(buf + BY_NEXT, _g_fp);
+page_write(fd, _g_fp, buf);
+_try_read();
+patra_close(_g_db);
+
+# ── 4. BY_NEXT pointing past end-of-file ────────────────────
+
+_seed_one_blob();
+fd = _db_fd(_g_db);
+page_read(fd, _g_fp, buf);
+store64(buf + BY_NEXT, 999999);
+page_write(fd, _g_fp, buf);
+_try_read();
+patra_close(_g_db);
+
+# ── 5. BY_LEN negative ──────────────────────────────────────
+
+_seed_one_blob();
+fd = _db_fd(_g_db);
+page_read(fd, _g_fp, buf);
+store64(buf + BY_LEN, 0 - 1);
+page_write(fd, _g_fp, buf);
+_try_read();
+patra_close(_g_db);
+
+fl_free(buf);
+_cleanup();
+syscall(SYS_EXIT, 0);

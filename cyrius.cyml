@@ -1,10 +1,10 @@
 [package]
 name = "patra"
-version = "1.5.5"
+version = "1.6.0"
 description = "Patra — structured storage and SQL queries for Cyrius. The sovereign database."
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "5.5.27"
+cyrius = "5.6.21"
 repository = "https://github.com/MacCracken/patra"
 
 [build]
@@ -20,6 +20,7 @@ modules = [
     "src/wal.cyr",
     "src/page.cyr",
     "src/row.cyr",
+    "src/bytes.cyr",
     "src/sql.cyr",
     "src/where.cyr",
     "src/btree.cyr",

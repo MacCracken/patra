@@ -14,6 +14,35 @@ fn _tbl_name_eq(entry, name, nlen) {
     return memeq(entry + TBL_NAME, name, nlen);
 }
 
+# Free any BLOB chains referenced by this row. Called before a row's
+# storage is reclaimed (DROP TABLE, DELETE, ALTER DROP). No-op if the
+# schema has no BLOB columns. Also used during ALTER DROP COLUMN on a
+# BLOB column, where the dropped column's chain must be freed; in that
+# case the caller skips the row-wide sweep and targets the one column.
+fn _tbl_free_row_bytes(fd, hdr, row, schema, ncols) {
+    for (var i = 0; i < ncols; i = i + 1) {
+        var ctype = load64(schema + SCH_START + i * SCH_ENTRY_SZ + SCH_CTYPE);
+        if (ctype == COL_BYTES) {
+            var off = row_field_offset(schema, ncols, i);
+            var first_pg = row_read_bytes_page(row, off);
+            if (first_pg != 0) {
+                _bytes_free_chain(fd, hdr, first_pg);
+            }
+        }
+    }
+    return 0;
+}
+
+# True (1) if the schema has at least one BLOB column. Cheap guard so
+# non-BLOB tables skip the per-row chain scan on DROP/DELETE.
+fn _tbl_has_bytes(schema, ncols) {
+    for (var i = 0; i < ncols; i = i + 1) {
+        var ctype = load64(schema + SCH_START + i * SCH_ENTRY_SZ + SCH_CTYPE);
+        if (ctype == COL_BYTES) { return 1; }
+    }
+    return 0;
+}
+
 # Find table by name, returns index or -1
 fn tbl_find(hdr, name, nlen) {
     var count = load64(hdr + HDR_TBLCOUNT);
@@ -88,15 +117,30 @@ fn tbl_drop(fd, hdr, idx) {
     var entry = _tbl_entry(hdr, idx);
     var spg = load64(entry + TBL_SCHEMA);
 
-    # Free data page chain
+    # Read schema to learn the row layout (for BLOB cleanup)
+    var schema = fl_alloc(PAGE_SIZE);
+    page_read(fd, spg, schema);
+    var ncols = load64(schema + SCH_NCOLS);
+    var has_blob = _tbl_has_bytes(schema, ncols);
+    var row_sz = row_compute_size(schema, ncols);
+
+    # Free BLOB chains referenced by every row, then free the data pages.
+    # If there are no BLOB columns the row walk is skipped entirely.
     var cur = load64(entry + TBL_ROOT);
     var buf = fl_alloc(PAGE_SIZE);
     while (cur != 0) {
         page_read(fd, cur, buf);
+        if (has_blob != 0) {
+            var nr = load64(buf + DP_NROWS);
+            for (var ri = 0; ri < nr; ri = ri + 1) {
+                _tbl_free_row_bytes(fd, hdr, buf + DP_DATA + ri * row_sz, schema, ncols);
+            }
+        }
         var next = load64(buf + DP_NEXT);
         page_free(fd, hdr, cur);
         cur = next;
     }
+    fl_free(schema);
 
     # Free B-tree pages (walk from schema index root)
     var sbuf = fl_alloc(PAGE_SIZE);
@@ -141,7 +185,7 @@ fn tbl_insert(fd, hdr, idx, row_data, row_sz) {
     } else {
         cur = load64(entry + TBL_ROOT);
         page_read(fd, cur, buf);
-        while (load64(buf + DP_NEXT) != 0) {
+        while (load64(buf + DP_NEXT)) {
             cur = load64(buf + DP_NEXT);
             page_read(fd, cur, buf);
         }
@@ -276,6 +320,11 @@ fn tbl_update(fd, hdr, idx, row_sz, schema, ncols, pr) {
                         fl_free(buf);
                         return PATRA_ERR_NOTFOUND;
                     }
+                    var ctype = load64(schema + SCH_START + cidx * SCH_ENTRY_SZ + SCH_CTYPE);
+                    if (ctype == COL_BYTES) {
+                        fl_free(buf);
+                        return PATRA_ERR_TYPE;
+                    }
                     var coff = row_field_offset(schema, ncols, cidx);
                     if (load64(set + SET_VTYPE) == COL_INT) {
                         row_write_int(rptr, coff, load64(set + SET_IVAL));
@@ -332,6 +381,9 @@ fn tbl_delete(fd, hdr, idx, row_sz, schema, ncols, pr) {
         for (var i = 0; i < nrows; i = i + 1) {
             var rptr = buf + DP_DATA + i * row_sz;
             if (where_eval(rptr, schema, ncols, pr)) {
+                # Free any BLOB chains this row owned before the row slot
+                # gets reclaimed or overwritten by the compaction below.
+                _tbl_free_row_bytes(fd, hdr, rptr, schema, ncols);
                 # Invalidate B-tree entry
                 if (dic >= 0) {
                     if (dir != 0) {

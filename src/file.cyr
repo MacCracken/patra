@@ -7,8 +7,24 @@ enum PageConst { PAGE_SIZE = 4096; MAX_TABLES = 63; MAX_COLS = 32; }
 # Magic: "PTRA" as little-endian u32 (P=0x50 T=0x54 R=0x52 A=0x41)
 enum PatraFmt { PATRA_MAGIC = 0x41525450; PATRA_VER = 1; }
 
-enum PageType  { PAGE_FREE = 0; PAGE_DATA = 1; PAGE_SCHEMA = 2; PAGE_BTREE = 3; }
-enum ColType   { COL_INT = 0; COL_STR = 1; COL_INT_SZ = 8; COL_STR_SZ = 256; }
+enum PageType  { PAGE_FREE = 0; PAGE_DATA = 1; PAGE_SCHEMA = 2; PAGE_BTREE = 3; PAGE_BYTES = 4; }
+enum ColType   { COL_INT = 0; COL_STR = 1; COL_BYTES = 2; COL_INT_SZ = 8; COL_STR_SZ = 256; COL_BYTES_SZ = 16; }
+
+# Blob page layout (4096 bytes; chained). Stores up to BY_DATA_MAX bytes;
+# `BY_NEXT` points at the next blob page (0 = last). Chain is one-way.
+# A row's BLOB field is 16 bytes: (first_page i64, length i64). length is
+# the *total* payload in the chain — not per-page. A zero first_page means
+# an empty blob (no pages allocated).
+enum ByOff {
+    BY_TYPE = 0;
+    BY_LEN = 8;
+    BY_NEXT = 16;
+    BY_DATA = 24;
+    BY_DATA_MAX = 4072;
+}
+
+# Row blob ref layout (16 bytes at a BLOB column's row offset).
+enum BRefOff { BR_PAGE = 0; BR_LEN = 8; }
 
 enum PatraErr {
     PATRA_OK = 0;

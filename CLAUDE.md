@@ -17,10 +17,10 @@ Own the database. Zero deps. Pure Cyrius. SQL + B-tree + JSONL in a single `incl
 
 ## Current State
 
-- **Source**: ~4,000 lines across 10 modules
-- **Tests**: 475 assertions, 5 fuzz harnesses, 24 benchmarks
-- **Stable**: 1.5.3 — Full 2026-04-21 audit slate (P0+P1+P2+P-1) shipped: bounds-checked page reads, tree depth caps, WAL v2 with salted per-record auth, parser caps, strict header verify, full JSON control-byte escaping, overflow guards, O_NOFOLLOW, durable-commit ordering, explicit-length JSON API, layout invariant check, btree/wal/jsonl fuzz harnesses, SECURITY.md. Cyrius 5.5.22.
-- **Integration**: libro audit log, vidya knowledge index
+- **Source**: ~4,500 lines across 11 modules
+- **Tests**: 537 assertions, 6 fuzz harnesses, 26 benchmarks
+- **Stable**: 1.6.0 — `COL_BYTES` variable-length binary column for sit's object store migration. Chain-page storage (`BY_DATA_MAX = 4072`), programmatic `patra_insert_row` / `patra_result_read_bytes` API, chain cleanup on DELETE / DROP / ALTER DROP. `BYTES` keyword (canonical) with `BLOB` legacy alias. Cyrius 5.6.21.
+- **Integration**: libro audit log, vidya knowledge index, sit object store
 - **Index**: B+ tree order-64, auto or explicit CREATE INDEX (~39% faster equality select on unique keys, 500 rows; overflow-safe fallback on >256 duplicate refs)
 - **Binary**: 180KB (DCE)
 
@@ -32,6 +32,7 @@ Own the database. Zero deps. Pure Cyrius. SQL + B-tree + JSONL in a single `incl
 - **agnoshi** — command history
 - **mela** — marketplace data
 - **hoosh** — model registry
+- **sit** — git-format object store (hash STR + content BYTES tables, replacing loose-file layout)
 
 ## Dependencies
 
@@ -59,7 +60,7 @@ cyrius bench tests/bcyr/patra.bcyr           # 20 benchmarks
 - **3 failed attempts = defer and document** — don't burn time
 - **Fuzz every parser path** — SQL edge cases get invariants
 - **Benchmark before claiming perf** — numbers or it didn't happen
-- **Include order matters** — `file → wal → page → row → sql → where → btree → table → jsonl`
+- **Include order matters** — `file → wal → page → row → bytes → sql → where → btree → table → jsonl`
 
 ## P(-1): Scaffold Hardening
 
@@ -107,26 +108,27 @@ Before starting new work on a release, run this audit phase:
 
 ```
 src/
-  lib.cyr       — public API + includes (entry point)
-  file.cyr      — .patra format, header, flock, fdatasync, constants
+  lib.cyr       — public API + includes (entry point) + patra_insert_row / result_read_bytes
+  file.cyr      — .patra format, header, flock, fdatasync, constants (incl. COL_BYTES, PAGE_BYTES, BY_*)
   page.cyr      — 4KB page alloc/read/write/free list + WAL integration
-  row.cyr       — row encoding: i64 + 64-byte strings
-  sql.cyr       — tokenizer + recursive descent parser (CREATE/INSERT/SELECT/UPDATE/DELETE/CREATE INDEX/ALTER/VACUUM, aggregates, column-list projection)
-  where.cyr     — WHERE evaluation: 7 operators (incl LIKE), AND/OR
+  row.cyr       — row encoding: i64, 256-byte strings, 16-byte (page, len) bytes-refs
+  bytes.cyr     — variable-length binary: chain write/read/free across PAGE_BYTES pages
+  sql.cyr       — tokenizer + recursive descent parser (CREATE/INSERT/SELECT/UPDATE/DELETE/CREATE INDEX/ALTER/VACUUM, aggregates, column-list projection, BYTES/BLOB keyword)
+  where.cyr     — WHERE evaluation: 7 operators (incl LIKE), AND/OR; BYTES columns never match
   wal.cyr       — Write-ahead logging: page before-images, crash recovery
   btree.cyr     — B+ tree: order-64, insert/split/search/range/lazy delete/compaction/whole-tree free
-  table.cyr     — table create/insert/scan/update/delete + index maintenance
+  table.cyr     — table create/insert/scan/update/delete + index maintenance + bytes chain cleanup
   jsonl.cyr     — JSON Lines I/O, JSON builder, field extraction, escaping
 ```
 
 ## Key Constraints
 
 - **Zero dependencies** — no libsqlite3, no FFI, pure Cyrius
-- **All values are i64 or 256-byte strings** — matches Cyrius type system
+- **Column types**: `INT` (i64), `STR` (256-byte fixed), `BYTES` (variable-length binary via chain-page overflow; `BLOB` is a legacy alias)
 - **4KB pages** — standard page size, B-tree nodes fit one page
 - **flock for concurrency** — `syscall(73, fd, LOCK_EX/LOCK_UN)` advisory locking
 - **No floating point** — integer comparisons only in WHERE clauses
-- **SQL subset only** — CREATE TABLE, CREATE INDEX, ALTER TABLE (ADD/DROP COLUMN, RENAME TO, RENAME COLUMN), DROP TABLE, INSERT, SELECT (with `*` / column-list projection / COUNT/SUM/MIN/MAX aggregates), UPDATE, DELETE, VACUUM. WHERE supports `=, !=, <, >, <=, >=, LIKE` + AND/OR. No JOINs or subqueries
+- **SQL subset only** — CREATE TABLE, CREATE INDEX, ALTER TABLE (ADD/DROP COLUMN, RENAME TO, RENAME COLUMN), DROP TABLE, INSERT, SELECT (with `*` / column-list projection / COUNT/SUM/MIN/MAX aggregates), UPDATE, DELETE, VACUUM. WHERE supports `=, !=, <, >, <=, >=, LIKE` + AND/OR. BYTES columns are read/write only (no SQL INSERT/UPDATE/WHERE; use `patra_insert_row` + `patra_result_read_bytes`). No JOINs or subqueries
 
 ## Cyrius Conventions
 

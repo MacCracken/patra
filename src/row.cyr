@@ -1,8 +1,9 @@
 # row.cyr — row encoding/decoding (i64 + fixed-length strings)
 
-# Size in bytes for a column type (INT=8, STR=256)
+# Size in bytes for a column type (INT=8, STR=256, BLOB=16)
 fn row_col_size(ctype) {
-    if (ctype == COL_INT) { return COL_INT_SZ; }
+    if (ctype == COL_INT)  { return COL_INT_SZ; }
+    if (ctype == COL_BYTES) { return COL_BYTES_SZ; }
     return COL_STR_SZ;
 }
 
@@ -51,4 +52,20 @@ fn row_read_int(row, off) {
 # Read string pointer from row at offset
 fn row_read_str(row, off) {
     return row + off;
+}
+
+# Write blob ref (first_page, length) into the 16-byte BLOB field
+fn row_write_bytes_ref(row, off, first_page, blen) {
+    store64(row + off + BR_PAGE, first_page);
+    store64(row + off + BR_LEN,  blen);
+}
+
+# Read blob ref first page from row at offset
+fn row_read_bytes_page(row, off) {
+    return load64(row + off + BR_PAGE);
+}
+
+# Read blob ref length from row at offset
+fn row_read_bytes_len(row, off) {
+    return load64(row + off + BR_LEN);
 }

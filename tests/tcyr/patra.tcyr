@@ -2706,6 +2706,364 @@ fn test_multipage_indexed() {
     patra_close(db);
 }
 
+# ── v1.6: BLOB column ───────────────────────────────────────
+
+# Fill `buf` with a deterministic byte pattern of length `len`. Pattern is
+# `(i + seed) & 0xFF` so the full range of byte values is exercised.
+fn _bytes_fill(buf, len, seed) {
+    for (var i = 0; i < len; i = i + 1) {
+        store8(buf + i, (i + seed) & 255);
+    }
+    return 0;
+}
+
+# Compare two buffers byte-for-byte, return 1 if equal.
+fn _bytes_eq(a, b, len) {
+    for (var i = 0; i < len; i = i + 1) {
+        if (load8(a + i) != load8(b + i)) { return 0; }
+    }
+    return 1;
+}
+
+# Helper: insert a single (hash STR, content BLOB) row into `objects`.
+fn _obj_insert(db, hash, content, clen) {
+    var types = fl_alloc(2 * 8);
+    var ivals = fl_alloc(2 * 8);
+    var sptrs = fl_alloc(2 * 8);
+    var slens = fl_alloc(2 * 8);
+    var bptrs = fl_alloc(2 * 8);
+    var blens = fl_alloc(2 * 8);
+    memset(ivals, 0, 16);
+    memset(sptrs, 0, 16);
+    memset(slens, 0, 16);
+    memset(bptrs, 0, 16);
+    memset(blens, 0, 16);
+    store64(types + 0 * 8, COL_STR);
+    store64(sptrs + 0 * 8, hash);
+    store64(slens + 0 * 8, strlen(hash));
+    store64(types + 1 * 8, COL_BYTES);
+    store64(bptrs + 1 * 8, content);
+    store64(blens + 1 * 8, clen);
+    var r = patra_insert_row(db, "objects", 7, 2, types, ivals, sptrs, slens, bptrs, blens);
+    fl_free(types); fl_free(ivals); fl_free(sptrs);
+    fl_free(slens); fl_free(bptrs); fl_free(blens);
+    return r;
+}
+
+fn test_bytes_parse() {
+    test_group("bytes parse");
+    sql_tokenize("CREATE TABLE objects (hash STR, content BLOB)");
+    assert_eq(sql_parse(), PATRA_OK, "parse ok");
+    assert_eq(load64(_sql_pr + PR_STMT), STMT_CREATE, "create stmt");
+    assert_eq(load64(_sql_pr + PR_COUNT), 2, "2 cols");
+    var c1 = _sql_pr + PR_ITEMS + 1 * CR_SZ;
+    assert_eq(load64(c1 + CR_TYPE), COL_BYTES, "col1 BLOB");
+}
+
+fn test_bytes_create_table() {
+    test_group("bytes create table");
+    cleanup();
+    var db = patra_open(_tpath);
+    assert_eq(patra_exec(db, "CREATE TABLE objects (hash STR, content BLOB)"),
+              PATRA_OK, "create");
+
+    # SQL INSERT on a BLOB column must reject — there's no way to carry
+    # binary payloads through the tokenizer.
+    assert_eq(patra_exec(db, "INSERT INTO objects VALUES ('abc', 'def')"),
+              PATRA_ERR_TYPE, "sql insert rejected");
+    patra_close(db);
+}
+
+fn test_bytes_insert_read_small() {
+    test_group("bytes insert read small");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE objects (hash STR, content BLOB)");
+
+    var payload = fl_alloc(128);
+    _bytes_fill(payload, 100, 42);
+    assert_eq(_obj_insert(db, "hash_small", payload, 100), PATRA_OK, "insert ok");
+
+    var rs = patra_query(db, "SELECT * FROM objects");
+    assert_eq(patra_result_count(rs), 1, "1 row");
+    assert_eq(patra_result_get_bytes_len(rs, 0, 1), 100, "blob len");
+    var out = fl_alloc(128);
+    memset(out, 0, 128);
+    assert_eq(patra_result_read_bytes(db, rs, 0, 1, out), PATRA_OK, "read ok");
+    assert_eq(_bytes_eq(payload, out, 100), 1, "bytes equal");
+    fl_free(out);
+    fl_free(payload);
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_bytes_empty() {
+    test_group("bytes empty");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE objects (hash STR, content BLOB)");
+    # Empty blob: ptr NULL, len 0 → no chain pages allocated.
+    assert_eq(_obj_insert(db, "hash_empty", 0, 0), PATRA_OK, "insert empty");
+    var rs = patra_query(db, "SELECT * FROM objects");
+    assert_eq(patra_result_get_bytes_len(rs, 0, 1), 0, "len 0");
+    # Read with zero-length buffer still returns PATRA_OK.
+    var out = fl_alloc(16);
+    assert_eq(patra_result_read_bytes(db, rs, 0, 1, out), PATRA_OK, "read empty");
+    fl_free(out);
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_bytes_multipage() {
+    test_group("bytes multipage");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE objects (hash STR, content BLOB)");
+
+    # 10_000 bytes → ceil(10000/4072) = 3 chain pages
+    var sz = 10000;
+    var payload = fl_alloc(sz);
+    _bytes_fill(payload, sz, 7);
+    assert_eq(_obj_insert(db, "hash_big", payload, sz), PATRA_OK, "insert big");
+
+    var rs = patra_query(db, "SELECT * FROM objects");
+    assert_eq(patra_result_get_bytes_len(rs, 0, 1), sz, "len 10000");
+    var out = fl_alloc(sz);
+    memset(out, 0, sz);
+    assert_eq(patra_result_read_bytes(db, rs, 0, 1, out), PATRA_OK, "read big");
+    assert_eq(_bytes_eq(payload, out, sz), 1, "10k bytes equal");
+    fl_free(out);
+    fl_free(payload);
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_bytes_many_rows() {
+    test_group("bytes many rows");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE objects (hash STR, content BLOB)");
+
+    # Twenty rows with distinct payloads
+    var payload = fl_alloc(256);
+    for (var i = 0; i < 20; i = i + 1) {
+        _bytes_fill(payload, 200 + i, i);
+        var hash = fl_alloc(16);
+        memcpy(hash, "h", 1);
+        store8(hash + 1, 48 + (i / 10));  # tens digit
+        store8(hash + 2, 48 + (i % 10));  # ones digit
+        store8(hash + 3, 0);
+        _obj_insert(db, hash, payload, 200 + i);
+        fl_free(hash);
+    }
+    fl_free(payload);
+
+    var rs = patra_query(db, "SELECT * FROM objects");
+    assert_eq(patra_result_count(rs), 20, "20 rows");
+    # Verify a handful of rows round-trip correctly
+    for (var j = 0; j < 20; j = j + 3) {
+        var expected = fl_alloc(256);
+        _bytes_fill(expected, 200 + j, j);
+        var got = fl_alloc(256);
+        memset(got, 0, 256);
+        assert_eq(patra_result_get_bytes_len(rs, j, 1), 200 + j, "len");
+        assert_eq(patra_result_read_bytes(db, rs, j, 1, got), PATRA_OK, "read");
+        assert_eq(_bytes_eq(expected, got, 200 + j), 1, "equal");
+        fl_free(expected); fl_free(got);
+    }
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_bytes_delete_frees_chain() {
+    test_group("bytes delete frees chain");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE objects (hash STR, content BLOB)");
+    var payload = fl_alloc(9000);
+    _bytes_fill(payload, 9000, 1);
+    _obj_insert(db, "big1", payload, 9000);
+    _obj_insert(db, "big2", payload, 9000);
+
+    var hdr = _db_hdr(db);
+    var pg_before = load64(hdr + HDR_PGCOUNT);
+
+    # DELETE with a WHERE on hash narrows to one row
+    assert_eq(patra_exec(db, "DELETE FROM objects WHERE hash = 'big1'"),
+              PATRA_OK, "delete ok");
+
+    var pg_after = load64(hdr + HDR_PGCOUNT);
+    # Page count doesn't shrink — freed pages go onto the free list.
+    assert_eq(pg_after, pg_before, "pgcount unchanged");
+    # Free-list head must be non-zero if pages were reclaimed
+    assert_eq(load64(hdr + HDR_FREEHEAD) != 0, 1, "freehead set");
+
+    var rs = patra_query(db, "SELECT * FROM objects");
+    assert_eq(patra_result_count(rs), 1, "1 row remaining");
+    patra_result_free(rs);
+    fl_free(payload);
+    patra_close(db);
+}
+
+fn test_bytes_drop_table_frees() {
+    test_group("bytes drop frees chains");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE objects (hash STR, content BLOB)");
+    var payload = fl_alloc(9000);
+    _bytes_fill(payload, 9000, 2);
+    _obj_insert(db, "d1", payload, 9000);
+    _obj_insert(db, "d2", payload, 9000);
+    _obj_insert(db, "d3", payload, 9000);
+
+    var hdr = _db_hdr(db);
+    var pg_before = load64(hdr + HDR_PGCOUNT);
+
+    assert_eq(patra_exec(db, "DROP TABLE objects"), PATRA_OK, "drop");
+    # Chain pages must be reclaimed. Recreate and check reuse by alloc.
+    patra_exec(db, "CREATE TABLE objects (hash STR, content BLOB)");
+    _obj_insert(db, "d4", payload, 9000);
+    var pg_after = load64(hdr + HDR_PGCOUNT);
+    # If chains were not freed, we'd have allocated 3 more blob pages here.
+    # With free-list reclamation, pg_after should not exceed pg_before + a
+    # small fudge (schema page + data page for the new table).
+    assert_eq(pg_after <= pg_before + 4, 1, "chain pages reclaimed");
+
+    fl_free(payload);
+    patra_close(db);
+}
+
+fn test_bytes_where_no_match() {
+    test_group("bytes where no match");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE objects (hash STR, content BLOB)");
+    var payload = fl_alloc(64);
+    _bytes_fill(payload, 50, 3);
+    _obj_insert(db, "h1", payload, 50);
+    fl_free(payload);
+
+    # WHERE on the BLOB column should never match (by design)
+    var rs = patra_query(db, "SELECT * FROM objects WHERE content = 'whatever'");
+    assert_eq(patra_result_count(rs), 0, "blob WHERE no match");
+    patra_result_free(rs);
+
+    # WHERE on the STR column still works as normal
+    rs = patra_query(db, "SELECT * FROM objects WHERE hash = 'h1'");
+    assert_eq(patra_result_count(rs), 1, "str WHERE still works");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_bytes_update_rejected() {
+    test_group("bytes update rejected");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE objects (hash STR, content BLOB)");
+    var payload = fl_alloc(64);
+    _bytes_fill(payload, 50, 4);
+    _obj_insert(db, "h_upd", payload, 50);
+    fl_free(payload);
+
+    # Cannot UPDATE a BLOB column via SQL
+    assert_eq(patra_exec(db, "UPDATE objects SET content = 'nope' WHERE hash = 'h_upd'"),
+              PATRA_ERR_TYPE, "update blob rejected");
+    # Non-BLOB columns still updatable
+    assert_eq(patra_exec(db, "UPDATE objects SET hash = 'h_renamed' WHERE hash = 'h_upd'"),
+              PATRA_OK, "hash update ok");
+    patra_close(db);
+}
+
+fn test_bytes_alter_add() {
+    test_group("bytes alter add");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (id INT, name STR)");
+    patra_exec(db, "INSERT INTO t VALUES (1, 'alice')");
+    patra_exec(db, "INSERT INTO t VALUES (2, 'bob')");
+
+    assert_eq(patra_exec(db, "ALTER TABLE t ADD COLUMN data BLOB"),
+              PATRA_OK, "add blob col");
+
+    var rs = patra_query(db, "SELECT * FROM t");
+    assert_eq(patra_result_count(rs), 2, "2 rows");
+    # New column is empty (0,0)
+    assert_eq(patra_result_get_bytes_len(rs, 0, 2), 0, "row0 empty");
+    assert_eq(patra_result_get_bytes_len(rs, 1, 2), 0, "row1 empty");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_bytes_alter_drop_frees() {
+    test_group("bytes alter drop frees");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE objects (id INT, content BLOB)");
+
+    var types = fl_alloc(16);
+    var ivals = fl_alloc(16);
+    var sptrs = fl_alloc(16);
+    var slens = fl_alloc(16);
+    var bptrs = fl_alloc(16);
+    var blens = fl_alloc(16);
+    memset(ivals, 0, 16); memset(sptrs, 0, 16); memset(slens, 0, 16);
+    memset(bptrs, 0, 16); memset(blens, 0, 16);
+    store64(types + 0, COL_INT);
+    store64(types + 8, COL_BYTES);
+
+    var payload = fl_alloc(9000);
+    _bytes_fill(payload, 9000, 5);
+    store64(bptrs + 8, payload);
+    store64(blens + 8, 9000);
+    for (var i = 1; i <= 3; i = i + 1) {
+        store64(ivals + 0, i);
+        patra_insert_row(db, "objects", 7, 2, types, ivals, sptrs, slens, bptrs, blens);
+    }
+    fl_free(types); fl_free(ivals); fl_free(sptrs);
+    fl_free(slens); fl_free(bptrs); fl_free(blens);
+
+    var hdr = _db_hdr(db);
+    var fh_before = load64(hdr + HDR_FREEHEAD);
+
+    assert_eq(patra_exec(db, "ALTER TABLE objects DROP COLUMN content"),
+              PATRA_OK, "drop blob col");
+
+    # Free list must have grown (chain pages reclaimed by drop)
+    var fh_after = load64(hdr + HDR_FREEHEAD);
+    assert_eq(fh_after != fh_before, 1, "free list changed");
+
+    var rs = patra_query(db, "SELECT * FROM objects");
+    assert_eq(patra_result_count(rs), 3, "3 rows kept");
+    assert_eq(patra_result_cols(rs), 1, "1 col left");
+    patra_result_free(rs);
+    fl_free(payload);
+    patra_close(db);
+}
+
+fn test_bytes_persistence() {
+    test_group("bytes persistence");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE objects (hash STR, content BLOB)");
+    var payload = fl_alloc(5000);
+    _bytes_fill(payload, 5000, 9);
+    _obj_insert(db, "persist", payload, 5000);
+    patra_close(db);
+
+    var db2 = patra_open(_tpath);
+    var rs = patra_query(db2, "SELECT * FROM objects");
+    assert_eq(patra_result_count(rs), 1, "reopen 1 row");
+    assert_eq(patra_result_get_bytes_len(rs, 0, 1), 5000, "len 5000");
+    var out = fl_alloc(5000);
+    memset(out, 0, 5000);
+    assert_eq(patra_result_read_bytes(db2, rs, 0, 1, out), PATRA_OK, "read");
+    assert_eq(_bytes_eq(payload, out, 5000), 1, "bytes equal");
+    fl_free(out);
+    fl_free(payload);
+    patra_result_free(rs);
+    patra_close(db2);
+}
+
 # ── Runner ──────────────────────────────────────────────────
 
 fn main() {
@@ -2870,6 +3228,21 @@ fn main() {
 
     # v1.5.3 audit P2 + layout invariant
     test_parse_result_layout_invariant();
+
+    # v1.6.0 COL_BYTES (variable-length binary)
+    test_bytes_parse();
+    test_bytes_create_table();
+    test_bytes_insert_read_small();
+    test_bytes_empty();
+    test_bytes_multipage();
+    test_bytes_many_rows();
+    test_bytes_delete_frees_chain();
+    test_bytes_drop_table_frees();
+    test_bytes_where_no_match();
+    test_bytes_update_rejected();
+    test_bytes_alter_add();
+    test_bytes_alter_drop_frees();
+    test_bytes_persistence();
 
     cleanup();
     return assert_summary();

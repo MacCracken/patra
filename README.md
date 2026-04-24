@@ -95,9 +95,10 @@ ALTER TABLE name ADD COLUMN col INT
 ALTER TABLE name DROP COLUMN col
 ALTER TABLE name RENAME TO new_name
 ALTER TABLE name RENAME COLUMN old TO new
+CREATE TABLE objects (hash STR, content BYTES)
 ```
 
-All values are i64 or fixed-length strings (256 bytes max). No blobs. No floating point. Matches Cyrius's type system.
+Column types are `INT` (i64), `STR` (256-byte fixed), and `BYTES` (variable-length binary, chain-page-backed; `BLOB` accepted as alias). No floating point. `BYTES` columns are write/read only — SQL `INSERT`/`UPDATE` and `WHERE` don't apply; use the `patra_insert_row` / `patra_result_read_bytes` programmatic API.
 
 ## Build
 

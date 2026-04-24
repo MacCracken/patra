@@ -1,0 +1,106 @@
+# blob.cyr — variable-length binary column storage
+#
+# A BLOB value is written as a chain of PAGE_BYTES pages:
+#   [BY_TYPE=PAGE_BYTES : 8][BY_LEN : 8][BY_NEXT : 8][BY_DATA : 4072]
+# BY_LEN is the payload byte count *in this page* (not total). The total
+# length lives in the row's 16-byte blob ref as (first_page, length).
+# Chain pages are allocated through page_alloc (so WAL & free list apply).
+
+# Write `len` bytes from `ptr` as a chain of blob pages. Returns the first
+# page number (0 for an empty blob). Allocates bottom-up so the final page
+# is written first, and the returned page is the head of the chain.
+fn _bytes_write_chain(fd, hdr, ptr, len) {
+    if (len <= 0) { return 0; }
+    if (ptr == 0) { return 0; }
+
+    # Count pages needed, ceiling-div
+    var full = len / BY_DATA_MAX;
+    var rem  = len - full * BY_DATA_MAX;
+    var npages = full;
+    if (rem > 0) { npages = npages + 1; }
+
+    var buf = fl_alloc(PAGE_SIZE);
+    var next_pg = 0;
+
+    # Emit the tail page first; walk backward to the head
+    for (var i = npages - 1; i >= 0; i = i - 1) {
+        memset(buf, 0, PAGE_SIZE);
+        store64(buf + BY_TYPE, PAGE_BYTES);
+
+        var off = i * BY_DATA_MAX;
+        var chunk = BY_DATA_MAX;
+        var tail = len - off;
+        if (tail < chunk) { chunk = tail; }
+
+        store64(buf + BY_LEN, chunk);
+        store64(buf + BY_NEXT, next_pg);
+        memcpy(buf + BY_DATA, ptr + off, chunk);
+
+        var this_pg = page_alloc(fd, hdr);
+        page_write(fd, this_pg, buf);
+        next_pg = this_pg;
+    }
+    fl_free(buf);
+    return next_pg;
+}
+
+# Read `len` bytes of blob from the chain starting at `first_page` into
+# `out`. Returns PATRA_OK on success, PATRA_ERR_PAGE on a malformed chain.
+fn _bytes_read_chain(fd, hdr, first_page, len, out) {
+    if (len <= 0) { return PATRA_OK; }
+    if (first_page == 0) { return PATRA_ERR_PAGE; }
+
+    var buf = fl_alloc(PAGE_SIZE);
+    var cur = first_page;
+    var copied = 0;
+
+    while (cur != 0) {
+        if (page_read_checked(fd, hdr, cur, buf) != PATRA_OK) {
+            fl_free(buf);
+            return PATRA_ERR_PAGE;
+        }
+        if (load64(buf + BY_TYPE) != PAGE_BYTES) {
+            fl_free(buf);
+            return PATRA_ERR_PAGE;
+        }
+        var chunk = load64(buf + BY_LEN);
+        if (chunk < 0) { fl_free(buf); return PATRA_ERR_PAGE; }
+        if (chunk > BY_DATA_MAX) { fl_free(buf); return PATRA_ERR_PAGE; }
+        if (copied + chunk > len) { chunk = len - copied; }
+        memcpy(out + copied, buf + BY_DATA, chunk);
+        copied = copied + chunk;
+        if (copied >= len) { cur = 0; }
+        else { cur = load64(buf + BY_NEXT); }
+    }
+
+    fl_free(buf);
+    if (copied != len) { return PATRA_ERR_PAGE; }
+    return PATRA_OK;
+}
+
+# Free every page in the blob chain starting at `first_page`. Safe on a
+# zero head (no-op). On a malformed chain it stops at the first bad hop
+# and leaks the remainder — matches page_free_all's fail-safe behavior.
+fn _bytes_free_chain(fd, hdr, first_page) {
+    if (first_page == 0) { return 0; }
+
+    var buf = fl_alloc(PAGE_SIZE);
+    var cur = first_page;
+
+    while (cur != 0) {
+        if (page_read_checked(fd, hdr, cur, buf) != PATRA_OK) {
+            fl_free(buf);
+            return PATRA_ERR_PAGE;
+        }
+        if (load64(buf + BY_TYPE) != PAGE_BYTES) {
+            fl_free(buf);
+            return PATRA_ERR_PAGE;
+        }
+        var nx = load64(buf + BY_NEXT);
+        page_free(fd, hdr, cur);
+        cur = nx;
+    }
+
+    fl_free(buf);
+    return PATRA_OK;
+}

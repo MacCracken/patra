@@ -53,6 +53,7 @@ enum TokType {
     TK_COLUMN = 47;
     TK_RENAME = 48;
     TK_TO = 49;
+    TK_KW_BYTES = 50;
 }
 
 enum StmtType {
@@ -228,6 +229,10 @@ fn _classify_ident(ptr, len) {
     if (_kw_eq(ptr, len, "FROM"))   { return TK_FROM; }
     if (_kw_eq(ptr, len, "INT"))    { return TK_KW_INT; }
     if (_kw_eq(ptr, len, "STR"))    { return TK_KW_STR; }
+    # BYTES is the canonical column-type keyword. BLOB is accepted as a
+    # case-insensitive alias so habitual "BLOB" spellings still parse.
+    if (_kw_eq(ptr, len, "BYTES"))  { return TK_KW_BYTES; }
+    if (_kw_eq(ptr, len, "BLOB"))   { return TK_KW_BYTES; }
     if (_kw_eq(ptr, len, "WHERE"))  { return TK_WHERE; }
     if (_kw_eq(ptr, len, "AND"))    { return TK_AND; }
     if (_kw_eq(ptr, len, "OR"))     { return TK_OR; }
@@ -495,8 +500,9 @@ fn _parse_create() {
         pos = pos + 1;
 
         tt = _tok_type(pos);
-        if (tt == TK_KW_INT)      { store64(item + CR_TYPE, COL_INT); }
-        elif (tt == TK_KW_STR)    { store64(item + CR_TYPE, COL_STR); }
+        if (tt == TK_KW_INT)       { store64(item + CR_TYPE, COL_INT); }
+        elif (tt == TK_KW_STR)     { store64(item + CR_TYPE, COL_STR); }
+        elif (tt == TK_KW_BYTES)    { store64(item + CR_TYPE, COL_BYTES); }
         else { return PATRA_ERR_SYNTAX; }
         pos = pos + 1;
 
@@ -820,8 +826,9 @@ fn _parse_alter() {
         store64(item + CR_NLEN, _tok_len(pos));
         pos = pos + 1;
         var tt = _tok_type(pos);
-        if (tt == TK_KW_INT)   { store64(item + CR_TYPE, COL_INT); }
-        elif (tt == TK_KW_STR) { store64(item + CR_TYPE, COL_STR); }
+        if (tt == TK_KW_INT)    { store64(item + CR_TYPE, COL_INT); }
+        elif (tt == TK_KW_STR)  { store64(item + CR_TYPE, COL_STR); }
+        elif (tt == TK_KW_BYTES) { store64(item + CR_TYPE, COL_BYTES); }
         else { return PATRA_ERR_SYNTAX; }
         store64(_sql_pr + PR_STMT, STMT_ALTER_ADD);
         return PATRA_OK;

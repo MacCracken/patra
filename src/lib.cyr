@@ -21,6 +21,7 @@ include "src/file.cyr"
 include "src/wal.cyr"
 include "src/page.cyr"
 include "src/row.cyr"
+include "src/bytes.cyr"
 include "src/sql.cyr"
 include "src/where.cyr"
 include "src/btree.cyr"
@@ -579,14 +580,18 @@ fn _exec_alter_drop_col(db) {
         return PATRA_ERR_NOTFOUND;
     }
 
+    var dctype = load64(schema + SCH_START + di * SCH_ENTRY_SZ + SCH_CTYPE);
     var rsz_old = row_compute_size(schema, ncols_old);
     var drop_off = row_field_offset(schema, ncols_old, di);
-    var drop_sz = row_col_size(load64(schema + SCH_START + di * SCH_ENTRY_SZ + SCH_CTYPE));
+    var drop_sz = row_col_size(dctype);
     var rsz_new = rsz_old - drop_sz;
     var post_sz = rsz_old - drop_off - drop_sz;
     var nrows = load64(entry + TBL_NROWS);
 
-    # Stage rows: copy pre-drop bytes then post-drop bytes
+    # Stage rows: copy pre-drop bytes then post-drop bytes. If the dropped
+    # column is a BLOB, free each row's chain first — those pages become
+    # orphans otherwise. Surviving BLOB columns keep their chains untouched;
+    # the ref bytes (page, length) are preserved by the memcpy-around-drop.
     var scratch = 0;
     if (nrows > 0) {
         scratch = fl_alloc(nrows * rsz_new);
@@ -600,6 +605,10 @@ fn _exec_alter_drop_col(db) {
         var pn = load64(buf + DP_NROWS);
         for (var i = 0; i < pn; i = i + 1) {
             var src = buf + DP_DATA + i * rsz_old;
+            if (dctype == COL_BYTES) {
+                var dr_pg = row_read_bytes_page(src, drop_off);
+                if (dr_pg != 0) { _bytes_free_chain(fd, hdr, dr_pg); }
+            }
             var dst = scratch + written * rsz_new;
             if (drop_off > 0) { memcpy(dst, src, drop_off); }
             if (post_sz > 0) {
@@ -780,7 +789,7 @@ fn _exec_create_index(db) {
 
 # Begin an explicit transaction (lock + WAL)
 fn patra_begin(db) {
-    if (load64(db + DB_TX) != 0) { return PATRA_OK; }
+    if (load64(db + DB_TX)) { return PATRA_OK; }
     var fd = _db_fd(db);
     var wpath = load64(db + DB_PATH);
     patra_lock_ex(fd);
@@ -857,8 +866,10 @@ fn _rs_field_off(rs, col) {
     var types = load64(rs + RS_TYPES);
     var off = 0;
     for (var i = 0; i < col; i = i + 1) {
-        if (load64(types + i * 8) == COL_INT) { off = off + COL_INT_SZ; }
-        else { off = off + COL_STR_SZ; }
+        var t = load64(types + i * 8);
+        if (t == COL_INT)       { off = off + COL_INT_SZ; }
+        elif (t == COL_BYTES)    { off = off + COL_BYTES_SZ; }
+        else                    { off = off + COL_STR_SZ; }
     }
     return off;
 }
@@ -1283,8 +1294,126 @@ fn patra_result_col_type(rs, col) {
     return load64(types + col * 8);
 }
 
+# Get column type at index (COL_INT or COL_STR)
+# Length of a BLOB value at (row, col). Returns -1 if the column isn't BLOB.
+fn patra_result_get_bytes_len(rs, row, col) {
+    var types = load64(rs + RS_TYPES);
+    if (load64(types + col * 8) != COL_BYTES) { return 0 - 1; }
+    var data = load64(rs + RS_DATA);
+    var rsz = load64(rs + RS_ROWSZ);
+    return load64(data + row * rsz + _rs_field_off(rs, col) + BR_LEN);
+}
+
+# Read a BLOB column's payload into `out` (caller-allocated, must be at
+# least `patra_result_get_bytes_len(rs, row, col)` bytes). Returns PATRA_OK,
+# PATRA_ERR_TYPE for non-BLOB columns, or PATRA_ERR_PAGE on a malformed
+# chain. The empty blob (length 0) returns PATRA_OK with no bytes read.
+fn patra_result_read_bytes(db, rs, row, col, out) {
+    var types = load64(rs + RS_TYPES);
+    if (load64(types + col * 8) != COL_BYTES) { return PATRA_ERR_TYPE; }
+    var data = load64(rs + RS_DATA);
+    var rsz = load64(rs + RS_ROWSZ);
+    var ref = data + row * rsz + _rs_field_off(rs, col);
+    var first_pg = load64(ref + BR_PAGE);
+    var blen = load64(ref + BR_LEN);
+    if (blen <= 0) { return PATRA_OK; }
+    if (first_pg == 0) { return PATRA_ERR_PAGE; }
+    return _bytes_read_chain(_db_fd(db), _db_hdr(db), first_pg, blen, out);
+}
+
 # Free result set and all buffers
 fn patra_result_free(rs) {
     if (rs != 0) { fl_free(rs); }
     return 0;
+}
+
+# ── Programmatic insert with BLOB support ───────────────────
+#
+# patra_insert_row is the only way to write rows containing BLOB columns;
+# SQL INSERT/UPDATE can't carry binary payloads. For a schema with N
+# columns, pass type-specific values via parallel arrays, each indexed
+# 0..N-1. For column `i`, the populated slot depends on `types[i]`:
+#   COL_INT  → ivals[i]
+#   COL_STR  → sptrs[i] + slens[i] (byte buffer + length)
+#   COL_BYTES → bptrs[i] + blens[i] (binary buffer + length; empty if 0)
+# Arrays whose slots aren't consulted can be 0 (null). Returns PATRA_OK,
+# PATRA_ERR_NOTFOUND, PATRA_ERR_COLCOUNT, or PATRA_ERR_TYPE.
+fn patra_insert_row(db, tname, tnlen, ncols, types, ivals, sptrs, slens, bptrs, blens) {
+    var fd = _db_fd(db);
+    var hdr = _db_hdr(db);
+
+    patra_lock_ex(fd);
+    patra_hdr_read(fd, hdr);
+
+    var idx = tbl_find(hdr, tname, tnlen);
+    if (idx < 0) { patra_unlock(fd); return PATRA_ERR_NOTFOUND; }
+
+    var entry = _tbl_entry(hdr, idx);
+    var spg = load64(entry + TBL_SCHEMA);
+    var schema = fl_alloc(PAGE_SIZE);
+    page_read(fd, spg, schema);
+
+    var scols = load64(schema + SCH_NCOLS);
+    if (ncols != scols) {
+        fl_free(schema); patra_unlock(fd); return PATRA_ERR_COLCOUNT;
+    }
+
+    # Type-match every column before we write anything on disk
+    for (var i = 0; i < ncols; i = i + 1) {
+        var ctype = load64(schema + SCH_START + i * SCH_ENTRY_SZ + SCH_CTYPE);
+        var vtype = load64(types + i * 8);
+        if (vtype != ctype) {
+            fl_free(schema); patra_unlock(fd); return PATRA_ERR_TYPE;
+        }
+    }
+
+    var rsz = row_compute_size(schema, scols);
+    var row = fl_alloc(rsz);
+    memset(row, 0, rsz);
+
+    # Write the row. BLOB payloads write their chains here; if the insert
+    # fails after any chain has been laid down, those pages will orphan.
+    # Consumers should treat patra_insert_row as atomic at the row level
+    # only — failure after the first BLOB chain leaks pages until the next
+    # VACUUM-ish cleanup lands.
+    for (var j = 0; j < ncols; j = j + 1) {
+        var ctj = load64(schema + SCH_START + j * SCH_ENTRY_SZ + SCH_CTYPE);
+        var off = row_field_offset(schema, scols, j);
+        if (ctj == COL_INT) {
+            row_write_int(row, off, load64(ivals + j * 8));
+        } elif (ctj == COL_STR) {
+            row_write_str(row, off, load64(sptrs + j * 8), load64(slens + j * 8));
+        } else {
+            var bp = load64(bptrs + j * 8);
+            var bl = load64(blens + j * 8);
+            var head = _bytes_write_chain(fd, hdr, bp, bl);
+            row_write_bytes_ref(row, off, head, bl);
+        }
+    }
+
+    var r = tbl_insert(fd, hdr, idx, row, rsz);
+
+    if (r == PATRA_OK) {
+        var ic = load64(schema + SCH_IDX_COL);
+        if (ic >= 0) {
+            if (ic < scols) {
+                var ir = load64(schema + SCH_IDX_ROOT);
+                if (ir != 0) {
+                    var ikey = row_read_int(row, row_field_offset(schema, scols, ic));
+                    var nr = btree_insert(fd, hdr, ir, ikey, _tbl_last_ref);
+                    if (nr != ir) {
+                        store64(schema + SCH_IDX_ROOT, nr);
+                        page_write(fd, spg, schema);
+                    }
+                }
+            }
+        }
+    }
+
+    fl_free(row);
+    fl_free(schema);
+
+    if (r == PATRA_OK) { patra_hdr_write(fd, hdr); }
+    patra_unlock(fd);
+    return r;
 }

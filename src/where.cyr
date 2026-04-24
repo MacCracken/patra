@@ -146,12 +146,14 @@ fn where_eval(row, schema, ncols, pr) {
             if (val_type == COL_INT) {
                 hit = _cmp_int(row_read_int(row, off), load64(cond + WH_INT_VAL), cmp);
             }
-        } else {
+        } elif (col_type == COL_STR) {
             if (val_type == COL_STR) {
                 hit = _cmp_str(row_read_str(row, off),
                 load64(cond + WH_STR_PTR), load64(cond + WH_STR_LEN), cmp);
             }
         }
+        # COL_BYTES: WHERE never matches — variable-length binary isn't
+        # comparable via = / LIKE / ordered ops. Filter in application code.
 
         if (join == WH_AND) {
             if (hit == 0) { result = 0; }

@@ -33,7 +33,34 @@ Data page (JSON Lines mode):
   [0-1]    Page type (3=jsonl)
   [2-3]    Entry count
   [4+]     Newline-delimited JSON entries
+
+Bytes chain page (PAGE_BYTES = 4):
+  [0-7]    Page type
+  [8-15]   Payload length in *this* page (BY_DATA_MAX = 4072 max)
+  [16-23]  Next chain page (0 = end)
+  [24+]    Payload bytes
 ```
+
+## BYTES columns
+
+Variable-length binary column (`COL_BYTES`). The row field is 16 bytes —
+`(first_page, length)` — and the payload lives in a chain of `PAGE_BYTES`
+pages. `length` is the total payload, not per-page; a row ref of
+`(0, 0)` is an empty blob with no pages allocated.
+
+- **Write**: `_bytes_write_chain` emits the chain tail-first so the
+  returned page is the head. Each page is WAL-logged like any other.
+- **Read**: `_bytes_read_chain` walks the chain through
+  `page_read_checked` (bounds-checks) and verifies each page's
+  `BY_TYPE` marker; rejects a chain with oversized or negative
+  per-page length.
+- **Free**: `_bytes_free_chain` walks and releases each page onto the
+  free list. Invoked on DELETE, DROP TABLE, and ALTER TABLE DROP
+  COLUMN (when the dropped column is BYTES).
+- **Consumer API**: `patra_insert_row` (binds `bptrs[]` + `blens[]`)
+  and `patra_result_read_bytes(db, rs, row, col, out)`. SQL
+  INSERT/UPDATE reject BYTES columns (`PATRA_ERR_TYPE`); SQL WHERE on
+  BYTES never matches — filter in application code.
 
 ## B-tree
 

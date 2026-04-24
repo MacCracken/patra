@@ -5,6 +5,79 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-04-23
+
+`COL_BYTES`: variable-length binary column. Motivated by [sit](https://github.com/MacCracken/sit)
+(sovereign version control) migrating its object store from loose files
+on disk to patra-backed tables. Unblocks atomic blob+tree+commit through
+patra's WAL — previously split between patra (refs) and loose files
+(object bodies), which meant `sit commit` couldn't land atomically.
+
+### Added
+- **`COL_BYTES` column type** — variable-length binary payloads, no
+  per-value cap beyond the chain-page overflow scheme. Stored as a
+  16-byte `(first_page, length)` row ref pointing at a chain of
+  `PAGE_BYTES` pages (`BY_DATA_MAX = 4072` bytes per page). Row ref of
+  `(0, 0)` is an empty blob — no pages allocated.
+- **`src/bytes.cyr`** — new module with `_bytes_write_chain` (emits the
+  chain tail-first so the returned page is the head), `_bytes_read_chain`
+  (bounds-checks every page through `page_read_checked` + `PAGE_BYTES`
+  type marker), and `_bytes_free_chain` (walks the chain, frees each
+  page onto the free list).
+- **`patra_insert_row`** — programmatic insert API with parallel arrays
+  indexed 0..ncols-1. Per-column slot selection by `types[i]`: COL_INT
+  uses `ivals[i]`, COL_STR uses `sptrs[i]/slens[i]`, COL_BYTES uses
+  `bptrs[i]/blens[i]`. The only path that writes BYTES — SQL `INSERT`
+  can't carry binary through the tokenizer.
+- **`patra_result_get_bytes_len(rs, row, col)`** and
+  **`patra_result_read_bytes(db, rs, row, col, out)`** — read-path API.
+  Caller allocates `out` sized to the declared length; the read walks
+  the chain once.
+- **SQL `BYTES` keyword** in `CREATE TABLE ... (col BYTES)`. `BLOB` is
+  accepted as a case-insensitive legacy alias so habitual spellings
+  still parse to the canonical `COL_BYTES` token.
+- **Chain cleanup on DELETE, DROP TABLE, ALTER TABLE DROP COLUMN** —
+  when a row with a BYTES column is removed (or the BYTES column
+  itself is dropped), every chain page is released onto the free list.
+  Non-BYTES tables skip the per-row chain scan via
+  `_tbl_has_bytes` guard.
+- **62 new tests** (475 → 537), covering: `CREATE TABLE` with BYTES,
+  round-trip of small / empty / multi-page (10 000 bytes, 3 chain
+  pages) blobs, 20-row iteration, DELETE frees chains, DROP TABLE +
+  reclaim via free list, SQL INSERT/UPDATE rejected on BYTES columns,
+  WHERE on BYTES never matches (by design), ALTER ADD COLUMN BYTES
+  defaults to empty `(0, 0)`, ALTER DROP COLUMN BYTES frees chains,
+  persistence across close/reopen.
+- **`fuzz_bytes.fcyr`** — 5 mutations on the head chain page (bad
+  `BY_TYPE`, oversized `BY_LEN`, self-cycle via `BY_NEXT`,
+  out-of-file `BY_NEXT`, negative `BY_LEN`). All return cleanly.
+- **Benchmarks** — `bytes_insert_2kb` (~40µs) and `bytes_read_2kb`
+  (~6µs) added to the bench suite.
+
+### Changed
+- **Cyrius toolchain pin raised** from `5.5.27` to `5.6.21`. (Development
+  briefly pinned to `5.6.19` with a defensive `!= 0` sweep around a
+  5.6.x truthy-test-on-fn-call codegen regression; cyrius 5.6.21 shipped
+  the fix and the workaround was reverted before tag.)
+- **WHERE on BYTES columns is a no-match by design.** Variable-length
+  binary isn't meaningfully comparable via `=` / `LIKE` / ordered ops;
+  sit's workflow keys off a sibling `hash STR` column.
+
+### Not Added
+- **Compression** — sankoch is the compression layer; sit pre-compresses
+  its objects. Patra stores bytes verbatim.
+- **Streaming / chunked reads** — v1 is "read whole value into caller
+  buffer". Chunked reads are a later refinement if a consumer needs them.
+- **B-tree indexing on BYTES** — lookup goes through a sibling STR
+  column (e.g. `hash STR` → `content BYTES`). No index on the bytes.
+
+### File format
+- `.patra` on-disk format is unchanged in structure. `COL_BYTES = 2`
+  and `PAGE_BYTES = 4` are new values in existing enum slots. Databases
+  written before 1.6.0 stay readable with no migration; databases with
+  BYTES columns are **not** back-compatible with 1.5.x (earlier
+  versions would mis-interpret the column type).
+
 ## [1.5.5] - 2026-04-21
 
 Switch bundle generation from the ad-hoc `scripts/bundle.sh` shell

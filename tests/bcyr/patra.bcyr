@@ -401,6 +401,62 @@ fn main() {
     patra_close(_bdb);
     _bcleanup();
 
+    # --- BYTES write/read ---
+
+    _bcleanup();
+    _bdb = patra_open(_bpath);
+    patra_exec(_bdb, "CREATE TABLE bobj (hash STR, content BYTES)");
+
+    var payload_sz = 2048;  # single chain page (< BY_DATA_MAX)
+    var payload = fl_alloc(payload_sz);
+    for (var pi = 0; pi < payload_sz; pi = pi + 1) { store8(payload + pi, pi & 255); }
+
+    var bwt_types = fl_alloc(16);
+    var bwt_ivals = fl_alloc(16);
+    var bwt_sptrs = fl_alloc(16);
+    var bwt_slens = fl_alloc(16);
+    var bwt_bptrs = fl_alloc(16);
+    var bwt_blens = fl_alloc(16);
+    memset(bwt_ivals, 0, 16); memset(bwt_sptrs, 0, 16); memset(bwt_slens, 0, 16);
+    memset(bwt_bptrs, 0, 16); memset(bwt_blens, 0, 16);
+    store64(bwt_types + 0, COL_STR);
+    store64(bwt_sptrs + 0, "h");
+    store64(bwt_slens + 0, 1);
+    store64(bwt_types + 8, COL_BYTES);
+    store64(bwt_bptrs + 8, payload);
+    store64(bwt_blens + 8, payload_sz);
+
+    var b_bw = bench_new("bytes_insert_2kb");
+    var bwi = 0;
+    while (bwi < 500) {
+        bench_batch_start(b_bw);
+        patra_insert_row(_bdb, "bobj", 4, 2, bwt_types, bwt_ivals,
+                         bwt_sptrs, bwt_slens, bwt_bptrs, bwt_blens);
+        bench_batch_stop(b_bw, 1);
+        bwi = bwi + 1;
+    }
+    vec_push(benches, b_bw);
+
+    var b_br = bench_new("bytes_read_2kb");
+    var rsb = patra_query(_bdb, "SELECT * FROM bobj");
+    var br_out = fl_alloc(payload_sz);
+    var bri = 0;
+    while (bri < 500) {
+        bench_batch_start(b_br);
+        patra_result_read_bytes(_bdb, rsb, bri, 1, br_out);
+        bench_batch_stop(b_br, 1);
+        bri = bri + 1;
+    }
+    vec_push(benches, b_br);
+    fl_free(br_out);
+    patra_result_free(rsb);
+
+    fl_free(bwt_types); fl_free(bwt_ivals); fl_free(bwt_sptrs);
+    fl_free(bwt_slens); fl_free(bwt_bptrs); fl_free(bwt_blens);
+    fl_free(payload);
+    patra_close(_bdb);
+    _bcleanup();
+
     bench_report_all(benches);
     return 0;
 }
