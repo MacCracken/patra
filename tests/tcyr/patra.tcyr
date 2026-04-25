@@ -3065,6 +3065,114 @@ fn test_bytes_persistence() {
     patra_close(db2);
 }
 
+fn test_sync_mode_default_full() {
+    test_group("sync mode default FULL");
+    cleanup();
+    var db = patra_open(_tpath);
+    assert_eq(patra_get_sync_mode(db), PATRA_SYNC_FULL, "default FULL");
+    patra_close(db);
+}
+
+fn test_sync_mode_batch_visibility() {
+    test_group("BATCH mode same-process visibility");
+    # In BATCH mode the writes aren't fsync'd per exec, but they're still
+    # in OS page cache + addressable through this fd, so SELECTs see them.
+    # Crash-durability isn't asserted here — that needs OS-level coordination
+    # we can't run inside the test binary.
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_set_sync_mode(db, PATRA_SYNC_BATCH);
+    patra_exec(db, "CREATE TABLE t (id INT, val STR)");
+    for (var i = 0; i < 10; i = i + 1) {
+        patra_exec(db, "INSERT INTO t VALUES (1, 'x')");
+    }
+    var rs = patra_query(db, "SELECT * FROM t");
+    assert_eq(patra_result_count(rs), 10, "all 10 visible same process");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_sync_mode_flush_explicit() {
+    test_group("explicit patra_flush clears pending");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_set_sync_mode(db, PATRA_SYNC_BATCH);
+    patra_exec(db, "CREATE TABLE t (id INT)");
+    patra_exec(db, "INSERT INTO t VALUES (1)");
+    patra_exec(db, "INSERT INTO t VALUES (2)");
+    # Flush forces the fdatasync; should be idempotent.
+    assert_eq(patra_flush(db), PATRA_OK, "flush ok");
+    assert_eq(patra_flush(db), PATRA_OK, "flush idempotent");
+    var rs = patra_query(db, "SELECT * FROM t");
+    assert_eq(patra_result_count(rs), 2, "both rows after flush");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_sync_mode_close_flushes() {
+    test_group("patra_close flushes pending");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_set_sync_mode(db, PATRA_SYNC_BATCH);
+    patra_exec(db, "CREATE TABLE t (id INT)");
+    patra_exec(db, "INSERT INTO t VALUES (42)");
+    # Close without explicit flush — must not lose data.
+    patra_close(db);
+
+    var db2 = patra_open(_tpath);
+    var rs = patra_query(db2, "SELECT * FROM t");
+    assert_eq(patra_result_count(rs), 1, "row survives close");
+    assert_eq(patra_result_get_int(rs, 0, 0), 42, "right val");
+    patra_result_free(rs);
+    patra_close(db2);
+}
+
+fn test_sync_mode_reopen_default() {
+    test_group("sync mode resets to FULL on reopen");
+    # The mode is per-handle, not persisted in the file. Reopening gives
+    # back FULL even if the previous handle was BATCH.
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_set_sync_mode(db, PATRA_SYNC_BATCH);
+    patra_exec(db, "CREATE TABLE t (id INT)");
+    patra_close(db);
+
+    var db2 = patra_open(_tpath);
+    assert_eq(patra_get_sync_mode(db2), PATRA_SYNC_FULL, "reopen → FULL");
+    patra_close(db2);
+}
+
+fn test_sync_mode_switch_flushes() {
+    test_group("set_sync_mode flushes on switch");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (id INT)");
+    patra_set_sync_mode(db, PATRA_SYNC_BATCH);
+    for (var i = 0; i < 5; i = i + 1) { patra_exec(db, "INSERT INTO t VALUES (1)"); }
+    # Switching back to FULL flushes any pending writes.
+    patra_set_sync_mode(db, PATRA_SYNC_FULL);
+    var rs = patra_query(db, "SELECT * FROM t");
+    assert_eq(patra_result_count(rs), 5, "5 rows after mode switch");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_sync_mode_auto_flush_threshold() {
+    test_group("BATCH auto-flush at threshold");
+    # PATRA_BATCH_FLUSH_N is 64. After 70 inserts in BATCH mode the auto-
+    # flush has fired at least once; the data is consistent and reads
+    # correctly afterwards.
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_set_sync_mode(db, PATRA_SYNC_BATCH);
+    patra_exec(db, "CREATE TABLE t (id INT)");
+    for (var i = 0; i < 70; i = i + 1) { patra_exec(db, "INSERT INTO t VALUES (1)"); }
+    var rs = patra_query(db, "SELECT * FROM t");
+    assert_eq(patra_result_count(rs), 70, "70 rows after auto-flush");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
 fn test_str_index_create() {
     test_group("STR index create + select");
     cleanup();
@@ -3537,6 +3645,15 @@ fn main() {
     test_str_index_delete_maintains();
     test_str_index_persistence();
     test_str_index_collision_safety();
+
+    # v1.8.0 group commit / sync mode
+    test_sync_mode_default_full();
+    test_sync_mode_batch_visibility();
+    test_sync_mode_flush_explicit();
+    test_sync_mode_close_flushes();
+    test_sync_mode_reopen_default();
+    test_sync_mode_switch_flushes();
+    test_sync_mode_auto_flush_threshold();
 
     cleanup();
     return assert_summary();

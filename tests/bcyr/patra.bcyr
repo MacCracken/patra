@@ -578,6 +578,42 @@ fn main() {
     patra_close(_bdb);
     _bcleanup();
 
+    # --- Group commit (1.8.0): FULL vs BATCH per-insert cost ---
+    # 500 single-INSERT exec calls (no explicit BEGIN/COMMIT). FULL fdatasyncs
+    # after every call; BATCH defers and auto-flushes every PATRA_BATCH_FLUSH_N
+    # (64) writes plus a final flush on close. Demonstrates the fsync win sit
+    # would inherit on its 300-object clone path.
+    #
+    # NOTE: this bench uses a real-disk path (under the repo) rather than /tmp
+    # (tmpfs), since fdatasync on tmpfs is a no-op and would hide the win.
+    var _gcpath = "./bench_groupcommit.patra";
+    syscall(SYS_UNLINK, _gcpath);
+    _bdb = patra_open(_gcpath);
+    patra_exec(_bdb, "CREATE TABLE gc (val INT)");
+    var b_full = bench_new("insert_500_sync_full");
+    bench_batch_start(b_full);
+    for (var fi = 0; fi < 500; fi = fi + 1) {
+        patra_exec(_bdb, "INSERT INTO gc VALUES (1)");
+    }
+    bench_batch_stop(b_full, 500);
+    vec_push(benches, b_full);
+    patra_close(_bdb);
+    syscall(SYS_UNLINK, _gcpath);
+
+    _bdb = patra_open(_gcpath);
+    patra_exec(_bdb, "CREATE TABLE gc (val INT)");
+    patra_set_sync_mode(_bdb, PATRA_SYNC_BATCH);
+    var b_batch = bench_new("insert_500_sync_batch");
+    bench_batch_start(b_batch);
+    for (var bi2 = 0; bi2 < 500; bi2 = bi2 + 1) {
+        patra_exec(_bdb, "INSERT INTO gc VALUES (1)");
+    }
+    patra_flush(_bdb);
+    bench_batch_stop(b_batch, 500);
+    vec_push(benches, b_batch);
+    patra_close(_bdb);
+    syscall(SYS_UNLINK, _gcpath);
+
     bench_report_all(benches);
     return 0;
 }

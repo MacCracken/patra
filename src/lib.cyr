@@ -30,7 +30,20 @@ include "src/jsonl.cyr"
 
 # ── DB handle (16 bytes) ────────────────────
 
-enum DbOff { DB_FD = 0; DB_HDR = 8; DB_PATH = 16; DB_TX = 24; DB_SZ = 32; }
+enum DbOff {
+    DB_FD = 0; DB_HDR = 8; DB_PATH = 16; DB_TX = 24;
+    DB_SYNC_MODE = 32; DB_BATCH_PENDING = 40;
+    DB_SZ = 48;
+}
+
+# 1.8.0 group-commit modes. FULL = fdatasync after every mutating exec
+# (default; current behavior, durable on every call). BATCH = defer fdatasync
+# and accumulate up to PATRA_BATCH_FLUSH_N pending writes; auto-flush on
+# threshold, on patra_flush(db), or on patra_close(db). Explicit transactions
+# (patra_begin/patra_commit) keep their own durability contract regardless
+# of the mode — commit always fsyncs.
+enum SyncMode { PATRA_SYNC_FULL = 0; PATRA_SYNC_BATCH = 1; }
+enum SyncConst { PATRA_BATCH_FLUSH_N = 64; }
 
 # ── Result set (48 bytes header + inline data) ──────────────
 
@@ -99,13 +112,19 @@ fn patra_open(path) {
     store64(db + DB_HDR, hdr);
     store64(db + DB_PATH, wpath);
     store64(db + DB_TX, 0);
+    store64(db + DB_SYNC_MODE, PATRA_SYNC_FULL);
+    store64(db + DB_BATCH_PENDING, 0);
     return db;
 }
 
-# Close database and free resources
+# Close database and free resources. Always flushes any pending BATCH-mode
+# writes — losing data on close would defeat the durability contract.
 fn patra_close(db) {
     if (db == 0) { return 0; }
     var fd = load64(db + DB_FD);
+    if (load64(db + DB_BATCH_PENDING) != 0) {
+        syscall(SYS_FDATASYNC, fd);
+    }
     fl_free(load64(db + DB_HDR));
     syscall(SYS_CLOSE, fd);
     fl_free(db);
@@ -114,6 +133,47 @@ fn patra_close(db) {
 
 fn _db_fd(db)  { return load64(db + DB_FD); }
 fn _db_hdr(db) { return load64(db + DB_HDR); }
+
+# Switch group-commit mode for this DB handle. Flushes pending writes
+# before the switch so no batch crosses a mode boundary unsynced.
+fn patra_set_sync_mode(db, mode) {
+    if (load64(db + DB_BATCH_PENDING) != 0) {
+        syscall(SYS_FDATASYNC, load64(db + DB_FD));
+        store64(db + DB_BATCH_PENDING, 0);
+    }
+    store64(db + DB_SYNC_MODE, mode);
+    return PATRA_OK;
+}
+
+fn patra_get_sync_mode(db) { return load64(db + DB_SYNC_MODE); }
+
+# Force durability of any pending BATCH-mode writes. No-op in FULL mode.
+fn patra_flush(db) {
+    if (load64(db + DB_BATCH_PENDING) != 0) {
+        syscall(SYS_FDATASYNC, load64(db + DB_FD));
+        store64(db + DB_BATCH_PENDING, 0);
+    }
+    return PATRA_OK;
+}
+
+# Internal: commit the post-mutation header write. FULL mode does the
+# legacy synchronous header-write-with-fdatasync. BATCH mode writes the
+# header without syncing, increments the pending counter, and triggers
+# an auto-flush every PATRA_BATCH_FLUSH_N writes to bound the crash window.
+fn _db_hdr_commit(db, fd, hdr) {
+    if (load64(db + DB_SYNC_MODE) == PATRA_SYNC_BATCH) {
+        var r = patra_hdr_write_nosync(fd, hdr);
+        if (r != PATRA_OK) { return r; }
+        var pending = load64(db + DB_BATCH_PENDING) + 1;
+        if (pending >= PATRA_BATCH_FLUSH_N) {
+            syscall(SYS_FDATASYNC, fd);
+            pending = 0;
+        }
+        store64(db + DB_BATCH_PENDING, pending);
+        return PATRA_OK;
+    }
+    return patra_hdr_write(fd, hdr);
+}
 
 # ── Exec: CREATE TABLE ────────────────────
 
@@ -140,7 +200,7 @@ fn _exec_create(db) {
     fl_free(names);
     fl_free(types);
 
-    if (r == PATRA_OK) { patra_hdr_write(fd, hdr); }
+    if (r == PATRA_OK) { _db_hdr_commit(db, fd, hdr); }
     patra_unlock(fd);
     return r;
 }
@@ -279,7 +339,7 @@ fn _exec_insert(db) {
     fl_free(row);
     fl_free(schema);
 
-    if (r == PATRA_OK) { patra_hdr_write(fd, hdr); }
+    if (r == PATRA_OK) { _db_hdr_commit(db, fd, hdr); }
     patra_unlock(fd);
     return r;
 }
@@ -313,7 +373,7 @@ fn _exec_update(db) {
     # Write schema page if index root may have changed
     if (r == PATRA_OK) {
         page_write(fd, spg, schema);
-        patra_hdr_write(fd, hdr);
+        _db_hdr_commit(db, fd, hdr);
     }
     fl_free(schema);
     patra_unlock(fd);
@@ -347,7 +407,7 @@ fn _exec_delete(db) {
     var r = tbl_delete(fd, hdr, idx, rsz, schema, ncols, _sql_pr);
     fl_free(schema);
 
-    patra_hdr_write(fd, hdr);
+    _db_hdr_commit(db, fd, hdr);
     patra_unlock(fd);
     return r;
 }
@@ -370,7 +430,7 @@ fn _exec_drop(db) {
     }
 
     var r = tbl_drop(fd, hdr, idx);
-    if (r == PATRA_OK) { patra_hdr_write(fd, hdr); }
+    if (r == PATRA_OK) { _db_hdr_commit(db, fd, hdr); }
     patra_unlock(fd);
     return r;
 }
@@ -407,7 +467,7 @@ fn _exec_alter_rename_tbl(db) {
     memcpy(entry + TBL_NAME, new_ptr, nn);
     store8(entry + TBL_NAME + nn, 0);
 
-    patra_hdr_write(fd, hdr);
+    _db_hdr_commit(db, fd, hdr);
     patra_unlock(fd);
     return PATRA_OK;
 }
@@ -588,7 +648,7 @@ fn _exec_alter_add(db) {
     page_write(fd, spg, schema);
     if (nrows > 0) { fl_free(scratch); }
     fl_free(schema);
-    patra_hdr_write(fd, hdr);
+    _db_hdr_commit(db, fd, hdr);
     patra_unlock(fd);
     return PATRA_OK;
 }
@@ -741,7 +801,7 @@ fn _exec_alter_drop_col(db) {
     page_write(fd, spg, schema);
     if (nrows > 0) { fl_free(scratch); }
     fl_free(schema);
-    patra_hdr_write(fd, hdr);
+    _db_hdr_commit(db, fd, hdr);
     patra_unlock(fd);
     return PATRA_OK;
 }
@@ -833,7 +893,7 @@ fn _exec_create_index(db) {
     page_write(fd, spg, schema);
     fl_free(schema);
 
-    patra_hdr_write(fd, hdr);
+    _db_hdr_commit(db, fd, hdr);
     patra_unlock(fd);
     return PATRA_OK;
 }
@@ -1502,7 +1562,7 @@ fn patra_insert_row(db, tname, tnlen, ncols, types, ivals, sptrs, slens, bptrs, 
     fl_free(row);
     fl_free(schema);
 
-    if (r == PATRA_OK) { patra_hdr_write(fd, hdr); }
+    if (r == PATRA_OK) { _db_hdr_commit(db, fd, hdr); }
     patra_unlock(fd);
     return r;
 }

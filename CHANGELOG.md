@@ -5,6 +5,84 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] - 2026-04-24
+
+Group commit / batched fsync. Third and final follow-up from sit's v0.6.4
+perf review — the `clone-100commits` bottleneck is 300 × ~1ms fdatasync
+on the implicit-per-exec path, which an opt-in batch mode collapses by
+flushing once per 64 writes instead of once per write. Drops single-INSERT
+durability cost from ~19.5ms to ~306µs on real-disk btrfs/nvme — about
+**64× faster** for the workload sit hits during clone.
+
+### Added
+- **Per-DB sync mode (`PATRA_SYNC_FULL` / `PATRA_SYNC_BATCH`)** with
+  three new public APIs in `src/lib.cyr`:
+
+  | API                                   | Effect |
+  |---------------------------------------|--------|
+  | `patra_set_sync_mode(db, mode)`       | Switch mode. Flushes pending writes before the switch so no batch crosses a mode boundary unsynced. |
+  | `patra_get_sync_mode(db)`             | Returns the current mode (testing / introspection). |
+  | `patra_flush(db)`                     | Force durability of any pending BATCH-mode writes. No-op in FULL mode. Idempotent. |
+
+  Default mode is `PATRA_SYNC_FULL` (current 1.7.1 behavior — fdatasync
+  after every mutating exec, durable on every call). Mode is per-handle
+  and not persisted in the file, so reopen returns to FULL.
+
+- **`PATRA_BATCH_FLUSH_N = 64`** — auto-flush threshold. After 64
+  un-synced writes the next exec triggers an implicit fdatasync,
+  bounding the worst-case crash window to 64 ops regardless of how
+  long the consumer holds the handle.
+
+- **`_db_hdr_commit(db, fd, hdr)`** internal helper. Every implicit
+  per-exec header write in `_exec_*` and `patra_insert_row` (10 sites
+  in `src/lib.cyr`) now routes through this helper. FULL mode delegates
+  to the legacy `patra_hdr_write` (with fdatasync); BATCH mode calls
+  the new `patra_hdr_write_nosync` (added to `src/file.cyr`) and bumps
+  the pending counter, auto-flushing at threshold. Explicit transactions
+  (`patra_begin`/`patra_commit`) are unchanged — `patra_commit` still
+  fdatasyncs on commit regardless of mode, since the WAL contract
+  requires it.
+
+- **`patra_close(db)` flushes** any pending BATCH-mode writes before
+  releasing the fd. Without this guard a consumer could lose data on a
+  clean shutdown — defeats the durability contract.
+
+- **10 new tests** (585 → 595): default-mode-is-FULL, BATCH same-process
+  visibility, explicit `patra_flush` (incl. idempotence), `patra_close`
+  flushes pending, mode resets to FULL on reopen, switching mode flushes
+  pending, auto-flush threshold (70 writes → consistent reads).
+
+- **2 new benchmarks** (run on a real-disk btrfs/nvme path; `/tmp` is
+  tmpfs where fdatasync is a no-op and the win is invisible):
+
+  | Bench                          | Time / insert |
+  |--------------------------------|---------------|
+  | `insert_500_sync_full`         | 19.483ms      |
+  | `insert_500_sync_batch`        | 306µs         |
+
+  Math checks out: 500 inserts × 1 fdatasync at ~19.5ms = ~10s for
+  FULL; 500 inserts × ~8 fdatasyncs (500/64 + final flush) = ~152ms
+  for BATCH ≈ 306µs/insert amortized.
+
+### Changed
+- **DB struct grew** from 32 to 48 bytes (`DB_SYNC_MODE` at offset 32,
+  `DB_BATCH_PENDING` at offset 40). Internal — no caller-visible
+  effect; consumers only see the new APIs.
+
+### Notes
+- BATCH mode's durability contract: a successful `patra_exec` means
+  the operation is in OS page cache and visible to the same process,
+  but may not survive a crash until the next fdatasync (auto at
+  64-op threshold, on `patra_flush`, on `patra_close`, or on explicit
+  `patra_commit` for the transactional path).
+- BATCH does not weaken `patra_begin`/`patra_commit` — explicit
+  transactions still fsync on commit. The mode only affects the
+  implicit per-exec path that 1.7.0/1.7.1 callers (and sit) hit when
+  not using explicit transactions.
+- Sit's `clone-100commits` workload is exactly the shape this
+  optimizes: many independent INSERTs, no explicit BEGIN/COMMIT,
+  durability acceptable per-batch rather than per-row.
+
 ## [1.7.1] - 2026-04-24
 
 STR-keyed B+ tree indexes — the prerequisite called out in 1.7.0's

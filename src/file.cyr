@@ -122,10 +122,18 @@ fn patra_hdr_read(fd, buf) {
     return PATRA_OK;
 }
 
-# Write header page from buffer to file with fdatasync
-fn patra_hdr_write(fd, buf) {
+# Write header page from buffer to file without fdatasync. Used by the
+# group-commit path (1.8.0) — caller is responsible for syncing later.
+fn patra_hdr_write_nosync(fd, buf) {
     if (_pt_seek(fd, 0) < 0) { return PATRA_ERR_IO; }
     if (syscall(SYS_WRITE, fd, buf, PAGE_SIZE) != PAGE_SIZE) { return PATRA_ERR_IO; }
+    return PATRA_OK;
+}
+
+# Write header page from buffer to file with fdatasync
+fn patra_hdr_write(fd, buf) {
+    var r = patra_hdr_write_nosync(fd, buf);
+    if (r != PATRA_OK) { return r; }
     syscall(SYS_FDATASYNC, fd);
     return PATRA_OK;
 }
