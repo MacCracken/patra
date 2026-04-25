@@ -2,7 +2,7 @@
 
 Forward-looking only. Shipped work lives in [`CHANGELOG.md`](../../CHANGELOG.md); rejected design directions and phase-level summaries live in [`completed-phases.md`](completed-phases.md).
 
-> **Current**: v1.8.0 — group commit / batched fsync. Three follow-ups from sit's v0.6.4 perf review (1.6.1 → 1.7.0 → 1.7.1 → 1.8.0) are now all shipped. Patra serves libro, vidya, daimon, agnoshi, mela, hoosh, and sit.
+> **Current**: v1.8.2 — page slab + word-at-a-time `_memeq256` + prepared statements (`patra_prepare` / `patra_exec_prepared` / `patra_query_prepared` / `patra_finalize`). Repeated INSERT through prepared API ~36% faster than `patra_exec` (14µs vs 22µs). Patra serves libro, vidya, daimon, agnoshi, mela, hoosh, and sit.
 
 ## Driven by consumer needs
 

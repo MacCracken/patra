@@ -37,12 +37,12 @@ var _bt_pdepth = 0;
 # Create empty B-tree (single leaf root), returns page number
 fn btree_create(fd, hdr) {
     var pg = page_alloc(fd, hdr);
-    var buf = fl_alloc(PAGE_SIZE);
+    var buf = pg_alloc();
     memset(buf, 0, PAGE_SIZE);
     store64(buf + BT_TYPE, PAGE_BTREE);
     store64(buf + BT_LEAF, 1);
     page_write(fd, pg, buf);
-    fl_free(buf);
+    pg_free(buf);
     return pg;
 }
 
@@ -51,14 +51,14 @@ fn btree_create(fd, hdr) {
 fn _bt_find_leaf(fd, hdr, root, key) {
     _bt_pdepth = 0;
     var pg = root;
-    var buf = fl_alloc(PAGE_SIZE);
+    var buf = pg_alloc();
     page_read(fd, pg, buf);
 
     while (load64(buf + BT_LEAF) == 0) {
         if (_bt_pdepth >= BT_MAX_DEPTH) {
             # Depth cap reached: malformed tree / cycle → return current page
             # as if it were a leaf. Caller's key-match logic will find nothing.
-            fl_free(buf);
+            pg_free(buf);
             return pg;
         }
         store64(&_bt_path + _bt_pdepth * 8, pg);
@@ -77,13 +77,13 @@ fn _bt_find_leaf(fd, hdr, root, key) {
         }
         pg = load64(buf + BT_VALS + ci * 8);
         if (page_read_checked(fd, hdr, pg, buf) != PATRA_OK) {
-            fl_free(buf);
+            pg_free(buf);
             return root;
         }
     }
     store64(&_bt_path + _bt_pdepth * 8, pg);
     _bt_pdepth = _bt_pdepth + 1;
-    fl_free(buf);
+    pg_free(buf);
     return pg;
 }
 
@@ -147,7 +147,7 @@ fn _bt_push_up(fd, hdr, root, left_pg, sep, right_pg) {
     if (_bt_pdepth <= 1) {
         # left_pg is the root — create new root
         var nr = page_alloc(fd, hdr);
-        var nb = fl_alloc(PAGE_SIZE);
+        var nb = pg_alloc();
         memset(nb, 0, PAGE_SIZE);
         store64(nb + BT_TYPE, PAGE_BTREE);
         store64(nb + BT_LEAF, 0);
@@ -156,19 +156,19 @@ fn _bt_push_up(fd, hdr, root, left_pg, sep, right_pg) {
         store64(nb + BT_VALS, left_pg);
         store64(nb + BT_VALS + 8, right_pg);
         page_write(fd, nr, nb);
-        fl_free(nb);
+        pg_free(nb);
         return nr;
     }
 
     var par_pg = load64(&_bt_path + (_bt_pdepth - 2) * 8);
-    var pb = fl_alloc(PAGE_SIZE);
+    var pb = pg_alloc();
     page_read(fd, par_pg, pb);
     var nk = load64(pb + BT_NKEYS);
 
     if (nk < BT_MAX_KEYS) {
         _bt_int_ins(pb, sep, right_pg);
         page_write(fd, par_pg, pb);
-        fl_free(pb);
+        pg_free(pb);
         return root;
     }
 
@@ -242,7 +242,7 @@ fn _bt_push_up(fd, hdr, root, left_pg, sep, right_pg) {
 
     fl_free(tk);
     fl_free(tc);
-    fl_free(pb);
+    pg_free(pb);
 
     _bt_pdepth = _bt_pdepth - 1;
     return _bt_push_up(fd, hdr, root, par_pg, mid_key, rpg);
@@ -253,14 +253,14 @@ fn _bt_push_up(fd, hdr, root, left_pg, sep, right_pg) {
 # Insert key-value into B-tree, returns (possibly new) root
 fn btree_insert(fd, hdr, root, key, val) {
     var leaf_pg = _bt_find_leaf(fd, hdr, root, key);
-    var buf = fl_alloc(PAGE_SIZE);
+    var buf = pg_alloc();
     page_read(fd, leaf_pg, buf);
     var nk = load64(buf + BT_NKEYS);
 
     if (nk < BT_MAX_KEYS) {
         _bt_leaf_ins(buf, key, val);
         page_write(fd, leaf_pg, buf);
-        fl_free(buf);
+        pg_free(buf);
         return root;
     }
 
@@ -314,7 +314,7 @@ fn btree_insert(fd, hdr, root, key, val) {
 
     fl_free(tk);
     fl_free(tv);
-    fl_free(buf);
+    pg_free(buf);
 
     return _bt_push_up(fd, hdr, root, leaf_pg, sep, rpg);
 }
@@ -336,9 +336,9 @@ fn _bt_range(fd, hdr, root, lo, hi, out, max) {
 
 fn _bt_rwalk(fd, hdr, pg, lo, hi, out, max, cp, depth) {
     if (depth >= BT_MAX_DEPTH) { return 0; }
-    var buf = fl_alloc(PAGE_SIZE);
+    var buf = pg_alloc();
     if (page_read_checked(fd, hdr, pg, buf) != PATRA_OK) {
-        fl_free(buf);
+        pg_free(buf);
         return 0;
     }
     var nk = load64(buf + BT_NKEYS);
@@ -381,7 +381,7 @@ fn _bt_rwalk(fd, hdr, pg, lo, hi, out, max, cp, depth) {
             }
         }
     }
-    fl_free(buf);
+    pg_free(buf);
     return 0;
 }
 
@@ -390,7 +390,7 @@ fn _bt_rwalk(fd, hdr, pg, lo, hi, out, max, cp, depth) {
 # Lazy-delete: invalidate a specific ref for a key
 fn btree_remove_ref(fd, hdr, root, key, ref) {
     var leaf_pg = _bt_find_leaf(fd, hdr, root, key);
-    var buf = fl_alloc(PAGE_SIZE);
+    var buf = pg_alloc();
     page_read(fd, leaf_pg, buf);
     var nk = load64(buf + BT_NKEYS);
     var modified = 0;
@@ -403,7 +403,7 @@ fn btree_remove_ref(fd, hdr, root, key, ref) {
         }
     }
     if (modified != 0) { page_write(fd, leaf_pg, buf); }
-    fl_free(buf);
+    pg_free(buf);
     return 0;
 }
 
@@ -420,14 +420,14 @@ fn btree_free_all(fd, hdr, root) {
 fn _bt_free_walk(fd, hdr, root, depth) {
     if (root == 0) { return 0; }
     if (depth >= BT_MAX_DEPTH) { return 0; }
-    var buf = fl_alloc(PAGE_SIZE);
+    var buf = pg_alloc();
     if (page_read_checked(fd, hdr, root, buf) != PATRA_OK) {
-        fl_free(buf);
+        pg_free(buf);
         return 0;
     }
     var leaf = load64(buf + BT_LEAF);
     if (leaf != 0) {
-        fl_free(buf);
+        pg_free(buf);
         page_free(fd, hdr, root);
         return 0;
     }
@@ -436,7 +436,7 @@ fn _bt_free_walk(fd, hdr, root, depth) {
     for (var i = 0; i <= nk; i = i + 1) {
         _bt_free_walk(fd, hdr, load64(buf + BT_VALS + i * 8), depth + 1);
     }
-    fl_free(buf);
+    pg_free(buf);
     page_free(fd, hdr, root);
     return 0;
 }
@@ -448,7 +448,7 @@ fn _bt_free_walk(fd, hdr, root, depth) {
 # Structural rebalancing (empty-leaf removal) is intentionally out of scope —
 # future inserts into the leaf's key range will refill the slots.
 fn _bt_leaf_compact(fd, pg) {
-    var buf = fl_alloc(PAGE_SIZE);
+    var buf = pg_alloc();
     page_read(fd, pg, buf);
     var nk = load64(buf + BT_NKEYS);
     var kept = 0;
@@ -467,7 +467,7 @@ fn _bt_leaf_compact(fd, pg) {
         store64(buf + BT_NKEYS, kept);
         page_write(fd, pg, buf);
     }
-    fl_free(buf);
+    pg_free(buf);
     return reclaimed;
 }
 
@@ -475,14 +475,14 @@ fn _bt_leaf_compact(fd, pg) {
 # Returns total reclaimed across all leaves.
 fn _bt_compact_walk(fd, hdr, pg, depth) {
     if (depth >= BT_MAX_DEPTH) { return 0; }
-    var buf = fl_alloc(PAGE_SIZE);
+    var buf = pg_alloc();
     if (page_read_checked(fd, hdr, pg, buf) != PATRA_OK) {
-        fl_free(buf);
+        pg_free(buf);
         return 0;
     }
     var leaf = load64(buf + BT_LEAF);
     if (leaf != 0) {
-        fl_free(buf);
+        pg_free(buf);
         return _bt_leaf_compact(fd, pg);
     }
     var nk = load64(buf + BT_NKEYS);
@@ -493,7 +493,7 @@ fn _bt_compact_walk(fd, hdr, pg, depth) {
                                           load64(buf + BT_VALS + i * 8),
                                           depth + 1);
     }
-    fl_free(buf);
+    pg_free(buf);
     return total;
 }
 

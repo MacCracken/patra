@@ -614,6 +614,36 @@ fn main() {
     patra_close(_bdb);
     syscall(SYS_UNLINK, _gcpath);
 
+    # --- Prepared statement (1.8.2): exec_prepared vs exec ---
+    # Same INSERT, 1000 invocations. The prepared path skips tokenize+parse
+    # on every call — saves ~8-10µs per invocation per the parse_insert
+    # bench. tmpfs path so the fdatasync cost doesn't dominate.
+
+    _bcleanup();
+    _bdb = patra_open(_bpath);
+    patra_exec(_bdb, "CREATE TABLE pp (id INT, val STR)");
+
+    var b_pe = bench_new("insert_1k_exec");
+    bench_batch_start(b_pe);
+    for (var pei = 0; pei < 1000; pei = pei + 1) {
+        patra_exec(_bdb, "INSERT INTO pp VALUES (1, 'x')");
+    }
+    bench_batch_stop(b_pe, 1000);
+    vec_push(benches, b_pe);
+
+    var pp_stmt = patra_prepare(_bdb, "INSERT INTO pp VALUES (1, 'x')");
+    var b_pp = bench_new("insert_1k_prepared");
+    bench_batch_start(b_pp);
+    for (var ppi = 0; ppi < 1000; ppi = ppi + 1) {
+        patra_exec_prepared(_bdb, pp_stmt);
+    }
+    bench_batch_stop(b_pp, 1000);
+    vec_push(benches, b_pp);
+    patra_finalize(pp_stmt);
+
+    patra_close(_bdb);
+    _bcleanup();
+
     bench_report_all(benches);
     return 0;
 }

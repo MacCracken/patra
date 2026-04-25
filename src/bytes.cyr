@@ -19,7 +19,7 @@ fn _bytes_write_chain(fd, hdr, ptr, len) {
     var npages = full;
     if (rem > 0) { npages = npages + 1; }
 
-    var buf = fl_alloc(PAGE_SIZE);
+    var buf = pg_alloc();
     var next_pg = 0;
 
     # Emit the tail page first; walk backward to the head
@@ -40,7 +40,7 @@ fn _bytes_write_chain(fd, hdr, ptr, len) {
         page_write(fd, this_pg, buf);
         next_pg = this_pg;
     }
-    fl_free(buf);
+    pg_free(buf);
     return next_pg;
 }
 
@@ -50,22 +50,22 @@ fn _bytes_read_chain(fd, hdr, first_page, len, out) {
     if (len <= 0) { return PATRA_OK; }
     if (first_page == 0) { return PATRA_ERR_PAGE; }
 
-    var buf = fl_alloc(PAGE_SIZE);
+    var buf = pg_alloc();
     var cur = first_page;
     var copied = 0;
 
     while (cur != 0) {
         if (page_read_checked(fd, hdr, cur, buf) != PATRA_OK) {
-            fl_free(buf);
+            pg_free(buf);
             return PATRA_ERR_PAGE;
         }
         if (load64(buf + BY_TYPE) != PAGE_BYTES) {
-            fl_free(buf);
+            pg_free(buf);
             return PATRA_ERR_PAGE;
         }
         var chunk = load64(buf + BY_LEN);
-        if (chunk < 0) { fl_free(buf); return PATRA_ERR_PAGE; }
-        if (chunk > BY_DATA_MAX) { fl_free(buf); return PATRA_ERR_PAGE; }
+        if (chunk < 0) { pg_free(buf); return PATRA_ERR_PAGE; }
+        if (chunk > BY_DATA_MAX) { pg_free(buf); return PATRA_ERR_PAGE; }
         if (copied + chunk > len) { chunk = len - copied; }
         memcpy(out + copied, buf + BY_DATA, chunk);
         copied = copied + chunk;
@@ -73,7 +73,7 @@ fn _bytes_read_chain(fd, hdr, first_page, len, out) {
         else { cur = load64(buf + BY_NEXT); }
     }
 
-    fl_free(buf);
+    pg_free(buf);
     if (copied != len) { return PATRA_ERR_PAGE; }
     return PATRA_OK;
 }
@@ -84,16 +84,16 @@ fn _bytes_read_chain(fd, hdr, first_page, len, out) {
 fn _bytes_free_chain(fd, hdr, first_page) {
     if (first_page == 0) { return 0; }
 
-    var buf = fl_alloc(PAGE_SIZE);
+    var buf = pg_alloc();
     var cur = first_page;
 
     while (cur != 0) {
         if (page_read_checked(fd, hdr, cur, buf) != PATRA_OK) {
-            fl_free(buf);
+            pg_free(buf);
             return PATRA_ERR_PAGE;
         }
         if (load64(buf + BY_TYPE) != PAGE_BYTES) {
-            fl_free(buf);
+            pg_free(buf);
             return PATRA_ERR_PAGE;
         }
         var nx = load64(buf + BY_NEXT);
@@ -101,6 +101,6 @@ fn _bytes_free_chain(fd, hdr, first_page) {
         cur = nx;
     }
 
-    fl_free(buf);
+    pg_free(buf);
     return PATRA_OK;
 }

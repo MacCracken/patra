@@ -175,11 +175,11 @@ enum OpenFlag { O_NOFOLLOW = 131072; }
 fn _pt_file_create(path) {
     var fd = syscall(SYS_OPEN, path, 194 + O_NOFOLLOW, 420);
     if (fd < 0) { return 0 - 1; }
-    var buf = fl_alloc(PAGE_SIZE);
+    var buf = pg_alloc();
     patra_hdr_init(buf);
     _pt_seek(fd, 0);
     var r = syscall(SYS_WRITE, fd, buf, PAGE_SIZE);
-    fl_free(buf);
+    pg_free(buf);
     if (r != PAGE_SIZE) { syscall(SYS_CLOSE, fd); return 0 - 1; }
     return fd;
 }
@@ -187,4 +187,46 @@ fn _pt_file_create(path) {
 # Open existing .patra file (O_RDWR | O_NOFOLLOW). Refuses symlinked targets.
 fn _pt_file_open(path) {
     return syscall(SYS_OPEN, path, 2 + O_NOFOLLOW, 0);
+}
+
+# ── Page slab (4KB buffer pool) ─────────────────────────────
+#
+# Hot paths (page_read/_write callers, btree node walks, schema reads,
+# bytes-chain walks) allocate and free PAGE_SIZE-sized scratch buffers
+# tens of times per `patra_exec`. fl_alloc/fl_free goes through size-class
+# lookup + freelist bookkeeping; a small LIFO stack of pre-allocated
+# 4KB buffers skips both. Cap at PG_SLAB_MAX so a long-running consumer
+# can't accumulate unbounded retained memory; overflows fall back to
+# freelist transparently. Callers must pair pg_alloc / pg_free — slab
+# correctness depends on every pushed buffer being PAGE_SIZE.
+enum SlabConst { PG_SLAB_MAX = 32; }
+var _pg_slab_stack = 0;
+var _pg_slab_top = 0;
+
+fn _pg_slab_init() {
+    if (_pg_slab_stack == 0) {
+        _pg_slab_stack = alloc(PG_SLAB_MAX * 8);
+    }
+    return 0;
+}
+
+fn pg_alloc() {
+    _pg_slab_init();
+    if (_pg_slab_top > 0) {
+        _pg_slab_top = _pg_slab_top - 1;
+        return load64(_pg_slab_stack + _pg_slab_top * 8);
+    }
+    return fl_alloc(PAGE_SIZE);
+}
+
+fn pg_free(buf) {
+    if (buf == 0) { return 0; }
+    _pg_slab_init();
+    if (_pg_slab_top < PG_SLAB_MAX) {
+        store64(_pg_slab_stack + _pg_slab_top * 8, buf);
+        _pg_slab_top = _pg_slab_top + 1;
+        return 0;
+    }
+    fl_free(buf);
+    return 0;
 }

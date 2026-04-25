@@ -70,6 +70,19 @@ fn row_read_bytes_len(row, off) {
     return load64(row + off + BR_LEN);
 }
 
+# Compare two COL_STR_SZ-byte slots word-at-a-time. STR-slot compare is
+# the hot inner loop of the INSERT OR IGNORE STR conflict probe; both
+# slots are guaranteed COL_STR_SZ-aligned (256 / 8 = 32 word loads).
+# Returns 1 if equal, 0 otherwise.
+fn _memeq256(a, b) {
+    var i = 0;
+    while (i < COL_STR_SZ) {
+        if (load64(a + i) != load64(b + i)) { return 0; }
+        i = i + 8;
+    }
+    return 1;
+}
+
 # 64-bit string hash for STR-keyed B-tree indexes. djb2 over the input
 # bytes followed by zero-padding to COL_STR_SZ — so a query-time literal
 # "alice" (len 5) hashes identically to the 256-byte zero-padded slot

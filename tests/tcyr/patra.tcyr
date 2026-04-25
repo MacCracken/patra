@@ -3065,6 +3065,119 @@ fn test_bytes_persistence() {
     patra_close(db2);
 }
 
+fn test_prepare_insert_select() {
+    test_group("prepared INSERT + SELECT");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (id INT, name STR)");
+
+    var ins = patra_prepare(db, "INSERT INTO t VALUES (1, 'alice')");
+    assert(ins != 0, "prepare insert ok");
+    assert_eq(patra_exec_prepared(db, ins), PATRA_OK, "insert run 1");
+    # Re-running the same prepared stmt — same row inserted again.
+    assert_eq(patra_exec_prepared(db, ins), PATRA_OK, "insert run 2");
+    patra_finalize(ins);
+
+    var sel = patra_prepare(db, "SELECT * FROM t");
+    assert(sel != 0, "prepare select ok");
+    var rs = patra_query_prepared(db, sel);
+    assert_eq(patra_result_count(rs), 2, "two rows via prepared select");
+    patra_result_free(rs);
+    patra_finalize(sel);
+    patra_close(db);
+}
+
+fn test_prepare_all_stmt_types() {
+    test_group("prepared dispatch covers DDL/DML");
+    cleanup();
+    var db = patra_open(_tpath);
+    var pc = patra_prepare(db, "CREATE TABLE t (id INT, name STR)");
+    assert_eq(patra_exec_prepared(db, pc), PATRA_OK, "prepared CREATE");
+    patra_finalize(pc);
+
+    var pi = patra_prepare(db, "INSERT INTO t VALUES (1, 'a')");
+    patra_exec_prepared(db, pi);
+    patra_exec_prepared(db, pi);
+    patra_exec_prepared(db, pi);
+    patra_finalize(pi);
+
+    var pu = patra_prepare(db, "UPDATE t SET name = 'b' WHERE id = 1");
+    assert_eq(patra_exec_prepared(db, pu), PATRA_OK, "prepared UPDATE");
+    patra_finalize(pu);
+
+    var pd = patra_prepare(db, "DELETE FROM t WHERE id = 1");
+    assert_eq(patra_exec_prepared(db, pd), PATRA_OK, "prepared DELETE");
+    patra_finalize(pd);
+
+    var rs = patra_query(db, "SELECT * FROM t");
+    assert_eq(patra_result_count(rs), 0, "all rows deleted");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_prepare_syntax_error() {
+    test_group("prepared syntax error returns 0");
+    cleanup();
+    var db = patra_open(_tpath);
+    var bad = patra_prepare(db, "BANANA");
+    assert_eq(bad, 0, "bad SQL → 0 stmt");
+    patra_close(db);
+}
+
+fn test_prepare_owns_sql_buffer() {
+    test_group("prepared stmt owns its SQL");
+    # The stmt copies its SQL on prepare; freeing/overwriting the input
+    # buffer afterwards must not affect later exec_prepared calls.
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (id INT, name STR)");
+
+    var sql = fl_alloc(64);
+    var src = "INSERT INTO t VALUES (7, 'x')";
+    var n = strlen(src);
+    memcpy(sql, src, n);
+    store8(sql + n, 0);
+    var p = patra_prepare(db, sql);
+    # Trash the input — must not break the prepared stmt.
+    memset(sql, 0, 64);
+    fl_free(sql);
+
+    assert_eq(patra_exec_prepared(db, p), PATRA_OK, "exec after input freed");
+    var rs = patra_query(db, "SELECT * FROM t WHERE id = 7");
+    assert_eq(patra_result_count(rs), 1, "row inserted");
+    patra_result_free(rs);
+    patra_finalize(p);
+    patra_close(db);
+}
+
+fn test_prepare_finalize_safe() {
+    test_group("patra_finalize handles 0");
+    assert_eq(patra_finalize(0), 0, "finalize(0) is no-op");
+}
+
+fn test_prepare_str_index() {
+    test_group("prepared INSERT OR IGNORE on STR-indexed");
+    # Exercises the slab + memeq256 + prepared path together — the three
+    # 1.8.2 changes in one workload.
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE objs (hash STR, val INT)");
+    patra_exec(db, "CREATE INDEX ON objs (hash)");
+    patra_exec(db, "INSERT INTO objs VALUES ('first', 1)");
+
+    var p = patra_prepare(db, "INSERT OR IGNORE INTO objs VALUES ('first', 99)");
+    # Run 10 times — every run hits the conflict probe + memeq256 verify.
+    for (var i = 0; i < 10; i = i + 1) {
+        assert_eq(patra_exec_prepared(db, p), PATRA_OK, "ignored");
+    }
+    patra_finalize(p);
+    var rs = patra_query(db, "SELECT * FROM objs");
+    assert_eq(patra_result_count(rs), 1, "still 1 row");
+    assert_eq(patra_result_get_int(rs, 0, 1), 1, "original val preserved");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
 fn test_sync_mode_default_full() {
     test_group("sync mode default FULL");
     cleanup();
@@ -3654,6 +3767,14 @@ fn main() {
     test_sync_mode_reopen_default();
     test_sync_mode_switch_flushes();
     test_sync_mode_auto_flush_threshold();
+
+    # v1.8.2 prepared statements + slab + memeq256
+    test_prepare_insert_select();
+    test_prepare_all_stmt_types();
+    test_prepare_syntax_error();
+    test_prepare_owns_sql_buffer();
+    test_prepare_finalize_safe();
+    test_prepare_str_index();
 
     cleanup();
     return assert_summary();

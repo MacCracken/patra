@@ -7,7 +7,7 @@
 - **Type**: Shared library — database engine for the sovereign stack
 - **License**: GPL-3.0-only
 - **Language**: Cyrius (native)
-- **Version**: 1.8.0
+- **Version**: 1.8.2
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
 
@@ -18,8 +18,8 @@ Own the database. Zero deps. Pure Cyrius. SQL + B-tree + JSONL in a single `incl
 ## Current State
 
 - **Source**: ~4,500 lines across 11 modules
-- **Tests**: 595 assertions, 6 fuzz harnesses, 33 benchmarks
-- **Stable**: 1.8.0 — group commit / batched fsync. New per-DB sync mode (`PATRA_SYNC_FULL` default, `PATRA_SYNC_BATCH` opt-in) with `patra_set_sync_mode` / `patra_flush` / `patra_get_sync_mode`. BATCH defers `fdatasync` per mutating exec, auto-flushes every 64 writes, and always flushes on `patra_close`. ~64× faster on a real-disk btrfs/nvme bench (19.5ms/insert FULL → 306µs/insert BATCH, 500 inserts). Explicit `patra_begin`/`patra_commit` keep their durability contract regardless of mode. 1.7.1 shipped STR-keyed B+ tree indexes via djb2-64 hash + verify-on-hit. 1.7.0 shipped `INSERT OR IGNORE INTO …` SQL (~18× faster than SELECT-then-INSERT workaround on hit). 1.6.1 shipped `patra_result_get_str_len`. 1.6.0 shipped `COL_BYTES` variable-length binary for sit's object store migration: chain-page storage (`BY_DATA_MAX = 4072`), programmatic `patra_insert_row` / `patra_result_read_bytes` API, chain cleanup on DELETE / DROP / ALTER DROP. `BYTES` keyword (canonical) with `BLOB` legacy alias. Cyrius 5.6.21.
+- **Tests**: 620 assertions, 6 fuzz harnesses, 35 benchmarks (full table in `docs/development/BENCHMARKS.md`)
+- **Stable**: 1.8.2 — Three perf optimizations bundled: (1) **4KB page-slab allocator** (`pg_alloc`/`pg_free` in `src/file.cyr`) — LIFO stack of pre-allocated PAGE_SIZE buffers replaces `fl_alloc(PAGE_SIZE)` at ~45 hot sites in btree/bytes/table/lib; cap PG_SLAB_MAX=32 with freelist fallback. (2) **Word-at-a-time `_memeq256`** in `src/row.cyr` for the INSERT OR IGNORE STR conflict-probe verify path (32 × 8-byte loads vs 256 × 1-byte). (3) **Prepared statements** (`patra_prepare` / `patra_exec_prepared` / `patra_query_prepared` / `patra_finalize`) — parse once, dispatch many; 22µs → 14µs per repeated INSERT (~36% faster). 1.8.1 raised the Cyrius pin to 5.6.39. 1.8.0 shipped group commit / batched fsync — opt-in `PATRA_SYNC_BATCH` mode (`patra_set_sync_mode` / `patra_flush`) auto-flushes every 64 writes; ~64× faster on real-disk inserts (19.5ms → 306µs). 1.7.1 shipped STR-keyed B+ tree indexes via djb2-64 hash + verify-on-hit. 1.7.0 shipped `INSERT OR IGNORE INTO …` SQL (~18× faster than SELECT-then-INSERT workaround on hit). 1.6.1 shipped `patra_result_get_str_len`. 1.6.0 shipped `COL_BYTES` variable-length binary for sit's object store migration: chain-page storage (`BY_DATA_MAX = 4072`), programmatic `patra_insert_row` / `patra_result_read_bytes` API, chain cleanup on DELETE / DROP / ALTER DROP. `BYTES` keyword (canonical) with `BLOB` legacy alias. Cyrius 5.6.39.
 - **Integration**: libro audit log, vidya knowledge index, sit object store
 - **Index**: B+ tree order-64, auto or explicit CREATE INDEX (~39% faster equality select on unique keys, 500 rows; overflow-safe fallback on >256 duplicate refs)
 - **Binary**: 180KB (DCE)

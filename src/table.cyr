@@ -63,7 +63,7 @@ fn tbl_create(fd, hdr, name, nlen, col_names, col_types, ncols) {
     if (tbl_find(hdr, name, nlen) >= 0) { return PATRA_ERR_EXISTS; }
 
     var spg = page_alloc(fd, hdr);
-    var sbuf = fl_alloc(PAGE_SIZE);
+    var sbuf = pg_alloc();
     memset(sbuf, 0, PAGE_SIZE);
     store64(sbuf + SCH_NCOLS, ncols);
 
@@ -87,13 +87,13 @@ fn tbl_create(fd, hdr, name, nlen, col_names, col_types, ncols) {
         }
     }
     page_write(fd, spg, sbuf);
-    fl_free(sbuf);
+    pg_free(sbuf);
 
     var dpg = page_alloc(fd, hdr);
-    var dbuf = fl_alloc(PAGE_SIZE);
+    var dbuf = pg_alloc();
     page_init_data(dbuf);
     page_write(fd, dpg, dbuf);
-    fl_free(dbuf);
+    pg_free(dbuf);
 
     var idx = load64(hdr + HDR_TBLCOUNT);
     var entry = _tbl_entry(hdr, idx);
@@ -118,7 +118,7 @@ fn tbl_drop(fd, hdr, idx) {
     var spg = load64(entry + TBL_SCHEMA);
 
     # Read schema to learn the row layout (for BLOB cleanup)
-    var schema = fl_alloc(PAGE_SIZE);
+    var schema = pg_alloc();
     page_read(fd, spg, schema);
     var ncols = load64(schema + SCH_NCOLS);
     var has_blob = _tbl_has_bytes(schema, ncols);
@@ -127,7 +127,7 @@ fn tbl_drop(fd, hdr, idx) {
     # Free BLOB chains referenced by every row, then free the data pages.
     # If there are no BLOB columns the row walk is skipped entirely.
     var cur = load64(entry + TBL_ROOT);
-    var buf = fl_alloc(PAGE_SIZE);
+    var buf = pg_alloc();
     while (cur != 0) {
         page_read(fd, cur, buf);
         if (has_blob != 0) {
@@ -140,10 +140,10 @@ fn tbl_drop(fd, hdr, idx) {
         page_free(fd, hdr, cur);
         cur = next;
     }
-    fl_free(schema);
+    pg_free(schema);
 
     # Free B-tree pages (walk from schema index root)
-    var sbuf = fl_alloc(PAGE_SIZE);
+    var sbuf = pg_alloc();
     page_read(fd, spg, sbuf);
     var ic = load64(sbuf + SCH_IDX_COL);
     if (ic >= 0) {
@@ -152,7 +152,7 @@ fn tbl_drop(fd, hdr, idx) {
             btree_free_all(fd, hdr, ir);
         }
     }
-    fl_free(sbuf);
+    pg_free(sbuf);
 
     # Free schema page
     page_free(fd, hdr, spg);
@@ -168,14 +168,14 @@ fn tbl_drop(fd, hdr, idx) {
     }
     store64(hdr + HDR_TBLCOUNT, count - 1);
 
-    fl_free(buf);
+    pg_free(buf);
     return PATRA_OK;
 }
 
 # Insert a row into table
 fn tbl_insert(fd, hdr, idx, row_data, row_sz) {
     var entry = _tbl_entry(hdr, idx);
-    var buf = fl_alloc(PAGE_SIZE);
+    var buf = pg_alloc();
 
     # Use cached last page if available for this table
     var cur = 0;
@@ -218,7 +218,7 @@ fn tbl_insert(fd, hdr, idx, row_data, row_sz) {
     var rc = load64(entry + TBL_NROWS);
     store64(entry + TBL_NROWS, rc + 1);
 
-    fl_free(buf);
+    pg_free(buf);
     return PATRA_OK;
 }
 
@@ -227,7 +227,7 @@ fn tbl_insert(fd, hdr, idx, row_data, row_sz) {
 fn tbl_scan(fd, hdr, idx, out, row_sz) {
     var entry = _tbl_entry(hdr, idx);
     var cur = load64(entry + TBL_ROOT);
-    var buf = fl_alloc(PAGE_SIZE);
+    var buf = pg_alloc();
     var written = 0;
 
     while (cur != 0) {
@@ -239,7 +239,7 @@ fn tbl_scan(fd, hdr, idx, out, row_sz) {
         cur = load64(buf + DP_NEXT);
     }
 
-    fl_free(buf);
+    pg_free(buf);
     return written / row_sz;
 }
 
@@ -248,7 +248,7 @@ fn tbl_scan(fd, hdr, idx, out, row_sz) {
 fn tbl_scan_where(fd, hdr, idx, out, row_sz, schema, ncols, pr) {
     var entry = _tbl_entry(hdr, idx);
     var cur = load64(entry + TBL_ROOT);
-    var buf = fl_alloc(PAGE_SIZE);
+    var buf = pg_alloc();
     var kept = 0;
 
     while (cur != 0) {
@@ -264,7 +264,7 @@ fn tbl_scan_where(fd, hdr, idx, out, row_sz, schema, ncols, pr) {
         cur = load64(buf + DP_NEXT);
     }
 
-    fl_free(buf);
+    pg_free(buf);
     return kept;
 }
 
@@ -273,7 +273,7 @@ fn tbl_scan_where(fd, hdr, idx, out, row_sz, schema, ncols, pr) {
 fn tbl_update(fd, hdr, idx, row_sz, schema, ncols, pr) {
     var entry = _tbl_entry(hdr, idx);
     var cur = load64(entry + TBL_ROOT);
-    var buf = fl_alloc(PAGE_SIZE);
+    var buf = pg_alloc();
     var nsets = load64(pr + PR_COUNT);
 
     # Check if indexed column is being updated
@@ -317,12 +317,12 @@ fn tbl_update(fd, hdr, idx, row_sz, schema, ncols, pr) {
                     var cidx = _wh_resolve_col(schema, ncols,
                     load64(set + SET_CPTR), load64(set + SET_CLEN));
                     if (cidx < 0) {
-                        fl_free(buf);
+                        pg_free(buf);
                         return PATRA_ERR_NOTFOUND;
                     }
                     var ctype = load64(schema + SCH_START + cidx * SCH_ENTRY_SZ + SCH_CTYPE);
                     if (ctype == COL_BYTES) {
-                        fl_free(buf);
+                        pg_free(buf);
                         return PATRA_ERR_TYPE;
                     }
                     var coff = row_field_offset(schema, ncols, cidx);
@@ -348,7 +348,7 @@ fn tbl_update(fd, hdr, idx, row_sz, schema, ncols, pr) {
         cur = load64(buf + DP_NEXT);
     }
 
-    fl_free(buf);
+    pg_free(buf);
     return PATRA_OK;
 }
 
@@ -358,7 +358,7 @@ fn tbl_delete(fd, hdr, idx, row_sz, schema, ncols, pr) {
     _tbl_lp_idx = 0 - 1;
     var entry = _tbl_entry(hdr, idx);
     var cur = load64(entry + TBL_ROOT);
-    var buf = fl_alloc(PAGE_SIZE);
+    var buf = pg_alloc();
     var deleted = 0;
 
     # Check for B-tree index
@@ -411,6 +411,6 @@ fn tbl_delete(fd, hdr, idx, row_sz, schema, ncols, pr) {
     var rc = load64(entry + TBL_NROWS);
     store64(entry + TBL_NROWS, rc - deleted);
 
-    fl_free(buf);
+    pg_free(buf);
     return PATRA_OK;
 }

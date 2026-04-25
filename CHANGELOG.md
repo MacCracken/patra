@@ -5,6 +5,139 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.2] - 2026-04-24
+
+Three perf optimizations bundled, all flagged as deferred in 1.8.1's
+"Considered, Deferred" section. Each lands a measurable win and they
+compose cleanly: prepared statements call into the same hot paths that
+the slab + word-at-a-time helpers accelerate.
+
+### Added
+- **4KB page-slab allocator** (`pg_alloc` / `pg_free` in `src/file.cyr`).
+  LIFO stack of pre-allocated `PAGE_SIZE` buffers replaces
+  `fl_alloc(PAGE_SIZE)` / `fl_free` at ~45 hot sites across
+  `btree.cyr`, `bytes.cyr`, `table.cyr`, `lib.cyr`, `file.cyr`.
+  `PG_SLAB_MAX = 32` caps retained memory; overflow falls back to
+  freelist transparently. Skips size-class lookup + per-call freelist
+  bookkeeping on the dominant 4KB scratch-buffer pattern.
+- **Word-at-a-time `_memeq256(a, b)`** in `src/row.cyr` — 32 × 8-byte
+  loads, returns 1 if equal, 0 otherwise. Used by `_exec_insert`'s
+  INSERT OR IGNORE STR conflict-probe verify (replaces the
+  `memeq(..., COL_STR_SZ)` byte loop). Stdlib `memeq` is byte-by-byte
+  for portability; this helper is COL_STR_SZ-specific.
+- **Prepared statements** — four new public APIs in `src/lib.cyr`:
+
+  | API                                   | Effect |
+  |---------------------------------------|--------|
+  | `patra_prepare(db, sql)`              | Tokenize + parse once, return opaque stmt handle (4112 bytes; owns a copy of the SQL string). 0 on parse error. |
+  | `patra_exec_prepared(db, stmt)`       | Dispatch a prepared DDL/DML stmt without re-parsing. |
+  | `patra_query_prepared(db, stmt)`      | Same, for SELECT. Returns result set or 0. |
+  | `patra_finalize(stmt)`                | Free the stmt + its owned SQL buffer. Safe on 0. |
+
+  The stmt holds an 8-byte SQL pointer + length + a 4096-byte snapshot
+  of the parsed `_sql_pr`. `_stmt_restore` copies the snapshot into
+  `_sql_pr` (word-at-a-time, since stdlib `memcpy` is byte-by-byte
+  and a 4KB byte-loop would eat most of the win) before dispatching
+  through the existing `_exec_*` / `_patra_query_exec` paths. Single-
+  threaded — the `_sql_pr` global is overwritten per call.
+- **`_patra_query_exec(db)`** internal split — extracted the body of
+  `patra_query` so prepared-query and ad-hoc query share the same
+  implementation. No caller-visible effect.
+- **25 new tests** (595 → 620): prepared INSERT + SELECT, dispatch
+  across all DDL/DML stmt types, syntax-error returns 0, stmt owns
+  its SQL buffer (input freed-after-prepare still works),
+  `patra_finalize(0)` is a no-op, prepared INSERT OR IGNORE on
+  STR-indexed table (exercises slab + memeq256 + prepared together).
+- **2 new benchmarks**:
+
+  | Bench                  | Avg / insert |
+  |------------------------|--------------|
+  | `insert_1k_exec`       | 22µs         |
+  | `insert_1k_prepared`   | 14µs         |
+
+  ~36% faster per repeated INSERT. The saving (~8µs) matches the
+  `parse_insert` bench; the prepared path skips the tokenize+parse
+  on each call and the word-at-a-time `_stmt_restore` keeps the
+  4KB snapshot copy from eating the win.
+
+### Changed
+- **47 `fl_alloc(PAGE_SIZE)` call sites** routed through `pg_alloc`;
+  matching `fl_free` calls routed through `pg_free`. Internal change
+  — no caller-visible effect. Existing freelist allocations for
+  non-PAGE_SIZE buffers (token arrays, refs buffers, row scratch)
+  unchanged.
+
+### Notes
+- All 620 tests pass against the new paths. Slab cap of 32 buffers
+  bounds retained memory at 128 KB; chosen to comfortably cover the
+  deepest btree walk (page reads at every level + path tracking +
+  scratch).
+- Prepared statements are single-threaded by design; `_sql_pr` is
+  global, and concurrent prepare + exec_prepared would race. Patra's
+  flock-protected single-writer model already enforces this.
+- The slab + memeq256 deltas are too small to show on individual
+  benches at this scale (each saves a few hundred ns per op);
+  they're load-bearing for the prepared-statement win, where 4KB
+  copies and 256-byte compares per call would otherwise dominate.
+
+## [1.8.1] - 2026-04-24
+
+Optimization-review pass after the 1.6.1 → 1.8.0 perf-feature sweep.
+Surveyed Cyrius compiler changes since the prior pin and the vidya
+knowledge base for tractable patra-side wins, then shipped what
+actually clears the bar.
+
+### Changed
+- **Cyrius toolchain pin** raised from `5.6.21` to `5.6.39`. The
+  5.6.21→5.6.39 compiler chain shipped:
+  - **Linear-scan register allocation** (5.6.20–24) — Poletto-Sarkar
+    picker auto-enabled for x86; reduces stack-frame load/store on
+    hot loops with several locals (e.g. `sql_tokenize`, parser
+    recursive-descent, btree walks). cc5-on-self measured a net
+    −2–5% across regalloc phases.
+  - **Codebuf NOP compaction** (5.6.27) — strips picker's 4-byte NOP
+    fills post-regalloc and repairs disp32/JMP displacements.
+    cc5-on-self: −2.13% binary, −16 KB cache pressure.
+  - **Dead-store elimination** (5.6.18) — removes redundant
+    `STORE_LOCAL` when the next instruction overwrites the same
+    local.
+  - **Bare-truthy branch fix** (5.6.21) — the 5.6.x truthy-on-fn-call
+    codegen regression that prompted patra's earlier defensive `!= 0`
+    sweep (since reverted).
+
+  Pin is metadata-only — the local installed `cyrius` is what
+  actually generates code. The bump documents the compatibility
+  floor that captures these gains for downstream users on older
+  pins.
+
+- **No patra-side code changes.** All 595 tests, 6 fuzz harnesses,
+  and 33 benchmarks pass against the bumped pin. Bench numbers
+  unchanged from 1.8.0 (since the local cyrius was already 5.6.39
+  during the 1.8.0 release run).
+
+### Added
+- **`docs/development/BENCHMARKS.md`** — baseline table for all 33
+  benches plus a "perf arc 1.6.0 → 1.8.1" section showing the
+  cumulative wins from sit's perf-review sweep. Captured on
+  Linux 6.18 / btrfs / NVMe / x86-64 with cyrius 5.6.39.
+
+### Considered, Deferred
+- **Slab allocator for row buffers** — vidya's `allocators` entry
+  flags this as a tractable medium-effort win on insert-heavy
+  workloads. Deferred until a profiled hot-path actually points at
+  allocation pressure; the patch-strategy preference says no
+  speculative refactors. Patra's existing `fl_alloc` / `alloc`
+  split (freelist + bump) already covers the documented patterns.
+- **Word-at-a-time `memeq` for COL_STR_SZ comparisons** — could
+  shave a few hundred nanoseconds off the `INSERT OR IGNORE` STR
+  verify path, but the cost there is dominated by `btree_search`
+  + `page_read`, not the byte loop. Not currently a bottleneck.
+- **Prepared statements / cached SQL parse trees** — every
+  `patra_exec` re-tokenizes + re-parses (8–10µs/call). For sit's
+  300-object clone that's ~3ms in parsing, dwarfed by the
+  fdatasync-bound writes 1.8.0 already amortized. Real win exists
+  but the API + schema work belongs in 1.9.0, not a patch.
+
 ## [1.8.0] - 2026-04-24
 
 Group commit / batched fsync. Third and final follow-up from sit's v0.6.4
