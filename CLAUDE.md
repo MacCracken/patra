@@ -7,7 +7,7 @@
 - **Type**: Shared library — database engine for the sovereign stack
 - **License**: GPL-3.0-only
 - **Language**: Cyrius (native)
-- **Version**: 1.5.4
+- **Version**: 1.7.0
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
 
@@ -18,8 +18,8 @@ Own the database. Zero deps. Pure Cyrius. SQL + B-tree + JSONL in a single `incl
 ## Current State
 
 - **Source**: ~4,500 lines across 11 modules
-- **Tests**: 537 assertions, 6 fuzz harnesses, 26 benchmarks
-- **Stable**: 1.6.0 — `COL_BYTES` variable-length binary column for sit's object store migration. Chain-page storage (`BY_DATA_MAX = 4072`), programmatic `patra_insert_row` / `patra_result_read_bytes` API, chain cleanup on DELETE / DROP / ALTER DROP. `BYTES` keyword (canonical) with `BLOB` legacy alias. Cyrius 5.6.21.
+- **Tests**: 565 assertions, 6 fuzz harnesses, 28 benchmarks
+- **Stable**: 1.7.0 — `INSERT OR IGNORE INTO …` SQL syntax. Probes the table's indexed column (`SCH_IDX_COL`) via `btree_search`; on hit, returns `PATRA_OK` without inserting. ~18× faster than the SELECT-then-conditional-INSERT workaround on the dedup-hit path (254µs → 14µs per attempt, 500 conflicting attempts against 500-row indexed table). 1.6.1 shipped `patra_result_get_str_len` sized accessor. 1.6.0 shipped `COL_BYTES` variable-length binary for sit's object store migration: chain-page storage (`BY_DATA_MAX = 4072`), programmatic `patra_insert_row` / `patra_result_read_bytes` API, chain cleanup on DELETE / DROP / ALTER DROP. `BYTES` keyword (canonical) with `BLOB` legacy alias. Cyrius 5.6.21.
 - **Integration**: libro audit log, vidya knowledge index, sit object store
 - **Index**: B+ tree order-64, auto or explicit CREATE INDEX (~39% faster equality select on unique keys, 500 rows; overflow-safe fallback on >256 duplicate refs)
 - **Binary**: 180KB (DCE)
@@ -113,7 +113,7 @@ src/
   page.cyr      — 4KB page alloc/read/write/free list + WAL integration
   row.cyr       — row encoding: i64, 256-byte strings, 16-byte (page, len) bytes-refs
   bytes.cyr     — variable-length binary: chain write/read/free across PAGE_BYTES pages
-  sql.cyr       — tokenizer + recursive descent parser (CREATE/INSERT/SELECT/UPDATE/DELETE/CREATE INDEX/ALTER/VACUUM, aggregates, column-list projection, BYTES/BLOB keyword)
+  sql.cyr       — tokenizer + recursive descent parser (CREATE/INSERT/SELECT/UPDATE/DELETE/CREATE INDEX/ALTER/VACUUM, INSERT OR IGNORE, aggregates, column-list projection, BYTES/BLOB keyword)
   where.cyr     — WHERE evaluation: 7 operators (incl LIKE), AND/OR; BYTES columns never match
   wal.cyr       — Write-ahead logging: page before-images, crash recovery
   btree.cyr     — B+ tree: order-64, insert/split/search/range/lazy delete/compaction/whole-tree free
@@ -128,7 +128,7 @@ src/
 - **4KB pages** — standard page size, B-tree nodes fit one page
 - **flock for concurrency** — `syscall(73, fd, LOCK_EX/LOCK_UN)` advisory locking
 - **No floating point** — integer comparisons only in WHERE clauses
-- **SQL subset only** — CREATE TABLE, CREATE INDEX, ALTER TABLE (ADD/DROP COLUMN, RENAME TO, RENAME COLUMN), DROP TABLE, INSERT, SELECT (with `*` / column-list projection / COUNT/SUM/MIN/MAX aggregates), UPDATE, DELETE, VACUUM. WHERE supports `=, !=, <, >, <=, >=, LIKE` + AND/OR. BYTES columns are read/write only (no SQL INSERT/UPDATE/WHERE; use `patra_insert_row` + `patra_result_read_bytes`). No JOINs or subqueries
+- **SQL subset only** — CREATE TABLE, CREATE INDEX, ALTER TABLE (ADD/DROP COLUMN, RENAME TO, RENAME COLUMN), DROP TABLE, INSERT (with optional `OR IGNORE` for indexed-column dedup), SELECT (with `*` / column-list projection / COUNT/SUM/MIN/MAX aggregates), UPDATE, DELETE, VACUUM. WHERE supports `=, !=, <, >, <=, >=, LIKE` + AND/OR. BYTES columns are read/write only (no SQL INSERT/UPDATE/WHERE; use `patra_insert_row` + `patra_result_read_bytes`). No JOINs or subqueries
 
 ## Cyrius Conventions
 

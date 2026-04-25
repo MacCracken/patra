@@ -117,6 +117,25 @@ if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 55); }
 sql_tokenize("SELECT * FROM t WHERE id = 1 OR id = 2 OR id = 3");
 if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 56); }
 
+# ── INSERT OR IGNORE: malformed must reject, valid must accept ──
+
+sql_tokenize("INSERT OR");
+if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 57); }
+
+sql_tokenize("INSERT OR IGNORE");
+if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 58); }
+
+sql_tokenize("INSERT OR REPLACE INTO t VALUES (1)");
+if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 59); }
+
+sql_tokenize("INSERT OR IGNORE INTO t VALUES (1, 'x')");
+if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 67); }
+if (load64(_sql_pr + PR_INSERT_IGNORE) != 1) { syscall(SYS_EXIT, 68); }
+
+sql_tokenize("INSERT INTO t VALUES (1, 'x')");
+if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 69); }
+if (load64(_sql_pr + PR_INSERT_IGNORE) != 0) { syscall(SYS_EXIT, 73); }
+
 # ── Header verification ──
 
 var buf = fl_alloc(PAGE_SIZE);

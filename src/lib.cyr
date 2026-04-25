@@ -204,6 +204,30 @@ fn _exec_insert(db) {
         }
     }
 
+    # INSERT OR IGNORE: probe the indexed column for an existing row with
+    # the same key. On hit, return PATRA_OK without inserting. Only fires
+    # when the table has an index — without one there's no conflict to detect.
+    if (load64(_sql_pr + PR_INSERT_IGNORE) != 0) {
+        var iic = load64(schema + SCH_IDX_COL);
+        if (iic >= 0) {
+            if (iic < ncols) {
+                var iir = load64(schema + SCH_IDX_ROOT);
+                if (iir != 0) {
+                    var pkey = row_read_int(row, row_field_offset(schema, ncols, iic));
+                    var probe = fl_alloc(8);
+                    var hits = btree_search(fd, hdr, iir, pkey, probe, 1);
+                    fl_free(probe);
+                    if (hits > 0) {
+                        fl_free(row);
+                        fl_free(schema);
+                        patra_unlock(fd);
+                        return PATRA_OK;
+                    }
+                }
+            }
+        }
+    }
+
     var r = tbl_insert(fd, hdr, idx, row, rsz);
 
     # Maintain B-tree index
@@ -1280,6 +1304,23 @@ fn patra_result_get_str(rs, row, col) {
     var data = load64(rs + RS_DATA);
     var rsz = load64(rs + RS_ROWSZ);
     return data + row * rsz + _rs_field_off(rs, col);
+}
+
+# Length of a STR value at (row, col): bounded scan over the COL_STR_SZ slot,
+# stopping at the first NUL or COL_STR_SZ. Returns -1 if the column isn't STR.
+# Mirrors patra_result_get_bytes_len so consumers can drop ad-hoc strnlen.
+fn patra_result_get_str_len(rs, row, col) {
+    var types = load64(rs + RS_TYPES);
+    if (load64(types + col * 8) != COL_STR) { return 0 - 1; }
+    var data = load64(rs + RS_DATA);
+    var rsz = load64(rs + RS_ROWSZ);
+    var ptr = data + row * rsz + _rs_field_off(rs, col);
+    var n = 0;
+    while (n < COL_STR_SZ) {
+        if (load8(ptr + n) == 0) { return n; }
+        n = n + 1;
+    }
+    return COL_STR_SZ;
 }
 
 # Get column name at index

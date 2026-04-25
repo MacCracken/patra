@@ -3064,6 +3064,129 @@ fn test_bytes_persistence() {
     patra_close(db2);
 }
 
+fn test_parse_insert_or_ignore() {
+    test_group("parse INSERT OR IGNORE");
+    sql_tokenize("INSERT INTO users VALUES (1, 'alice')");
+    assert_eq(sql_parse(), PATRA_OK, "vanilla parses");
+    assert_eq(load64(_sql_pr + PR_INSERT_IGNORE), 0, "vanilla flag clear");
+    sql_tokenize("INSERT OR IGNORE INTO users VALUES (1, 'alice')");
+    assert_eq(sql_parse(), PATRA_OK, "ignore variant parses");
+    assert_eq(load64(_sql_pr + PR_STMT), STMT_INSERT, "stmt insert");
+    assert_eq(load64(_sql_pr + PR_INSERT_IGNORE), 1, "ignore flag set");
+    assert_eq(load64(_sql_pr + PR_COUNT), 2, "2 values");
+    sql_tokenize("INSERT OR REPLACE INTO users VALUES (1, 'alice')");
+    assert_eq(sql_parse(), PATRA_ERR_SYNTAX, "OR <other> rejected");
+    sql_tokenize("insert or ignore into users values (1, 'alice')");
+    assert_eq(sql_parse(), PATRA_OK, "lowercase ok");
+    assert_eq(load64(_sql_pr + PR_INSERT_IGNORE), 1, "lowercase flag set");
+}
+
+fn test_insert_or_ignore_dedup() {
+    test_group("INSERT OR IGNORE dedup hit");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE refs (id INT, name STR)");
+    patra_exec(db, "CREATE INDEX ON refs (id)");
+    assert_eq(patra_exec(db, "INSERT INTO refs VALUES (1, 'alpha')"), PATRA_OK, "seed 1");
+    assert_eq(patra_exec(db, "INSERT INTO refs VALUES (2, 'beta')"),  PATRA_OK, "seed 2");
+    # Conflicting id=1: returns OK (not an error) and the original row is untouched.
+    assert_eq(patra_exec(db, "INSERT OR IGNORE INTO refs VALUES (1, 'GAMMA')"), PATRA_OK, "ignored ok");
+    var rs = patra_query(db, "SELECT * FROM refs");
+    assert_eq(patra_result_count(rs), 2, "still 2 rows");
+    var rs2 = patra_query(db, "SELECT * FROM refs WHERE id = 1");
+    assert_eq(patra_result_count(rs2), 1, "id=1 unique");
+    assert_streq(patra_result_get_str(rs2, 0, 1), "alpha", "original preserved");
+    patra_result_free(rs2);
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_insert_or_ignore_miss() {
+    test_group("INSERT OR IGNORE dedup miss");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE refs (id INT, name STR)");
+    patra_exec(db, "CREATE INDEX ON refs (id)");
+    patra_exec(db, "INSERT INTO refs VALUES (1, 'alpha')");
+    # Non-conflicting id=2: insert proceeds.
+    assert_eq(patra_exec(db, "INSERT OR IGNORE INTO refs VALUES (2, 'beta')"), PATRA_OK, "miss inserts");
+    var rs = patra_query(db, "SELECT * FROM refs");
+    assert_eq(patra_result_count(rs), 2, "2 rows after miss");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_insert_or_ignore_no_index() {
+    test_group("INSERT OR IGNORE no index");
+    cleanup();
+    var db = patra_open(_tpath);
+    # First column STR → auto-index doesn't fire (auto-index is INT-only,
+    # table.cyr:80-88) and no CREATE INDEX issued → no conflict surface.
+    # INSERT OR IGNORE must behave as plain INSERT in this case.
+    patra_exec(db, "CREATE TABLE notes (body STR, id INT)");
+    patra_exec(db, "INSERT INTO notes VALUES ('first', 1)");
+    assert_eq(patra_exec(db, "INSERT OR IGNORE INTO notes VALUES ('second', 1)"), PATRA_OK, "no index ok");
+    var rs = patra_query(db, "SELECT * FROM notes");
+    assert_eq(patra_result_count(rs), 2, "both rows present without index");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_insert_or_ignore_persistence() {
+    test_group("INSERT OR IGNORE persistence");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE refs (id INT, name STR)");
+    patra_exec(db, "CREATE INDEX ON refs (id)");
+    patra_exec(db, "INSERT INTO refs VALUES (10, 'first')");
+    patra_close(db);
+
+    var db2 = patra_open(_tpath);
+    # Index survives reopen; conflict probe still fires.
+    assert_eq(patra_exec(db2, "INSERT OR IGNORE INTO refs VALUES (10, 'second')"), PATRA_OK, "ignored across reopen");
+    var rs = patra_query(db2, "SELECT * FROM refs");
+    assert_eq(patra_result_count(rs), 1, "still 1 row");
+    assert_streq(patra_result_get_str(rs, 0, 1), "first", "original preserved");
+    patra_result_free(rs);
+    patra_close(db2);
+}
+
+fn test_result_str_len() {
+    test_group("result str_len");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (id INT, name STR)");
+    patra_exec(db, "INSERT INTO t VALUES (1, '')");
+    patra_exec(db, "INSERT INTO t VALUES (2, 'alice')");
+
+    # 255 'a' bytes — the COL_STR_SZ-1 ceiling row_write_str clamps to.
+    var max = fl_alloc(256);
+    memset(max, 0, 256);
+    for (var i = 0; i < 255; i = i + 1) { store8(max + i, 97); }
+    var types = fl_alloc(16);
+    var ivals = fl_alloc(16);
+    var sptrs = fl_alloc(16);
+    var slens = fl_alloc(16);
+    memset(types, 0, 16); memset(ivals, 0, 16);
+    memset(sptrs, 0, 16); memset(slens, 0, 16);
+    store64(types + 0, COL_INT);
+    store64(ivals + 0, 3);
+    store64(types + 8, COL_STR);
+    store64(sptrs + 8, max);
+    store64(slens + 8, 255);
+    assert_eq(patra_insert_row(db, "t", 1, 2, types, ivals, sptrs, slens, 0, 0), PATRA_OK, "insert max");
+    fl_free(slens); fl_free(sptrs); fl_free(ivals); fl_free(types); fl_free(max);
+
+    var rs = patra_query(db, "SELECT * FROM t");
+    assert_eq(patra_result_count(rs), 3, "3 rows");
+    assert_eq(patra_result_get_str_len(rs, 0, 1), 0, "empty");
+    assert_eq(patra_result_get_str_len(rs, 1, 1), 5, "alice");
+    assert_eq(patra_result_get_str_len(rs, 2, 1), 255, "max 255");
+    assert_eq(patra_result_get_str_len(rs, 0, 0), 0 - 1, "non-STR returns -1");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
 # ── Runner ──────────────────────────────────────────────────
 
 fn main() {
@@ -3243,6 +3366,16 @@ fn main() {
     test_bytes_alter_add();
     test_bytes_alter_drop_frees();
     test_bytes_persistence();
+
+    # v1.6.1 sized string accessor
+    test_result_str_len();
+
+    # v1.7.0 INSERT OR IGNORE
+    test_parse_insert_or_ignore();
+    test_insert_or_ignore_dedup();
+    test_insert_or_ignore_miss();
+    test_insert_or_ignore_no_index();
+    test_insert_or_ignore_persistence();
 
     cleanup();
     return assert_summary();

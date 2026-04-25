@@ -5,6 +5,79 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-04-24
+
+`INSERT OR IGNORE`. Second of three follow-ups requested by sit's v0.6.4
+perf review. Collapses every consumer's content-addressed-dedup pattern
+from `SELECT exists?` + conditional `INSERT` (two SQL ops, full result-set
+materialization) to a single `INSERT OR IGNORE` (one parse + one B-tree
+probe + early return on hit).
+
+### Added
+- **`INSERT OR IGNORE INTO …` SQL syntax.** Parses identically to plain
+  `INSERT` but sets a per-statement `PR_INSERT_IGNORE` flag (`src/sql.cyr`).
+  Tokenizer adds `TK_IGNORE`; the existing `TK_OR` is reused.
+- **Conflict probe in `_exec_insert`** (`src/lib.cyr:207-228`). When the
+  flag is set and the table has a B-tree index (`SCH_IDX_COL >= 0`),
+  `btree_search` looks up the would-be inserted key. ≥1 hit → return
+  `PATRA_OK` without inserting (and without taking the WAL path).
+  Tables with no index have no conflict surface, so `INSERT OR IGNORE`
+  there behaves identically to plain `INSERT`. The probe runs against
+  whichever column carries the auto-index (first INT col, see
+  `src/table.cyr:80-88`) or an explicit `CREATE INDEX`.
+- **22 new tests** (543 → 565): parse-side accept/reject + flag check,
+  dedup hit, dedup miss, no-index passthrough, persistence across
+  reopen.
+- **`fuzz_sql.fcyr`** gains 5 new invariants covering malformed
+  `INSERT OR …`, valid `INSERT OR IGNORE`, and the flag-clear-on-vanilla
+  path.
+- **2 new benchmarks** comparing the SELECT-then-conditional-INSERT
+  workaround against `INSERT OR IGNORE` for 500 conflicting attempts
+  against a 500-row indexed table:
+
+  | Bench                              | Time / attempt |
+  |------------------------------------|----------------|
+  | `dedup_select_then_insert_500`     | 254µs          |
+  | `dedup_insert_or_ignore_500`       | 14µs           |
+
+  ~18× faster on the dedup-hit path. The win is one parse + one B-tree
+  probe + early return, vs one parse + one full SELECT result-set
+  materialization + one INSERT parse + one INSERT (which itself has to
+  rewalk the same key for the index update).
+
+### Changed
+- **PR layout** (`src/sql.cyr` `enum PROff`): added
+  `PR_INSERT_IGNORE = 64`, shifted `PR_ITEMS` from 64 to 72. The
+  layout-invariant test (`test_parse_result_layout_invariant`) still
+  passes — every PR_ITEMS-based write fits inside 4096, SELECT
+  projection still ends below `PR_AGG_TYPE`. Internal change; no
+  caller-visible effect.
+
+### Notes
+- `INSERT OR IGNORE`'s conflict surface today is the table's single
+  B-tree index, which patra's auto-index logic only creates on the
+  first INT column. STR-keyed indexes are still future work — sit's
+  `hash STR` / `path STR` columns therefore can't yet take advantage
+  of `OR IGNORE`. Tracked as a prerequisite once the patch-strategy
+  cadence makes that the right next item.
+
+## [1.6.1] - 2026-04-24
+
+Sized string accessor. First of three follow-ups requested by sit's
+v0.6.4 perf review (2026-04-25); see
+[`docs/development/roadmap.md`](docs/development/roadmap.md).
+
+### Added
+- **`patra_result_get_str_len(rs, row, col)`** — returns the byte length
+  of a STR value at `(row, col)` via a bounded scan over the 256-byte
+  slot, capped at `COL_STR_SZ`. Returns `-1` for non-STR columns.
+  Mirrors the existing `patra_result_get_bytes_len` shape so consumers
+  can drop ad-hoc `strnlen` wrappers (sit's S-31 defense). The bounded
+  scan also keeps the accessor safe if a future writer skips the
+  `COL_STR_SZ` zero-fill that `row_write_str` performs today.
+- **6 new tests** (537 → 543) covering empty / mid-length / 255-char
+  ceiling / non-STR-column-returns-`-1` cases.
+
 ## [1.6.0] - 2026-04-23
 
 `COL_BYTES`: variable-length binary column. Motivated by [sit](https://github.com/MacCracken/sit)

@@ -54,6 +54,7 @@ enum TokType {
     TK_RENAME = 48;
     TK_TO = 49;
     TK_KW_BYTES = 50;
+    TK_IGNORE = 51;
 }
 
 enum StmtType {
@@ -94,7 +95,8 @@ enum PROff {
     PR_WHERE_JOIN = 40;
     PR_ORDERBY_N = 48;
     PR_LIMIT = 56;
-    PR_ITEMS = 64;
+    PR_INSERT_IGNORE = 64;
+    PR_ITEMS = 72;
     PR_ORDERBY_COLS = 800;
     PR_WHERE = 1024;
 }
@@ -258,6 +260,7 @@ fn _classify_ident(ptr, len) {
     if (_kw_eq(ptr, len, "COLUMN")) { return TK_COLUMN; }
     if (_kw_eq(ptr, len, "RENAME")) { return TK_RENAME; }
     if (_kw_eq(ptr, len, "TO"))     { return TK_TO; }
+    if (_kw_eq(ptr, len, "IGNORE")) { return TK_IGNORE; }
     return TK_IDENT;
 }
 
@@ -518,6 +521,14 @@ fn _parse_insert() {
     var pos = 0;
     if (_tok_type(pos) != TK_INSERT) { return PATRA_ERR_SYNTAX; }
     pos = pos + 1;
+    # Optional `OR IGNORE` between INSERT and INTO. Skip the conflicting row
+    # silently if the indexed column already holds the inserted key.
+    if (_tok_type(pos) == TK_OR) {
+        pos = pos + 1;
+        if (_tok_type(pos) != TK_IGNORE) { return PATRA_ERR_SYNTAX; }
+        pos = pos + 1;
+        store64(_sql_pr + PR_INSERT_IGNORE, 1);
+    }
     if (_tok_type(pos) != TK_INTO)   { return PATRA_ERR_SYNTAX; }
     pos = pos + 1;
     if (_tok_type(pos) != TK_IDENT)  { return PATRA_ERR_SYNTAX; }

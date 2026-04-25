@@ -457,6 +457,58 @@ fn main() {
     patra_close(_bdb);
     _bcleanup();
 
+    # --- INSERT OR IGNORE vs SELECT-then-INSERT (sit dedup workload) ---
+    # Seed 500 unique-keyed rows, then attempt 500 conflicting inserts.
+    # Compares the consumer-side workaround (probe with SELECT, conditional
+    # INSERT) against the native INSERT OR IGNORE path. Both end with the
+    # same row count; the win is a single SQL op + a single index probe.
+
+    _bcleanup();
+    _bdb = patra_open(_bpath);
+    patra_exec(_bdb, "CREATE TABLE dedup (id INT, val STR)");
+    var _dsql[64];
+    for (var di = 0; di < 500; di = di + 1) {
+        var _dargs = vec_new();
+        vec_push(_dargs, di);
+        fmt_sprintf(&_dsql, 64, "INSERT INTO dedup VALUES (%d, 'x')", _dargs);
+        patra_exec(_bdb, &_dsql);
+    }
+
+    var b_sti = bench_new("dedup_select_then_insert_500");
+    bench_batch_start(b_sti);
+    for (var si2 = 0; si2 < 500; si2 = si2 + 1) {
+        var _stargs = vec_new();
+        vec_push(_stargs, si2);
+        var _stq[64];
+        fmt_sprintf(&_stq, 64, "SELECT * FROM dedup WHERE id = %d", _stargs);
+        var rss = patra_query(_bdb, &_stq);
+        if (patra_result_count(rss) == 0) {
+            var _stargs2 = vec_new();
+            vec_push(_stargs2, si2);
+            var _sti[64];
+            fmt_sprintf(&_sti, 64, "INSERT INTO dedup VALUES (%d, 'x')", _stargs2);
+            patra_exec(_bdb, &_sti);
+        }
+        patra_result_free(rss);
+    }
+    bench_batch_stop(b_sti, 500);
+    vec_push(benches, b_sti);
+
+    var b_ioi = bench_new("dedup_insert_or_ignore_500");
+    bench_batch_start(b_ioi);
+    for (var oi2 = 0; oi2 < 500; oi2 = oi2 + 1) {
+        var _oargs = vec_new();
+        vec_push(_oargs, oi2);
+        var _oq[64];
+        fmt_sprintf(&_oq, 64, "INSERT OR IGNORE INTO dedup VALUES (%d, 'x')", _oargs);
+        patra_exec(_bdb, &_oq);
+    }
+    bench_batch_stop(b_ioi, 500);
+    vec_push(benches, b_ioi);
+
+    patra_close(_bdb);
+    _bcleanup();
+
     bench_report_all(benches);
     return 0;
 }
