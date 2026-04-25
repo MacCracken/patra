@@ -7,7 +7,7 @@
 - **Type**: Shared library — database engine for the sovereign stack
 - **License**: GPL-3.0-only
 - **Language**: Cyrius (native)
-- **Version**: 1.7.0
+- **Version**: 1.7.1
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
 
@@ -18,8 +18,8 @@ Own the database. Zero deps. Pure Cyrius. SQL + B-tree + JSONL in a single `incl
 ## Current State
 
 - **Source**: ~4,500 lines across 11 modules
-- **Tests**: 565 assertions, 6 fuzz harnesses, 28 benchmarks
-- **Stable**: 1.7.0 — `INSERT OR IGNORE INTO …` SQL syntax. Probes the table's indexed column (`SCH_IDX_COL`) via `btree_search`; on hit, returns `PATRA_OK` without inserting. ~18× faster than the SELECT-then-conditional-INSERT workaround on the dedup-hit path (254µs → 14µs per attempt, 500 conflicting attempts against 500-row indexed table). 1.6.1 shipped `patra_result_get_str_len` sized accessor. 1.6.0 shipped `COL_BYTES` variable-length binary for sit's object store migration: chain-page storage (`BY_DATA_MAX = 4072`), programmatic `patra_insert_row` / `patra_result_read_bytes` API, chain cleanup on DELETE / DROP / ALTER DROP. `BYTES` keyword (canonical) with `BLOB` legacy alias. Cyrius 5.6.21.
+- **Tests**: 585 assertions, 6 fuzz harnesses, 31 benchmarks
+- **Stable**: 1.7.1 — STR-keyed B+ tree indexes via djb2-64 hash + verify-on-hit. `CREATE INDEX ON t (str_col)` now succeeds; the WHERE indexed-eq fast path, `INSERT OR IGNORE` conflict probe, and UPDATE/DELETE index maintenance all dispatch through `_idx_key_from_row`. Hash collisions are correctness-neutral (where_eval / byte-compare verifies on every hit). STR-indexed equality select ~21% faster than scan (256µs vs 324µs over 500 rows); STR-indexed `INSERT OR IGNORE` 16µs/attempt on dedup hit. 1.7.0 shipped `INSERT OR IGNORE INTO …` SQL (~18× faster than SELECT-then-INSERT workaround on hit). 1.6.1 shipped `patra_result_get_str_len`. 1.6.0 shipped `COL_BYTES` variable-length binary for sit's object store migration: chain-page storage (`BY_DATA_MAX = 4072`), programmatic `patra_insert_row` / `patra_result_read_bytes` API, chain cleanup on DELETE / DROP / ALTER DROP. `BYTES` keyword (canonical) with `BLOB` legacy alias. Cyrius 5.6.21.
 - **Integration**: libro audit log, vidya knowledge index, sit object store
 - **Index**: B+ tree order-64, auto or explicit CREATE INDEX (~39% faster equality select on unique keys, 500 rows; overflow-safe fallback on >256 duplicate refs)
 - **Binary**: 180KB (DCE)

@@ -2,7 +2,7 @@
 
 Forward-looking only. Shipped work lives in [`CHANGELOG.md`](../../CHANGELOG.md); rejected design directions and phase-level summaries live in [`completed-phases.md`](completed-phases.md).
 
-> **Current**: v1.7.0 — `INSERT OR IGNORE INTO …` SQL syntax (sit dedup follow-up; ~18× faster than the SELECT-then-INSERT workaround on hit). Patra serves libro, vidya, daimon, agnoshi, mela, hoosh, and sit.
+> **Current**: v1.7.1 — STR-keyed B+ tree indexes (hash + verify-on-hit). Sit's `hash STR` and `path STR` columns can now carry a `CREATE INDEX` and the 1.7.0 `INSERT OR IGNORE` win lands on sit's primary workload. Patra serves libro, vidya, daimon, agnoshi, mela, hoosh, and sit.
 
 ## Driven by consumer needs
 
@@ -14,12 +14,9 @@ Surfaced during sit's patra-handle-caching refactor. None blocks sit today — s
 
 #### Shipped
 
-- **1.7.0 — `INSERT OR IGNORE INTO …` SQL syntax.** Probes the table's B-tree index (`SCH_IDX_COL`) via `btree_search`; on hit returns `PATRA_OK` without inserting. ~18× faster than the SELECT-then-conditional-INSERT workaround on the dedup-hit path (254µs → 14µs per attempt, 500 conflicting attempts against a 500-row indexed table). Tables with no index pass through as plain INSERT. Caveat: patra's auto-index is still INT-only, so sit's `hash STR` / `path STR` columns can't take advantage until STR-keyed indexes land — see 1.7.1 below.
+- **1.7.1 — STR-keyed B+ tree indexes (hash + verify-on-hit).** Reuses the existing i64-keyed btree by hashing the 256-byte STR slot (djb2-64) and storing the hash as the i64 key. Every read path (`where_eval`, `INSERT OR IGNORE` probe) byte-compares the full slot to filter hash collisions, so semantics are identical to a true STR-keyed tree. `CREATE INDEX ON t (str_col)` now succeeds; the WHERE indexed-eq fast path takes the index for STR equality (range ops fall through to scan since hashed keys don't preserve ordering). STR-indexed equality select ~21% faster than scan (256µs vs 324µs over 500 rows); STR-indexed `INSERT OR IGNORE` matches INT at 16µs/attempt on dedup hit. With 1.7.1 in place, the 1.7.0 dedup win lands on sit's primary workload — `hash STR` and `path STR` columns can now carry an index.
+- **1.7.0 — `INSERT OR IGNORE INTO …` SQL syntax.** Probes the table's B-tree index (`SCH_IDX_COL`) via `btree_search`; on hit returns `PATRA_OK` without inserting. ~18× faster than the SELECT-then-conditional-INSERT workaround on the dedup-hit path (254µs → 14µs per attempt, 500 conflicting attempts against a 500-row indexed table). Tables with no index pass through as plain INSERT.
 - **1.6.1 — Sized string getter `patra_result_get_str_len(rs, row, col)`.** `patra_result_get_str` returns a pointer into the result-set buffer; consumers `strlen`'d it to recover the length. Sit landed `strnlen(s, 256)` (S-31 in sit's audit) as defense-in-depth against a future patra writer that skips the `COL_STR_SZ` zero-fill. The new accessor mirrors the existing `patra_result_get_bytes_len` shape — bounded scan, returns `-1` for non-STR columns. Unblocks dropping the strnlen wrapper in sit.
-
-#### 1.7.1 — STR-keyed B+ tree (future)
-
-`_exec_create_index` (`src/lib.cyr:756`) rejects non-INT columns: the tree stores i64 keys. Until that's lifted, 1.7.0's `INSERT OR IGNORE` doesn't fire on STR-keyed tables — which is exactly where sit's `write_typed_object` (`hash STR`) and `index_upsert` (`path STR`) live. Path forward: variable-length key encoding, byte-prefix comparison, splits on a 256-byte key class. On its own this also unlocks STR equality/range queries inheriting the existing ~39% index speedup that INT-keyed cols already enjoy.
 
 #### 1.8.0 — WAL group commit / batched fsync
 

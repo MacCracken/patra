@@ -207,17 +207,45 @@ fn _exec_insert(db) {
     # INSERT OR IGNORE: probe the indexed column for an existing row with
     # the same key. On hit, return PATRA_OK without inserting. Only fires
     # when the table has an index — without one there's no conflict to detect.
+    # STR-indexed cols are hash-keyed: btree_search returns candidates, then
+    # we byte-compare the 256-byte slot in each candidate row to filter false
+    # positives from hash collisions.
     if (load64(_sql_pr + PR_INSERT_IGNORE) != 0) {
         var iic = load64(schema + SCH_IDX_COL);
         if (iic >= 0) {
             if (iic < ncols) {
                 var iir = load64(schema + SCH_IDX_ROOT);
                 if (iir != 0) {
-                    var pkey = row_read_int(row, row_field_offset(schema, ncols, iic));
-                    var probe = fl_alloc(8);
-                    var hits = btree_search(fd, hdr, iir, pkey, probe, 1);
-                    fl_free(probe);
-                    if (hits > 0) {
+                    var pkey = _idx_key_from_row(schema, ncols, iic, row);
+                    var ictype = load64(schema + SCH_START + iic * SCH_ENTRY_SZ + SCH_CTYPE);
+                    var ihit = 0;
+                    if (ictype == COL_INT) {
+                        var probe = fl_alloc(8);
+                        if (btree_search(fd, hdr, iir, pkey, probe, 1) > 0) { ihit = 1; }
+                        fl_free(probe);
+                    } else {
+                        var refs = fl_alloc(256 * 8);
+                        var nrefs = btree_search(fd, hdr, iir, pkey, refs, 256);
+                        var icoff = row_field_offset(schema, ncols, iic);
+                        var pbuf = fl_alloc(PAGE_SIZE);
+                        var lpg = 0 - 1;
+                        for (var ri = 0; ri < nrefs; ri = ri + 1) {
+                            if (ihit == 0) {
+                                var iref = load64(refs + ri * 8);
+                                if (iref != (0 - 1)) {
+                                    var rpg = _bt_ref_pg(iref);
+                                    var rsl = _bt_ref_slot(iref);
+                                    if (rpg != lpg) { page_read(fd, rpg, pbuf); lpg = rpg; }
+                                    if (memeq(pbuf + DP_DATA + rsl * rsz + icoff, row + icoff, COL_STR_SZ)) {
+                                        ihit = 1;
+                                    }
+                                }
+                            }
+                        }
+                        fl_free(pbuf);
+                        fl_free(refs);
+                    }
+                    if (ihit != 0) {
                         fl_free(row);
                         fl_free(schema);
                         patra_unlock(fd);
@@ -237,7 +265,7 @@ fn _exec_insert(db) {
             if (ic < ncols) {
                 var ir = load64(schema + SCH_IDX_ROOT);
                 if (ir != 0) {
-                    var ikey = row_read_int(row, row_field_offset(schema, ncols, ic));
+                    var ikey = _idx_key_from_row(schema, ncols, ic, row);
                     var nr = btree_insert(fd, hdr, ir, ikey, _tbl_last_ref);
                     if (nr != ir) {
                         store64(schema + SCH_IDX_ROOT, nr);
@@ -550,7 +578,7 @@ fn _exec_alter_add(db) {
         if (ic >= 0) {
             var ir_now = load64(schema + SCH_IDX_ROOT);
             if (ir_now != 0) {
-                var ikey = row_read_int(rp, row_field_offset(schema, ncols_new, ic));
+                var ikey = _idx_key_from_row(schema, ncols_new, ic, rp);
                 var nr = btree_insert(fd, hdr, ir_now, ikey, _tbl_last_ref);
                 if (nr != ir_now) { store64(schema + SCH_IDX_ROOT, nr); }
             }
@@ -703,7 +731,7 @@ fn _exec_alter_drop_col(db) {
         if (ic_new >= 0) {
             var ir_now = load64(schema + SCH_IDX_ROOT);
             if (ir_now != 0) {
-                var ikey = row_read_int(rp, row_field_offset(schema, ncols_new, ic_new));
+                var ikey = _idx_key_from_row(schema, ncols_new, ic_new, rp);
                 var nr = btree_insert(fd, hdr, ir_now, ikey, _tbl_last_ref);
                 if (nr != ir_now) { store64(schema + SCH_IDX_ROOT, nr); }
             }
@@ -775,14 +803,15 @@ fn _exec_create_index(db) {
     var ci = _wh_resolve_col(schema, ncols, cn_ptr, cn_len);
     if (ci < 0) { fl_free(schema); patra_unlock(fd); return PATRA_ERR_NOTFOUND; }
 
-    # Check column is INT
+    # INT columns index by raw i64; STR columns index by hash of the
+    # 256-byte slot (collisions verified at lookup via where_eval / byte
+    # compare). BYTES columns can't be indexed.
     var ct = load64(schema + SCH_START + ci * SCH_ENTRY_SZ + SCH_CTYPE);
-    if (ct != COL_INT) { fl_free(schema); patra_unlock(fd); return PATRA_ERR_TYPE; }
+    if (ct == COL_BYTES) { fl_free(schema); patra_unlock(fd); return PATRA_ERR_TYPE; }
 
     # Create B-tree and populate with existing rows
     var bt = btree_create(fd, hdr);
     var rsz = row_compute_size(schema, ncols);
-    var koff = row_field_offset(schema, ncols, ci);
     var cur = load64(entry + TBL_ROOT);
     var pbuf = fl_alloc(PAGE_SIZE);
 
@@ -791,7 +820,7 @@ fn _exec_create_index(db) {
         var nrows = load64(pbuf + DP_NROWS);
         for (var i = 0; i < nrows; i = i + 1) {
             var rp = pbuf + DP_DATA + i * rsz;
-            var key = row_read_int(rp, koff);
+            var key = _idx_key_from_row(schema, ncols, ci, rp);
             bt = btree_insert(fd, hdr, bt, key, _bt_mkref(cur, i));
         }
         cur = load64(pbuf + DP_NEXT);
@@ -1078,6 +1107,13 @@ fn patra_query(db, sql) {
                 var idx_lo = 0 - (1 << 62);
                 var idx_hi = 1 << 62;
                 var idx_found = 0;
+                # Indexed col is INT or STR (post-1.7.1). STR keys are
+                # hashed, so only equality narrows the range; range ops
+                # over hashed keys would be meaningless. INT keys keep the
+                # full equality + range range. The where_eval re-check
+                # downstream byte-compares STR values, filtering any hash
+                # collisions correctly.
+                var ictype_eq = load64(schema + SCH_START + ic * SCH_ENTRY_SZ + SCH_CTYPE);
                 for (var wi = 0; wi < wn; wi = wi + 1) {
                     var cond = _sql_pr + PR_WHERE + wi * WH_ENTRY_SZ;
                     var cptr = load64(cond + WH_COL_PTR);
@@ -1085,14 +1121,26 @@ fn patra_query(db, sql) {
                     if (clen == icnl) {
                         if (memeq(cptr, icn, clen)) {
                             if (load64(cond + WH_VAL_TYPE) == COL_INT) {
-                                var op = load64(cond + WH_CMP_OP);
-                                var v = load64(cond + WH_INT_VAL);
-                                idx_found = 1;
-                                if (op == CMP_EQ)  { idx_lo = v; idx_hi = v; }
-                                elif (op == CMP_GT)  { if (v + 1 > idx_lo) { idx_lo = v + 1; } }
-                                elif (op == CMP_GTE) { if (v > idx_lo) { idx_lo = v; } }
-                                elif (op == CMP_LT)  { if (v - 1 < idx_hi) { idx_hi = v - 1; } }
-                                elif (op == CMP_LTE) { if (v < idx_hi) { idx_hi = v; } }
+                                if (ictype_eq == COL_INT) {
+                                    var op = load64(cond + WH_CMP_OP);
+                                    var v = load64(cond + WH_INT_VAL);
+                                    idx_found = 1;
+                                    if (op == CMP_EQ)  { idx_lo = v; idx_hi = v; }
+                                    elif (op == CMP_GT)  { if (v + 1 > idx_lo) { idx_lo = v + 1; } }
+                                    elif (op == CMP_GTE) { if (v > idx_lo) { idx_lo = v; } }
+                                    elif (op == CMP_LT)  { if (v - 1 < idx_hi) { idx_hi = v - 1; } }
+                                    elif (op == CMP_LTE) { if (v < idx_hi) { idx_hi = v; } }
+                                }
+                            } elif (load64(cond + WH_VAL_TYPE) == COL_STR) {
+                                if (ictype_eq == COL_STR) {
+                                    if (load64(cond + WH_CMP_OP) == CMP_EQ) {
+                                        var hk = _str_hash64(load64(cond + WH_STR_PTR),
+                                                             load64(cond + WH_STR_LEN));
+                                        idx_lo = hk;
+                                        idx_hi = hk;
+                                        idx_found = 1;
+                                    }
+                                }
                             }
                         }
                     }
@@ -1440,7 +1488,7 @@ fn patra_insert_row(db, tname, tnlen, ncols, types, ivals, sptrs, slens, bptrs, 
             if (ic < scols) {
                 var ir = load64(schema + SCH_IDX_ROOT);
                 if (ir != 0) {
-                    var ikey = row_read_int(row, row_field_offset(schema, scols, ic));
+                    var ikey = _idx_key_from_row(schema, scols, ic, row);
                     var nr = btree_insert(fd, hdr, ir, ikey, _tbl_last_ref);
                     if (nr != ir) {
                         store64(schema + SCH_IDX_ROOT, nr);

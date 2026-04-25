@@ -509,6 +509,75 @@ fn main() {
     patra_close(_bdb);
     _bcleanup();
 
+    # --- STR-indexed dedup (1.7.1: hash-keyed STR B-tree) ---
+    # Sit's actual workload: hash STR primary key + INSERT OR IGNORE.
+    # Seed 500 unique hash strings then attempt 500 conflicting inserts.
+
+    _bcleanup();
+    _bdb = patra_open(_bpath);
+    patra_exec(_bdb, "CREATE TABLE sdedup (hash STR, val INT)");
+    patra_exec(_bdb, "CREATE INDEX ON sdedup (hash)");
+    var _shsql[80];
+    for (var sdi = 0; sdi < 500; sdi = sdi + 1) {
+        var _sdargs = vec_new();
+        vec_push(_sdargs, sdi);
+        vec_push(_sdargs, sdi);
+        fmt_sprintf(&_shsql, 80, "INSERT INTO sdedup VALUES ('h%d', %d)", _sdargs);
+        patra_exec(_bdb, &_shsql);
+    }
+
+    var b_str_ioi = bench_new("str_dedup_insert_or_ignore_500");
+    bench_batch_start(b_str_ioi);
+    for (var sii = 0; sii < 500; sii = sii + 1) {
+        var _siargs = vec_new();
+        vec_push(_siargs, sii);
+        var _siq[80];
+        fmt_sprintf(&_siq, 80, "INSERT OR IGNORE INTO sdedup VALUES ('h%d', 0)", _siargs);
+        patra_exec(_bdb, &_siq);
+    }
+    bench_batch_stop(b_str_ioi, 500);
+    vec_push(benches, b_str_ioi);
+
+    # Indexed STR equality select (vs. scan)
+    var b_str_eq = bench_new("select_str_idx_eq_500");
+    ri = 0;
+    while (ri < 100) {
+        bench_batch_start(b_str_eq);
+        var rs = patra_query(_bdb, "SELECT * FROM sdedup WHERE hash = 'h250'");
+        bench_batch_stop(b_str_eq, 1);
+        patra_result_free(rs);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_str_eq);
+
+    patra_close(_bdb);
+    _bcleanup();
+
+    # Same workload without an index — scan baseline for the perf comparison.
+    _bdb = patra_open(_bpath);
+    patra_exec(_bdb, "CREATE TABLE sscan (val INT, hash STR)");  # STR not first → no auto-index
+    var _ssql[80];
+    for (var ssi = 0; ssi < 500; ssi = ssi + 1) {
+        var _ssargs = vec_new();
+        vec_push(_ssargs, ssi);
+        vec_push(_ssargs, ssi);
+        fmt_sprintf(&_ssql, 80, "INSERT INTO sscan VALUES (%d, 'h%d')", _ssargs);
+        patra_exec(_bdb, &_ssql);
+    }
+    var b_str_scan = bench_new("select_str_scan_500");
+    ri = 0;
+    while (ri < 100) {
+        bench_batch_start(b_str_scan);
+        var rs = patra_query(_bdb, "SELECT * FROM sscan WHERE hash = 'h250'");
+        bench_batch_stop(b_str_scan, 1);
+        patra_result_free(rs);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_str_scan);
+
+    patra_close(_bdb);
+    _bcleanup();
+
     bench_report_all(benches);
     return 0;
 }

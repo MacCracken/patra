@@ -69,3 +69,33 @@ fn row_read_bytes_page(row, off) {
 fn row_read_bytes_len(row, off) {
     return load64(row + off + BR_LEN);
 }
+
+# 64-bit string hash for STR-keyed B-tree indexes. djb2 over the input
+# bytes followed by zero-padding to COL_STR_SZ — so a query-time literal
+# "alice" (len 5) hashes identically to the 256-byte zero-padded slot
+# row_write_str produced. WHERE-indexed-eq verifies hits with where_eval,
+# so collisions are correctness-neutral; djb2 is enough.
+fn _str_hash64(ptr, len) {
+    var h = 5381;
+    var n = len;
+    if (n > COL_STR_SZ - 1) { n = COL_STR_SZ - 1; }
+    var i = 0;
+    while (i < n) {
+        h = h * 33 + load8(ptr + i);
+        i = i + 1;
+    }
+    while (i < COL_STR_SZ) {
+        h = h * 33;
+        i = i + 1;
+    }
+    return h;
+}
+
+# Index key for the indexed column `ic` of `row`. INT cols return the
+# raw i64; STR cols return _str_hash64 of the 256-byte slot.
+fn _idx_key_from_row(schema, ncols, ic, row) {
+    var ct = load64(schema + SCH_START + ic * SCH_ENTRY_SZ + SCH_CTYPE);
+    var off = row_field_offset(schema, ncols, ic);
+    if (ct == COL_INT) { return row_read_int(row, off); }
+    return _str_hash64(row + off, COL_STR_SZ);
+}

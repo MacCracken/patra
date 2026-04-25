@@ -5,6 +5,75 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.1] - 2026-04-24
+
+STR-keyed B+ tree indexes — the prerequisite called out in 1.7.0's
+caveat. Sit's `hash STR` and `path STR` columns can now carry a
+`CREATE INDEX`, and `INSERT OR IGNORE` against those columns probes
+the tree directly instead of falling through to the no-index pass-through.
+Reuses the existing i64-keyed btree with djb2-64 hash + verify-on-hit:
+no parallel implementation, no file-format change.
+
+### Added
+- **`_str_hash64(ptr, len)`** in `src/row.cyr` — djb2-64 over the
+  input bytes followed by zero-padding to `COL_STR_SZ`. Matches the
+  hash of a 256-byte zero-padded slot, so query-time literals hash
+  identically to stored rows.
+- **`_idx_key_from_row(schema, ncols, ic, row)`** dispatcher — INT cols
+  return the raw i64; STR cols return `_str_hash64` of the slot.
+  Replaces every `row_read_int(row, koff)` site that was reading the
+  indexed column key (`src/lib.cyr` × 4, `src/table.cyr` × 3).
+- **`CREATE INDEX ON t (str_col)`** — `_exec_create_index`'s INT-only
+  rejection at `src/lib.cyr:780` is replaced with a `COL_BYTES` rejection
+  only. Population loop hashes each row's STR slot.
+- **WHERE indexed-eq STR fast path** (`src/lib.cyr:1107-1145`) — when
+  the indexed col is STR and the WHERE has a `=` literal, hash the
+  literal and use it as both `idx_lo` and `idx_hi`. The downstream
+  `where_eval` re-check at `src/where.cyr:149-153` does the byte-compare
+  that filters any hash collisions, so the fast path is correctness-
+  preserving by construction. Range ops on STR (`<`, `>`, `<=`, `>=`)
+  fall through to scan since hashed keys don't preserve ordering.
+- **`INSERT OR IGNORE` STR verify path** (`src/lib.cyr:207-256`) — INT
+  cols stay on the `max=1` btree probe; STR cols pull up to 256
+  candidates, then byte-compare the 256-byte slot against the inserted
+  row's slot to filter false positives. Verified hit → return `PATRA_OK`
+  without inserting.
+- **20 new tests** (565 → 585): STR index create + select, STR-indexed
+  `INSERT OR IGNORE` dedup hit/miss, UPDATE keeps tree consistent,
+  DELETE drops ref + reinsert, persistence across reopen, hash-bucket
+  saturation safety with 50 distinct STR keys.
+- **`fuzz_sql.fcyr`** gains a STR-indexed dedup probe path.
+- **3 new benchmarks**:
+
+  | Bench                              | Time           |
+  |------------------------------------|----------------|
+  | `str_dedup_insert_or_ignore_500`   | 16µs / attempt |
+  | `select_str_idx_eq_500`            | 256µs          |
+  | `select_str_scan_500`              | 324µs          |
+
+  STR `INSERT OR IGNORE` matches INT's 14µs (the hash + verify is paid
+  only on candidate-set walk, not the early-skip path). STR-indexed
+  equality select is ~21% faster than the scan baseline; smaller
+  speedup than INT's ~39% because `where_eval` already byte-compares
+  the same way the scan does — the win is just the smaller candidate
+  set.
+
+### Changed
+- **CREATE INDEX no longer rejects STR columns.** Test
+  `test_create_index` updated to assert `CREATE INDEX ON ci (name)`
+  returns `PATRA_OK` instead of `PATRA_ERR_TYPE`. The existing
+  `PATRA_ERR_TYPE` rejection now applies only to `COL_BYTES` columns.
+  No other behavior change for INT-keyed callers.
+
+### Notes
+- Hash collisions are correctness-neutral: every read-side path
+  (`where_eval`, `INSERT OR IGNORE` conflict probe) byte-compares the
+  full 256-byte slot. Engineered worst-case collision sets degrade
+  selectivity but never produce wrong rows.
+- Sit's `hash STR` and `path STR` columns are now indexable — that's
+  the actual unblock for the 1.7.0 dedup win on sit's primary
+  workload.
+
 ## [1.7.0] - 2026-04-24
 
 `INSERT OR IGNORE`. Second of three follow-ups requested by sit's v0.6.4

@@ -136,6 +136,24 @@ sql_tokenize("INSERT INTO t VALUES (1, 'x')");
 if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 69); }
 if (load64(_sql_pr + PR_INSERT_IGNORE) != 0) { syscall(SYS_EXIT, 73); }
 
+# ── STR-keyed index (1.7.1): CREATE INDEX on STR + dedup probe ──
+
+var stpath = "/tmp/patra_fuzz_str.patra";
+syscall(SYS_UNLINK, stpath);
+var sdb = patra_open(stpath);
+if (sdb == 0) { syscall(SYS_EXIT, 74); }
+patra_exec(sdb, "CREATE TABLE so (hash STR, val INT)");
+if (patra_exec(sdb, "CREATE INDEX ON so (hash)") != PATRA_OK) { syscall(SYS_EXIT, 75); }
+patra_exec(sdb, "INSERT INTO so VALUES ('first', 1)");
+# Dedup hit on hashed STR — must return OK without inserting.
+if (patra_exec(sdb, "INSERT OR IGNORE INTO so VALUES ('first', 99)") != PATRA_OK) { syscall(SYS_EXIT, 76); }
+var sors = patra_query(sdb, "SELECT * FROM so WHERE hash = 'first'");
+if (patra_result_count(sors) != 1) { syscall(SYS_EXIT, 77); }
+if (patra_result_get_int(sors, 0, 1) != 1) { syscall(SYS_EXIT, 78); }
+patra_result_free(sors);
+patra_close(sdb);
+syscall(SYS_UNLINK, stpath);
+
 # ── Header verification ──
 
 var buf = fl_alloc(PAGE_SIZE);

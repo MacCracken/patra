@@ -308,7 +308,7 @@ fn tbl_update(fd, hdr, idx, row_sz, schema, ncols, pr) {
                 # Remove old index entry if indexed col is being updated
                 if (ui_updating != 0) {
                     if (uir != 0) {
-                        var old_key = row_read_int(rptr, uioff);
+                        var old_key = _idx_key_from_row(schema, ncols, uic, rptr);
                         btree_remove_ref(fd, hdr, uir, old_key, _bt_mkref(cur, i));
                     }
                 }
@@ -335,7 +335,7 @@ fn tbl_update(fd, hdr, idx, row_sz, schema, ncols, pr) {
                 # Insert new index entry if indexed col was updated
                 if (ui_updating != 0) {
                     if (uir != 0) {
-                        var new_key = row_read_int(rptr, uioff);
+                        var new_key = _idx_key_from_row(schema, ncols, uic, rptr);
                         uir = btree_insert(fd, hdr, uir, new_key, _bt_mkref(cur, i));
                         store64(schema + SCH_IDX_ROOT, uir);
                     }
@@ -387,7 +387,7 @@ fn tbl_delete(fd, hdr, idx, row_sz, schema, ncols, pr) {
                 # Invalidate B-tree entry
                 if (dic >= 0) {
                     if (dir != 0) {
-                        var dkey = row_read_int(rptr, doff);
+                        var dkey = _idx_key_from_row(schema, ncols, dic, rptr);
                         var dref = _bt_mkref(cur, i);
                         btree_remove_ref(fd, hdr, dir, dkey, dref);
                     }

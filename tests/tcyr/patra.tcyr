@@ -924,9 +924,10 @@ fn test_create_index() {
     assert_eq(patra_result_count(rs), 3, "y>15: 3 rows");
     patra_result_free(rs);
 
-    # Index on STR should fail
+    # 1.7.1: STR index now accepted (hash-keyed, verify on lookup).
+    # Replaces the prior "str index rejected" assertion.
     r = patra_exec(db, "CREATE INDEX ON ci (name)");
-    assert_eq(r, PATRA_ERR_TYPE, "str index rejected");
+    assert_eq(r, PATRA_OK, "str index accepted");
 
     # Missing table
     r = patra_exec(db, "CREATE INDEX ON ghost (x)");
@@ -3064,6 +3065,158 @@ fn test_bytes_persistence() {
     patra_close(db2);
 }
 
+fn test_str_index_create() {
+    test_group("STR index create + select");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE objs (hash STR, val INT)");
+    patra_exec(db, "INSERT INTO objs VALUES ('aaa', 1)");
+    patra_exec(db, "INSERT INTO objs VALUES ('bbb', 2)");
+    patra_exec(db, "INSERT INTO objs VALUES ('ccc', 3)");
+    assert_eq(patra_exec(db, "CREATE INDEX ON objs (hash)"), PATRA_OK, "STR index ok");
+
+    var rs = patra_query(db, "SELECT * FROM objs WHERE hash = 'bbb'");
+    assert_eq(patra_result_count(rs), 1, "1 row matches");
+    assert_eq(patra_result_get_int(rs, 0, 1), 2, "right row (val=2)");
+    patra_result_free(rs);
+
+    var rs2 = patra_query(db, "SELECT * FROM objs WHERE hash = 'zzz'");
+    assert_eq(patra_result_count(rs2), 0, "no rows match");
+    patra_result_free(rs2);
+    patra_close(db);
+}
+
+fn test_str_index_or_ignore_dedup() {
+    test_group("STR-indexed INSERT OR IGNORE dedup");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE objs (hash STR, val INT)");
+    patra_exec(db, "CREATE INDEX ON objs (hash)");
+    patra_exec(db, "INSERT INTO objs VALUES ('alpha', 100)");
+    patra_exec(db, "INSERT INTO objs VALUES ('beta', 200)");
+
+    # Conflicting hash 'alpha' — must be ignored, original val preserved.
+    assert_eq(patra_exec(db, "INSERT OR IGNORE INTO objs VALUES ('alpha', 999)"), PATRA_OK, "ignored");
+    var rs = patra_query(db, "SELECT * FROM objs WHERE hash = 'alpha'");
+    assert_eq(patra_result_count(rs), 1, "still 1 alpha");
+    assert_eq(patra_result_get_int(rs, 0, 1), 100, "original val preserved");
+    patra_result_free(rs);
+
+    # Non-conflicting hash 'gamma' — must insert.
+    assert_eq(patra_exec(db, "INSERT OR IGNORE INTO objs VALUES ('gamma', 300)"), PATRA_OK, "miss inserts");
+    var rs2 = patra_query(db, "SELECT * FROM objs");
+    assert_eq(patra_result_count(rs2), 3, "3 rows total");
+    patra_result_free(rs2);
+    patra_close(db);
+}
+
+fn test_str_index_update_maintains() {
+    test_group("STR index UPDATE keeps tree consistent");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE objs (hash STR, val INT)");
+    patra_exec(db, "CREATE INDEX ON objs (hash)");
+    patra_exec(db, "INSERT INTO objs VALUES ('old', 1)");
+    patra_exec(db, "UPDATE objs SET hash = 'new' WHERE val = 1");
+
+    # Old key must miss, new key must hit through the index.
+    var rs1 = patra_query(db, "SELECT * FROM objs WHERE hash = 'old'");
+    assert_eq(patra_result_count(rs1), 0, "old hash gone");
+    patra_result_free(rs1);
+    var rs2 = patra_query(db, "SELECT * FROM objs WHERE hash = 'new'");
+    assert_eq(patra_result_count(rs2), 1, "new hash hits");
+    patra_result_free(rs2);
+    patra_close(db);
+}
+
+fn test_str_index_delete_maintains() {
+    test_group("STR index DELETE drops ref");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE objs (hash STR, val INT)");
+    patra_exec(db, "CREATE INDEX ON objs (hash)");
+    patra_exec(db, "INSERT INTO objs VALUES ('a', 1)");
+    patra_exec(db, "INSERT INTO objs VALUES ('b', 2)");
+    patra_exec(db, "DELETE FROM objs WHERE hash = 'a'");
+
+    var rs = patra_query(db, "SELECT * FROM objs WHERE hash = 'a'");
+    assert_eq(patra_result_count(rs), 0, "deleted row gone");
+    patra_result_free(rs);
+    # And subsequent INSERT OR IGNORE on the freed key inserts cleanly.
+    assert_eq(patra_exec(db, "INSERT OR IGNORE INTO objs VALUES ('a', 11)"), PATRA_OK, "reinsert ok");
+    var rs2 = patra_query(db, "SELECT * FROM objs WHERE hash = 'a'");
+    assert_eq(patra_result_count(rs2), 1, "1 row");
+    assert_eq(patra_result_get_int(rs2, 0, 1), 11, "fresh val");
+    patra_result_free(rs2);
+    patra_close(db);
+}
+
+fn test_str_index_persistence() {
+    test_group("STR index persistence");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE objs (hash STR, val INT)");
+    patra_exec(db, "CREATE INDEX ON objs (hash)");
+    patra_exec(db, "INSERT INTO objs VALUES ('persist', 42)");
+    patra_close(db);
+
+    var db2 = patra_open(_tpath);
+    # Index survives reopen; OR IGNORE still fires.
+    assert_eq(patra_exec(db2, "INSERT OR IGNORE INTO objs VALUES ('persist', 999)"), PATRA_OK, "ignored");
+    var rs = patra_query(db2, "SELECT * FROM objs WHERE hash = 'persist'");
+    assert_eq(patra_result_count(rs), 1, "1 row");
+    assert_eq(patra_result_get_int(rs, 0, 1), 42, "original val preserved");
+    patra_result_free(rs);
+    patra_close(db2);
+}
+
+fn test_str_index_collision_safety() {
+    test_group("STR index hash collision safety");
+    # Collisions are rare with djb2-64 but the verify step must still
+    # filter them. We can't easily engineer a real collision here, but we
+    # exercise the candidate-loop path with many same-hash queries.
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE objs (hash STR, val INT)");
+    patra_exec(db, "CREATE INDEX ON objs (hash)");
+    # Distinct hashes that all collide on a degenerate hash (none expected
+    # for djb2 over short distinct strings) — at minimum, exercise the
+    # verify-on-hit path with 50 distinct STR keys.
+    for (var i = 0; i < 50; i = i + 1) {
+        var sb = fl_alloc(8);
+        memset(sb, 0, 8);
+        store8(sb + 0, 97 + (i / 25));     # 'a' or 'b'
+        store8(sb + 1, 97 + (i % 25));     # rotates 'a'..'y'
+        var ts = fl_alloc(2 * 8);
+        var iv = fl_alloc(2 * 8);
+        var sp = fl_alloc(2 * 8);
+        var sl = fl_alloc(2 * 8);
+        memset(iv, 0, 16); memset(sp, 0, 16); memset(sl, 0, 16);
+        store64(ts + 0, COL_STR);
+        store64(sp + 0, sb);
+        store64(sl + 0, 2);
+        store64(ts + 8, COL_INT);
+        store64(iv + 8, i);
+        patra_insert_row(db, "objs", 4, 2, ts, iv, sp, sl, 0, 0);
+        fl_free(sl); fl_free(sp); fl_free(iv); fl_free(ts); fl_free(sb);
+    }
+    var rs = patra_query(db, "SELECT * FROM objs");
+    assert_eq(patra_result_count(rs), 50, "50 rows");
+    patra_result_free(rs);
+
+    # Each lookup must return exactly the one matching row regardless
+    # of how many candidates the hash bucket holds.
+    var qb = fl_alloc(8);
+    memset(qb, 0, 8);
+    store8(qb, 98);     # 'b'
+    store8(qb + 1, 109); # 'm' → "bm"
+    var rs2 = patra_query(db, "SELECT * FROM objs WHERE hash = 'bm'");
+    assert_eq(patra_result_count(rs2), 1, "exactly 1 match for 'bm'");
+    fl_free(qb);
+    patra_result_free(rs2);
+    patra_close(db);
+}
+
 fn test_parse_insert_or_ignore() {
     test_group("parse INSERT OR IGNORE");
     sql_tokenize("INSERT INTO users VALUES (1, 'alice')");
@@ -3376,6 +3529,14 @@ fn main() {
     test_insert_or_ignore_miss();
     test_insert_or_ignore_no_index();
     test_insert_or_ignore_persistence();
+
+    # v1.7.1 STR-keyed B+ tree (hash-keyed, verify on hit)
+    test_str_index_create();
+    test_str_index_or_ignore_dedup();
+    test_str_index_update_maintains();
+    test_str_index_delete_maintains();
+    test_str_index_persistence();
+    test_str_index_collision_safety();
 
     cleanup();
     return assert_summary();
