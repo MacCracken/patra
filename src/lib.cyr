@@ -117,8 +117,7 @@ fn patra_open(path) {
     return db;
 }
 
-# Close database and free resources. Always flushes any pending BATCH-mode
-# writes — losing data on close would defeat the durability contract.
+# Close the database, flushing any pending BATCH-mode writes first.
 fn patra_close(db) {
     if (db == 0) { return 0; }
     var fd = load64(db + DB_FD);
@@ -134,8 +133,7 @@ fn patra_close(db) {
 fn _db_fd(db)  { return load64(db + DB_FD); }
 fn _db_hdr(db) { return load64(db + DB_HDR); }
 
-# Switch group-commit mode for this DB handle. Flushes pending writes
-# before the switch so no batch crosses a mode boundary unsynced.
+# Set group-commit mode (PATRA_SYNC_FULL or PATRA_SYNC_BATCH); flushes first.
 fn patra_set_sync_mode(db, mode) {
     if (load64(db + DB_BATCH_PENDING) != 0) {
         syscall(SYS_FDATASYNC, load64(db + DB_FD));
@@ -145,6 +143,7 @@ fn patra_set_sync_mode(db, mode) {
     return PATRA_OK;
 }
 
+# Return the current group-commit mode for this DB handle.
 fn patra_get_sync_mode(db) { return load64(db + DB_SYNC_MODE); }
 
 # Force durability of any pending BATCH-mode writes. No-op in FULL mode.
@@ -581,7 +580,7 @@ fn _exec_alter_add(db) {
         var pn = load64(buf + DP_NROWS);
         for (var i = 0; i < pn; i = i + 1) {
             memcpy(scratch + written * rsz_new,
-                   buf + DP_DATA + i * rsz_old, rsz_old);
+            buf + DP_DATA + i * rsz_old, rsz_old);
             written = written + 1;
         }
         cur = load64(buf + DP_NEXT);
@@ -1198,7 +1197,7 @@ fn _patra_query_exec(db) {
                                 if (ictype_eq == COL_STR) {
                                     if (load64(cond + WH_CMP_OP) == CMP_EQ) {
                                         var hk = _str_hash64(load64(cond + WH_STR_PTR),
-                                                             load64(cond + WH_STR_LEN));
+                                        load64(cond + WH_STR_LEN));
                                         idx_lo = hk;
                                         idx_hi = hk;
                                         idx_found = 1;
@@ -1369,7 +1368,7 @@ fn _patra_query_exec(db) {
             var pj_ci3 = load64(pj_idxs + pji3 * 8);
             store64(pj_t + pji3 * 8, load64(pj_types + pji3 * 8));
             memcpy(pj_nm + pji3 * SCH_CNAME_MAX,
-                   pj_names_src + pj_ci3 * SCH_CNAME_MAX, SCH_CNAME_MAX);
+            pj_names_src + pj_ci3 * SCH_CNAME_MAX, SCH_CNAME_MAX);
         }
 
         var pj_old_data = load64(rs + RS_DATA);
@@ -1396,7 +1395,7 @@ fn _patra_query_exec(db) {
     return rs;
 }
 
-# ── Prepared statements (1.8.2) ─────────────────────────────
+# ── Prepared statements (1.8.2) ────────────
 #
 # patra_exec / patra_query re-tokenize + re-parse on every call (~8-10µs
 # per invocation). For consumers that run the same SQL many times — sit's
@@ -1417,6 +1416,7 @@ enum StmtOff {
 # Parse `sql` once and return an opaque stmt handle, or 0 on parse error.
 # The handle owns a copy of the SQL string; safe to free the input
 # immediately after this call. Caller must patra_finalize when done.
+# Tokenize + parse SQL once and return an opaque, reusable stmt handle.
 fn patra_prepare(db, sql) {
     if (db == 0) { return 0; }
     if (sql == 0) { return 0; }
@@ -1462,8 +1462,7 @@ fn _stmt_restore(stmt) {
     return 0;
 }
 
-# Execute a prepared DDL/DML statement. Mirrors patra_exec dispatch but
-# skips tokenize + parse.
+# Execute a prepared DDL/DML statement, skipping tokenize + parse.
 fn patra_exec_prepared(db, stmt) {
     if (db == 0) { return PATRA_ERR_IO; }
     if (stmt == 0) { return PATRA_ERR_SYNTAX; }
@@ -1516,6 +1515,7 @@ fn patra_result_get_str(rs, row, col) {
 # Length of a STR value at (row, col): bounded scan over the COL_STR_SZ slot,
 # stopping at the first NUL or COL_STR_SZ. Returns -1 if the column isn't STR.
 # Mirrors patra_result_get_bytes_len so consumers can drop ad-hoc strnlen.
+# Byte length of a STR value at (row, col), or -1 if the column isn't STR.
 fn patra_result_get_str_len(rs, row, col) {
     var types = load64(rs + RS_TYPES);
     if (load64(types + col * 8) != COL_STR) { return 0 - 1; }
@@ -1556,6 +1556,7 @@ fn patra_result_get_bytes_len(rs, row, col) {
 # least `patra_result_get_bytes_len(rs, row, col)` bytes). Returns PATRA_OK,
 # PATRA_ERR_TYPE for non-BLOB columns, or PATRA_ERR_PAGE on a malformed
 # chain. The empty blob (length 0) returns PATRA_OK with no bytes read.
+# Read a BYTES column's payload into a caller-allocated `out` buffer.
 fn patra_result_read_bytes(db, rs, row, col, out) {
     var types = load64(rs + RS_TYPES);
     if (load64(types + col * 8) != COL_BYTES) { return PATRA_ERR_TYPE; }
@@ -1586,6 +1587,7 @@ fn patra_result_free(rs) {
 #   COL_BYTES → bptrs[i] + blens[i] (binary buffer + length; empty if 0)
 # Arrays whose slots aren't consulted can be 0 (null). Returns PATRA_OK,
 # PATRA_ERR_NOTFOUND, PATRA_ERR_COLCOUNT, or PATRA_ERR_TYPE.
+# Programmatic row insert; the only path that can write BYTES columns.
 fn patra_insert_row(db, tname, tnlen, ncols, types, ivals, sptrs, slens, bptrs, blens) {
     var fd = _db_fd(db);
     var hdr = _db_hdr(db);

@@ -5,6 +5,43 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.3] - 2026-04-24
+
+Release-prep pass: format, lint, doc summaries, regenerated dist bundle.
+
+### Changed
+- **`cyrius fmt`** applied to `src/btree.cyr` and `src/lib.cyr` —
+  whitespace-only continuation-line reflow on three multi-line argument
+  lists. No behavior change.
+- **`cyrius lint`** clean across all 11 source files (was 1 warning;
+  shortened two over-long section-header comments in `src/file.cyr`
+  and `src/lib.cyr` that exceeded the 120-byte cap when counting the
+  UTF-8 box-drawing chars).
+- **`cyrius doc`** clean across all public APIs. The doc tool extracts
+  the LAST `#` line immediately above each `fn`; multi-line block
+  comments were causing fragments like "writes — losing data on close
+  would defeat the durability contract." to surface as `patra_close`'s
+  doc string. Added single-line summary comments to the bottom of the
+  affected blocks in `src/file.cyr` and `src/lib.cyr` (`pg_alloc`,
+  `pg_free`, `patra_close`, `patra_set_sync_mode`, `patra_get_sync_mode`,
+  `patra_prepare`, `patra_exec_prepared`, `patra_result_get_str_len`,
+  `patra_result_read_bytes`, `patra_insert_row`, `patra_hdr_write_nosync`,
+  `patra_hdr_verify`). Existing detailed block comments are retained
+  for human readers; the trailing single-liner just gives the doc tool
+  something clean to extract.
+- **`dist/patra.cyr`** regenerated via `cyrius distlib` — 4777 lines,
+  v1.8.3 header. Bundle shape unchanged from 1.8.2 except the version
+  string and the formatted/doc-cleaned source.
+
+### Verified
+- `cyrius build programs/demo.cyr build/demo` — clean
+- `cyrius test tests/tcyr/patra.tcyr` — 620 / 620 passing
+- `cyrius fuzz fuzz/` — 6 / 6 passing
+- `cyrius lint src/*.cyr` — 0 warnings across 11 files
+- `cyrius fmt src/*.cyr --check` — no diffs
+- `cyrius doc --check src/*.cyr` — 0 undocumented across 11 files
+- `cyrius distlib` — `dist/patra.cyr` regenerated, 4777 lines
+
 ## [1.8.2] - 2026-04-24
 
 Three perf optimizations bundled, all flagged as deferred in 1.8.1's

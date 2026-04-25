@@ -371,7 +371,7 @@ fn _bt_rwalk(fd, hdr, pg, lo, hi, out, max, cp, depth) {
             if (stop == 0) {
                 if (load64(cp) < max) {
                     _bt_rwalk(fd, hdr, load64(buf + BT_VALS + i * 8),
-                              lo, hi, out, max, cp, depth + 1);
+                    lo, hi, out, max, cp, depth + 1);
                     if (i < nk) {
                         if (load64(buf + BT_KEYS + i * 8) > hi) {
                             stop = 1;
@@ -490,8 +490,8 @@ fn _bt_compact_walk(fd, hdr, pg, depth) {
     var total = 0;
     for (var i = 0; i <= nk; i = i + 1) {
         total = total + _bt_compact_walk(fd, hdr,
-                                          load64(buf + BT_VALS + i * 8),
-                                          depth + 1);
+        load64(buf + BT_VALS + i * 8),
+        depth + 1);
     }
     pg_free(buf);
     return total;

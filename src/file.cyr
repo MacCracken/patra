@@ -124,6 +124,7 @@ fn patra_hdr_read(fd, buf) {
 
 # Write header page from buffer to file without fdatasync. Used by the
 # group-commit path (1.8.0) — caller is responsible for syncing later.
+# Write the header page without fdatasync (group-commit path).
 fn patra_hdr_write_nosync(fd, buf) {
     if (_pt_seek(fd, 0) < 0) { return PATRA_ERR_IO; }
     if (syscall(SYS_WRITE, fd, buf, PAGE_SIZE) != PAGE_SIZE) { return PATRA_ERR_IO; }
@@ -141,6 +142,7 @@ fn patra_hdr_write(fd, buf) {
 # Verify header magic + version + internal bounds. Audit 2026-04-21 §3.7
 # rejects a malformed header that would let `tbl_find` walk past the 63-entry
 # table directory or let `page_alloc` dereference a bogus free-list head.
+# Verify header magic, version, and internal bounds.
 fn patra_hdr_verify(buf) {
     if (load32(buf + HDR_MAGIC) != PATRA_MAGIC) { return PATRA_ERR_MAGIC; }
     if (load32(buf + HDR_VER) != PATRA_VER) { return PATRA_ERR_MAGIC; }
@@ -189,7 +191,7 @@ fn _pt_file_open(path) {
     return syscall(SYS_OPEN, path, 2 + O_NOFOLLOW, 0);
 }
 
-# ── Page slab (4KB buffer pool) ─────────────────────────────
+# ── Page slab (4KB buffer pool) ───────────
 #
 # Hot paths (page_read/_write callers, btree node walks, schema reads,
 # bytes-chain walks) allocate and free PAGE_SIZE-sized scratch buffers
@@ -210,6 +212,7 @@ fn _pg_slab_init() {
     return 0;
 }
 
+# Allocate a 4KB buffer from the page slab, falling back to fl_alloc on miss.
 fn pg_alloc() {
     _pg_slab_init();
     if (_pg_slab_top > 0) {
@@ -219,6 +222,7 @@ fn pg_alloc() {
     return fl_alloc(PAGE_SIZE);
 }
 
+# Return a 4KB buffer to the page slab, or to fl_free if the slab is full.
 fn pg_free(buf) {
     if (buf == 0) { return 0; }
     _pg_slab_init();
