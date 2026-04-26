@@ -574,7 +574,7 @@ fn test_json_build() {
     store64(types + 8, COL_STR);
     store64(types + 16, COL_INT);
 
-    var len = json_build(buf, 256, keys, vals, types, 3);
+    var len = patra_json_build(buf, 256, keys, vals, types, 3);
     assert(len > 0, "len > 0");
     assert_streq(buf, "{\"id\": 42, \"name\": \"alice\", \"age\": 30}", "json fmt");
 

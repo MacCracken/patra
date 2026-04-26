@@ -5,6 +5,44 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0] - 2026-04-26
+
+**`json_build` → `patra_json_build` rename to clear stdlib
+collision with `lib/json.cyr`.** Required by cyrius v5.7.9's
+new duplicate-fn warning.
+
+### Changed (BREAKING — minor bump)
+
+- **`fn json_build(buf, max, keys, vals, types, n)` →
+  `fn patra_json_build(buf, max, keys, vals, types, n)`** in
+  `src/jsonl.cyr`. The fn name collided with
+  `lib/json.cyr::json_build/1` (the general pairs-vec utility);
+  consumers including both modules saw last-include-wins
+  semantics with the losing arity silently miscompiling. Cyrius
+  v5.7.9 now emits a `warning: duplicate fn` at registration
+  time; this rename makes patra's variant unambiguous and matches
+  the `patra_*` namespace prefix used elsewhere in patra
+  (`patra_open`, `patra_close`, `patra_prepare`, etc.). Body and
+  semantics unchanged.
+- Test caller in `tests/tcyr/patra.tcyr::test_json_build`
+  updated to call `patra_json_build`.
+- Comment in `src/jsonl.cyr` referring to the buffer-size
+  contract updated to use the new name.
+
+### Migration
+
+Consumers calling `json_build(buf, max, keys, vals, types, n)`
+on a patra dep ≥ 1.9.0 must rename the call to
+`patra_json_build(...)`. The 7-arg `json_build_lens(...)` is
+unchanged and remains the recommended path for inputs that may
+contain embedded NUL bytes.
+
+### Compiler version
+
+- Toolchain pin: cyrius v5.7.9 (the duplicate-fn warning makes
+  collisions visible; running this release through pre-v5.7.9
+  cyrius still works, you just don't get the diagnostic).
+
 ## [1.8.3] - 2026-04-24
 
 Release-prep pass: format, lint, doc summaries, regenerated dist bundle.
