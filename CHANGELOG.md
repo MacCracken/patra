@@ -39,9 +39,14 @@ contain embedded NUL bytes.
 
 ### Compiler version
 
-- Toolchain pin: cyrius v5.7.9 (the duplicate-fn warning makes
-  collisions visible; running this release through pre-v5.7.9
-  cyrius still works, you just don't get the diagnostic).
+- Toolchain pin: cyrius v5.7.8 (the most-recent released cyrius
+  as of this patra release). Cyrius v5.7.9 — when released —
+  is the version where the duplicate-fn warning actually fires;
+  this patra release does NOT require it. The pin moves to v5.7.9
+  in the next patra patch after the cyrius v5.7.9 tarball is
+  available on GitHub Releases. (Pinning ahead of an unreleased
+  cyrius version is what tripped the v1.9.0 first-push CI: the
+  installer 404'd on `cyrius-5.7.9-x86_64-linux.tar.gz`.)
 
 ## [1.8.3] - 2026-04-24
 

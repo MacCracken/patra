@@ -20,10 +20,39 @@ jobs:
 
       - name: Install Cyrius toolchain
         run: |
+          set -e
           CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')}"
           echo "Installing Cyrius $CYRIUS_VERSION"
-          curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
-          tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          TARBALL="cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          URL="https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/$TARBALL"
+          # Verify the release asset exists BEFORE attempting download.
+          # Pre-v1.9.0 patra CI did `curl -sLO ... && tar xzf ...`
+          # blindly. If `cyrius.cyml`'s `cyrius =` pin pointed at a
+          # version that hadn't been tagged on GitHub yet (e.g. local-dev
+          # bumped the pin ahead of the release), curl 404'd and saved
+          # the GitHub error HTML at the tarball path; tar then failed
+          # with the misleading `not in gzip format`. Surface the real
+          # cause: print a clear error naming the missing release.
+          HTTP_CODE=$(curl -sL -o /dev/null -w "%{http_code}" -I "$URL")
+          if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "302" ]; then
+            echo "::error::Cyrius release $CYRIUS_VERSION not found on GitHub (HTTP $HTTP_CODE)."
+            echo "::error::Asset URL: $URL"
+            echo "::error::This usually means cyrius.cyml's 'cyrius =' pin was bumped ahead of the published release."
+            echo "::error::Fix: roll the pin back to a tagged cyrius version (see https://github.com/MacCracken/cyrius/releases) or wait for $CYRIUS_VERSION to be tagged."
+            exit 1
+          fi
+          curl -sLO "$URL"
+          # Belt-and-suspenders: confirm the downloaded file is a real
+          # gzipped tarball before extraction. Catches edge cases where
+          # GitHub returns 200 + a non-tarball body (e.g. asset
+          # mid-upload).
+          if ! file "$TARBALL" | grep -q "gzip compressed"; then
+            echo "::error::Downloaded $TARBALL is not a gzip archive."
+            echo "::error::First 200 bytes (likely a GitHub error page):"
+            head -c 200 "$TARBALL" || true
+            exit 1
+          fi
+          tar xzf "$TARBALL"
           CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
           mkdir -p "$HOME/.cyrius/bin" "$HOME/.cyrius/lib"
           cp "$CYRIUS_DIR/bin/"* "$HOME/.cyrius/bin/" 2>/dev/null || true

@@ -4,7 +4,7 @@ version = "1.9.0"
 description = "Patra — structured storage and SQL queries for Cyrius. The sovereign database."
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "5.7.9"
+cyrius = "5.7.8"
 repository = "https://github.com/MacCracken/patra"
 
 [build]

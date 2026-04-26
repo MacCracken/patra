@@ -29,10 +29,31 @@ jobs:
 
       - name: Install Cyrius toolchain
         run: |
+          set -e
           CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')}"
           echo "Installing Cyrius $CYRIUS_VERSION"
-          curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
-          tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          TARBALL="cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          URL="https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/$TARBALL"
+          # Verify the release asset exists before download — same
+          # pre-flight as ci.yml (see ci.yml for the v1.9.0 first-push
+          # incident that prompted this guard: pin bumped ahead of an
+          # unreleased cyrius, curl 404'd, tar emitted misleading
+          # "not in gzip format").
+          HTTP_CODE=$(curl -sL -o /dev/null -w "%{http_code}" -I "$URL")
+          if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "302" ]; then
+            echo "::error::Cyrius release $CYRIUS_VERSION not found on GitHub (HTTP $HTTP_CODE)."
+            echo "::error::Asset URL: $URL"
+            echo "::error::Fix: roll cyrius.cyml's 'cyrius =' pin back to a tagged version, or wait for $CYRIUS_VERSION to be tagged."
+            exit 1
+          fi
+          curl -sLO "$URL"
+          if ! file "$TARBALL" | grep -q "gzip compressed"; then
+            echo "::error::Downloaded $TARBALL is not a gzip archive."
+            echo "::error::First 200 bytes (likely a GitHub error page):"
+            head -c 200 "$TARBALL" || true
+            exit 1
+          fi
+          tar xzf "$TARBALL"
           CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
           mkdir -p "$HOME/.cyrius/bin" "$HOME/.cyrius/lib"
           cp "$CYRIUS_DIR/bin/"* "$HOME/.cyrius/bin/" 2>/dev/null || true
