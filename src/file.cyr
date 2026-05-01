@@ -175,7 +175,7 @@ enum OpenFlag { O_NOFOLLOW = 131072; }
 # mode 0644 = 420). O_EXCL already refuses an existing target; O_NOFOLLOW
 # additionally refuses a symlink pointed at the target path.
 fn _pt_file_create(path) {
-    var fd = syscall(SYS_OPEN, path, 194 + O_NOFOLLOW, 420);
+    var fd = sys_open(path, 194 + O_NOFOLLOW, 420);
     if (fd < 0) { return 0 - 1; }
     var buf = pg_alloc();
     patra_hdr_init(buf);
@@ -188,7 +188,7 @@ fn _pt_file_create(path) {
 
 # Open existing .patra file (O_RDWR | O_NOFOLLOW). Refuses symlinked targets.
 fn _pt_file_open(path) {
-    return syscall(SYS_OPEN, path, 2 + O_NOFOLLOW, 0);
+    return sys_open(path, 2 + O_NOFOLLOW, 0);
 }
 
 # ── Page slab (4KB buffer pool) ───────────

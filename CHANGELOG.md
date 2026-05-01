@@ -5,6 +5,106 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.1] - 2026-04-30
+
+**aarch64 portability + toolchain bump 5.7.8 → 5.7.48.** The
+syscall surface migrates off raw `SYS_OPEN` / `SYS_UNLINK`
+(absent from aarch64's syscall table — the kernel only has the
+AT-variants on arm64) onto the stdlib's arch-translating
+`sys_open(path, flags, mode)` / `sys_unlink(path)` wrappers.
+`build/patra-aarch64` now produces a valid ARM aarch64 ELF;
+unblocks downstream consumers that need to cross-compile
+through patra (yukti's device manager, vidya, sit, libro).
+
+### Changed
+
+- **Toolchain pin bumped 5.7.8 → 5.7.48** (`cyrius.cyml`). 40
+  patches across 35 days — the longest minor in cyrius history
+  (v5.7.0 2026-03-26 → v5.7.48 2026-04-30 closeout backstop).
+  The arc is mostly stdlib expansion (json pretty-print +
+  streaming + RFC 6901 pointer in v5.7.40-5.7.42, regex engine
+  in v5.7.18, JSON tagged-tree engine in v5.7.20, sandhi HTTP
+  fold at v5.7.0, Landlock + getrandom syscall wrappers in
+  v5.7.35) and aarch64 backend hardening (f64 basic ops in
+  v5.7.30, codebuf cap raised in v5.7.34) — none of which patra
+  exercises. Two latent language gotchas surface during the
+  bump — both audited, neither requires a patra code change:
+  - `var buf[N]` inside a function body is **static data**, not
+    stack — consecutive calls share backing memory, so any
+    `Str` or pointer aliasing into `buf` dangles on the next
+    call. Patra has zero such sites in src/ — discipline note
+    in CLAUDE.md ("Heap-allocate large buffers — `var
+    buf[256000]` bloats binary by 256KB") was followed
+    consistently. All buffers go through `pg_alloc()` /
+    `fl_alloc()`.
+  - 5.x stdlib lookup helpers (`toml_get`, `args_get`, etc.)
+    take cstr keys, not `Str`. Patra rolls its own SQL parser /
+    JSON tokenizer / B-tree and consumes none of the affected
+    helpers — `[deps] stdlib` lists only `syscalls`, `string`,
+    `alloc`, `freelist`, `io`, `fmt`, `str`, `vec`. Nothing to
+    migrate.
+
+  Notable 5.7.x additions patra doesn't currently exercise but
+  worth flagging:
+  - `cyrius smoke` / `cyrius soak` subcommands (v5.7.38) —
+    natural fit for the alloc-pressure-heavy test surface.
+  - `cyrius api-surface` (v5.7.33) — public-API diff gate;
+    could formalize patra's stable surface for libro / vidya /
+    sit / yukti / daimon.
+  - `lib/security.cyr` Landlock + `lib/random.cyr` getrandom
+    (v5.7.35) — useful for path-traversal hardening on
+    `.patra` file open paths.
+  - `lib/test.cyr` v1 with `test_each` table-driven dispatch
+    (v5.7.43) — could compress the 620-assertion suite.
+
+  Full gate verified on 5.7.48: build 0 warnings (modulo
+  expected `dead:` reports from DCE), `cyrius lint` 0 warnings
+  on every `src/*.cyr`, 620/620 unit tests pass, 6/6 fuzz
+  harnesses pass (btree, bytes, file, jsonl, sql, wal),
+  benchmarks running cleanly (1.8.x perf claims preserved:
+  insert_1k_prepared 14µs, dedup_insert_or_ignore_500 14µs,
+  insert_500_sync_batch 87µs), libro integration 15/15 pass,
+  vidya integration 19/19 pass, demo runs cleanly. Lockfile
+  unchanged (sakshi 0.9.0 tag didn't move).
+
+- **Syscall wrapper migration — 9 sites across 3 modules**
+  (the aarch64 unblock):
+  - `src/jsonl.cyr:11` — `jsonl_open(path)` now uses
+    `sys_open(path, 132162, 420)` (was raw
+    `syscall(SYS_OPEN, …)`).
+  - `src/file.cyr:178` — `_pt_file_create(path)` now uses
+    `sys_open(path, 194 + O_NOFOLLOW, 420)`.
+  - `src/file.cyr:191` — `_pt_file_open(path)` now uses
+    `sys_open(path, 2 + O_NOFOLLOW, 0)`.
+  - `src/wal.cyr:77` — `wal_start(...)` now uses
+    `sys_open(wal_path, 578, 420)`.
+  - `src/wal.cyr:204` — `wal_recover(...)` now uses
+    `sys_open(wal_path, 0, 0)`.
+  - `src/wal.cyr:149,177,197,227` — four `wal_*` cleanup
+    paths now use `sys_unlink(wal_path)` (was raw
+    `syscall(SYS_UNLINK, …)`).
+
+  The wrappers are pass-through on x86_64 (same `SYS_OPEN = 2`
+  / `SYS_UNLINK = 87` as before — no behavioral change) and
+  dispatch through `SYS_OPENAT(AT_FDCWD, …)` /
+  `SYS_UNLINKAT(AT_FDCWD, …)` on aarch64. Flag values are
+  POSIX-stable across arches; the migration is purely
+  call-site syntax. Verified:
+  `CYRIUS_DCE=1 cyrius build --aarch64 src/lib.cyr
+  build/patra-aarch64` → "ELF 64-bit LSB executable, ARM
+  aarch64, version 1 (SYSV), statically linked, no section
+  header". Nine `syscall arity mismatch` warnings remain on
+  the *other* direct syscall callers (`SYS_FDATASYNC`,
+  `SYS_LSEEK`, `SYS_READ`, `SYS_WRITE`, `SYS_CLOSE`,
+  `SYS_FLOCK`) — those are arch-stable so no portability
+  blocker, but a follow-on patch could migrate them to their
+  matching `sys_*` wrappers for warning hygiene.
+
+- `dist/patra.cyr` regenerated (4785 lines, v1.9.1). Generated
+  code byte-identical to v1.9.0 modulo the version header and
+  the 9 syscall call sites — semantic equivalence on x86_64
+  preserved.
+
 ## [1.9.0] - 2026-04-26
 
 **`json_build` → `patra_json_build` rename to clear stdlib

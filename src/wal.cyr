@@ -74,7 +74,7 @@ fn _wal_hash(pg, page_data, salt1, salt2) {
 
 # Begin WAL logging for a transaction
 fn wal_start(db_fd, wal_path) {
-    _wal_fd = syscall(SYS_OPEN, wal_path, 578, 420);
+    _wal_fd = sys_open(wal_path, 578, 420);
     # O_RDWR | O_CREAT | O_TRUNC = 2 + 64 + 512 = 578
     if (_wal_fd < 0) { _wal_fd = 0 - 1; return PATRA_ERR_IO; }
     _wal_db_fd = db_fd;
@@ -146,7 +146,7 @@ fn wal_commit(wal_path) {
     }
     _wal_fd = 0 - 1;
     _wal_nlog = 0;
-    syscall(SYS_UNLINK, wal_path);
+    sys_unlink(wal_path);
     return 0;
 }
 
@@ -174,7 +174,7 @@ fn wal_rollback(wal_path) {
         syscall(SYS_CLOSE, _wal_fd);
         _wal_fd = 0 - 1;
         _wal_nlog = 0;
-        syscall(SYS_UNLINK, wal_path);
+        sys_unlink(wal_path);
         return PATRA_ERR_MAGIC;
     }
     var buf = fl_alloc(WAL_REC_SZ);
@@ -194,14 +194,14 @@ fn wal_rollback(wal_path) {
     syscall(SYS_CLOSE, _wal_fd);
     _wal_fd = 0 - 1;
     _wal_nlog = 0;
-    syscall(SYS_UNLINK, wal_path);
+    sys_unlink(wal_path);
     return 0;
 }
 
 # Recover from crash: if WAL file exists, replay it. Returns 1 on replay
 # attempt (even if bad magic — the file is then left for inspection).
 fn wal_recover(db_fd, wal_path) {
-    var wfd = syscall(SYS_OPEN, wal_path, 0, 0);
+    var wfd = sys_open(wal_path, 0, 0);
     if (wfd < 0) { return 0; }
     if (_wal_hdr_verify(wfd) != PATRA_OK) {
         # Bad magic / stale format: refuse to replay. Leave the file on disk
@@ -224,6 +224,6 @@ fn wal_recover(db_fd, wal_path) {
     fl_free(buf);
     syscall(SYS_FDATASYNC, db_fd);
     syscall(SYS_CLOSE, wfd);
-    syscall(SYS_UNLINK, wal_path);
+    sys_unlink(wal_path);
     return 1;
 }
