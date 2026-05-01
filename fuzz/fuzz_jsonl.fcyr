@@ -1,4 +1,4 @@
-# fuzz_jsonl.fcyr — JSONL parser invariants
+# fuzz_jsonl.fcyr -- JSONL parser invariants
 #
 # Exercises jsonl_read / jsonl_get_str / jsonl_get_int against adversarial
 # line content (embedded controls, long digits, malformed keys). Asserts
@@ -15,38 +15,38 @@ var jpath = "/tmp/patra_fuzz_jsonl.jsonl";
 
 fn _cleanup() { syscall(SYS_UNLINK, jpath); return 0; }
 
-# ── 1. jsonl_get_int overflow → 0 ───────────────────────────
+# -- 1. jsonl_get_int overflow -> 0 ---------------------------
 
 var line = "{\"x\": 99999999999999999999}";
 var v = jsonl_get_int(line, strlen(line), "x", 1);
 if (v != 0) { syscall(SYS_EXIT, 1); }
 
-# ── 2. jsonl_get_int cutoff value parses ────────────────────
+# -- 2. jsonl_get_int cutoff value parses --------------------
 
 line = "{\"x\": 922337203685477580}";
 v = jsonl_get_int(line, strlen(line), "x", 1);
 if (v != 922337203685477580) { syscall(SYS_EXIT, 2); }
 
-# ── 3. Negative value ───────────────────────────────────────
+# -- 3. Negative value ---------------------------------------
 
 line = "{\"x\": -42}";
 v = jsonl_get_int(line, strlen(line), "x", 1);
 if (v != 0 - 42) { syscall(SYS_EXIT, 3); }
 
-# ── 4. Missing key returns 0 without crashing ───────────────
+# -- 4. Missing key returns 0 without crashing ---------------
 
 line = "{\"x\": 1}";
 v = jsonl_get_int(line, strlen(line), "ghost", 5);
 if (v != 0) { syscall(SYS_EXIT, 4); }
 
-# ── 5. Malformed JSON line (no closing brace) — no crash ────
+# -- 5. Malformed JSON line (no closing brace) -- no crash ----
 
 line = "{\"x\": 5";
 v = jsonl_get_int(line, strlen(line), "x", 1);
 # Don't assert specific value; assert survived the call
 if (v < 0 - 1000) { syscall(SYS_EXIT, 5); }
 
-# ── 6. jsonl_read on a file with very long lines ────────────
+# -- 6. jsonl_read on a file with very long lines ------------
 
 _cleanup();
 var jfd = jsonl_open(jpath);
@@ -68,7 +68,7 @@ if (jsonl_lines_count(lr) < 2) { syscall(SYS_EXIT, 11); }
 jsonl_lines_free(lr);
 jsonl_close(jfd);
 
-# ── 7. Line with embedded control bytes — jsonl_read keeps them ──
+# -- 7. Line with embedded control bytes -- jsonl_read keeps them --
 
 _cleanup();
 jfd = jsonl_open(jpath);

@@ -431,7 +431,7 @@ fn main() {
     while (bwi < 500) {
         bench_batch_start(b_bw);
         patra_insert_row(_bdb, "bobj", 4, 2, bwt_types, bwt_ivals,
-                         bwt_sptrs, bwt_slens, bwt_bptrs, bwt_blens);
+        bwt_sptrs, bwt_slens, bwt_bptrs, bwt_blens);
         bench_batch_stop(b_bw, 1);
         bwi = bwi + 1;
     }

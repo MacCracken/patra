@@ -5,6 +5,110 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.2] - 2026-04-30
+
+**Lint / fmt clean surface — pre-existing pollution flushed.** 1.9.1
+landed the toolchain bump and aarch64 unblock but flagged ~50
+upstream-surfaced lint warnings + fmt drift on test/fuzz files as
+"pre-existing pollution, not 1.9.1 introduced, not CI-blocking".
+This patch closes those out so the surface lints + formats clean
+end-to-end. Also extends the syscall-wrapper migration started in
+1.9.1 to the remaining `SYS_CLOSE` / `SYS_READ` / `SYS_WRITE`
+callers (no portability impact — those numbers are arch-stable —
+but the `sys_*` wrapper form removes the per-call-site
+`syscall arity mismatch` warnings that surfaced during aarch64
+cross-build).
+
+### Changed
+
+- **Banner-comment unicode → ASCII** across `tests/tcyr/patra.tcyr`,
+  `tests/bcyr/patra.bcyr`, and four fuzz harnesses. 1,558 occurrences
+  of `─` (U+2500 BOX DRAWINGS LIGHT HORIZONTAL, 3 bytes UTF-8) →
+  `-`, plus 39 `—` (em-dash) → `--` and 27 `→` (arrow) → `->`.
+  Visual structure preserved; pure encoding swap.
+
+  Two side effects this fixes:
+  1. **38 `line exceeds 120 characters` lint warnings vanish.**
+     `cyrlint` counts bytes, not characters, so a 60-char banner
+     of `─`s was 180 bytes wide and tripped the 120-byte cap. Same
+     issue across all 9 long-line warnings in `fuzz/*.fcyr`.
+  2. **`tests/tcyr/patra.tcyr` falls under the 128 KB
+     cyrfmt/cyrlint internal buffer cap** (134,107 → ~131,000
+     bytes), eliminating the false-positive
+     `unclosed braces at end of file` warning at line 3681 and the
+     silent truncation that broke `cyrfmt --write` on this file.
+     Root cause filed in
+     `docs/development/issues/2026-04-30-cyrius-cyrfmt-cyrlint-buffer-truncation.md`
+     — same shape as the v5.7.36 distlib 64 KB → 256 KB fix that
+     should propagate to cyrfmt/cyrlint upstream.
+
+- **Multi-blank-line cluster** at `tests/tcyr/patra.tcyr:1006-1009`
+  collapsed (between the v0.11 SHA-256 and Transactions sections) —
+  the only two `multiple consecutive blank lines` lint warnings.
+
+- **Syscall wrapper migration extended — 27 sites across 5 modules**
+  (continues 1.9.1's `sys_open`/`sys_unlink` migration):
+  - `src/page.cyr` — 2 sites (`page_read`, `page_write` — both
+    `sys_read`/`sys_write`).
+  - `src/wal.cyr` — 13 sites (`wal_start` header write, `wal_log_page`
+    read+write, `wal_commit` close, `_wal_hdr_verify` read,
+    `wal_rollback` close+read+write+close, `wal_recover`
+    close+read+write+close).
+  - `src/file.cyr` — 4 sites (`patra_hdr_read` read, both write paths,
+    `_pt_file_create` write+close).
+  - `src/jsonl.cyr` — 5 sites (`jsonl_close`, `jsonl_append` write × 2,
+    `jsonl_read` read, `jsonl_read_streaming` read).
+  - `src/lib.cyr` — 3 sites (open-handle close paths).
+
+  Pattern: `syscall(SYS_CLOSE, fd)` → `sys_close(fd)`,
+  `syscall(SYS_READ, fd, buf, n)` → `sys_read(fd, buf, n)`,
+  `syscall(SYS_WRITE, fd, buf, n)` → `sys_write(fd, buf, n)`.
+  Pass-through on x86_64. Net effect on aarch64 cross-build:
+  warning count down on cleanly-wrappable callers; the remaining
+  direct callers (`SYS_LSEEK`, `SYS_FLOCK`, `SYS_FDATASYNC`,
+  `SYS_GETRANDOM`, `syscall(201, …)` for `time(2)`) stay direct —
+  no stdlib wrappers exist for those today, and their numbers are
+  either arch-stable or arch-defined per-file.
+
+### Fixed
+
+- **`cyrfmt --write` no longer corrupts `tests/tcyr/patra.tcyr`.**
+  The file is now under the 128 KB upstream tool buffer ceiling so
+  fmt processes the full content. Previously
+  `cyrfmt --write tests/tcyr/patra.tcyr` was a destructive operation
+  (silent data loss — truncated mid-identifier near
+  `test_like_underscor`, dropping `fn main()`'s closing brace and
+  the `var r = main(); syscall(SYS_EXIT, r)` epilogue). See the
+  upstream issue file referenced above.
+
+### Added
+
+- **`docs/development/issues/2026-04-30-cyrius-cyrfmt-cyrlint-buffer-truncation.md`**
+  — root-cause writeup of the upstream cyrfmt/cyrlint 128 KB
+  buffer limit. Includes a synthetic reproducer, byte-precise
+  cause, suggested upstream fix (match v5.7.36 distlib's 64K→256K
+  bump, or stream the input/output), and the pinned workaround
+  applied here. To revisit when next cyrius bump lands.
+
+### Verified
+
+- Build clean on 5.7.48: `OK`, only the expected `dead: sakshi_error`
+  unused-import report.
+- 620/620 unit tests, 6/6 fuzz harnesses (btree, bytes, file,
+  jsonl, sql, wal), libro integration 15/15, vidya integration
+  19/19, demo runs cleanly.
+- Lint sweep `0 warnings` across every `src/*.cyr`,
+  `programs/*.cyr`, `tests/tcyr/*.tcyr`, `tests/bcyr/*.bcyr`,
+  `fuzz/*.fcyr`. Fmt sweep `0 drift` across the same surface.
+- aarch64 cross-build still produces a valid ARM aarch64 ELF
+  (`CYRIUS_DCE=1 cyrius build --aarch64 src/lib.cyr build/patra-aarch64`
+  → `ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV),
+  statically linked, no section header`). Remaining `syscall arity
+  mismatch` warnings are now confined to the unwrappable LSEEK /
+  FLOCK / FDATASYNC / GETRANDOM / time callers.
+- `dist/patra.cyr` regenerated (4785 lines, v1.9.2).
+- Lockfile (sakshi 0.9.0) unchanged.
+
 ## [1.9.1] - 2026-04-30
 
 **aarch64 portability + toolchain bump 5.7.8 → 5.7.48.** The

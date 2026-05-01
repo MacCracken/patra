@@ -1,4 +1,4 @@
-# fuzz_bytes.fcyr — malformed BYTES chain invariants
+# fuzz_bytes.fcyr -- malformed BYTES chain invariants
 #
 # Builds a table with a BYTES column, plants chain-corrupting mutations on
 # the blob's head page, and asserts Patra returns cleanly rather than
@@ -54,7 +54,7 @@ fn _seed_one_blob() {
 
     fl_free(types); fl_free(ivals); fl_free(sptrs);
     fl_free(slens); fl_free(bptrs); fl_free(blens); fl_free(payload);
-    # Return (db handle, first_pg) via module-level vars — caller closes.
+    # Return (db handle, first_pg) via module-level vars -- caller closes.
     _g_db = db;
     _g_fp = first_pg;
     return 0;
@@ -65,14 +65,14 @@ fn _try_read() {
     if (rs == 0) { return 0; }
     var out = fl_alloc(16384);
     memset(out, 0, 16384);
-    # Ignore return — the invariant is "don't crash / hang".
+    # Ignore return -- the invariant is "don't crash / hang".
     patra_result_read_bytes(_g_db, rs, 0, 1, out);
     fl_free(out);
     patra_result_free(rs);
     return 0;
 }
 
-# ── 1. BY_TYPE overwritten to a non-PAGE_BYTES sentinel ─────
+# -- 1. BY_TYPE overwritten to a non-PAGE_BYTES sentinel -----
 
 _seed_one_blob();
 var fd = _db_fd(_g_db);
@@ -83,7 +83,7 @@ page_write(fd, _g_fp, buf);
 _try_read();
 patra_close(_g_db);
 
-# ── 2. BY_LEN set far past BY_DATA_MAX (must be rejected) ───
+# -- 2. BY_LEN set far past BY_DATA_MAX (must be rejected) ---
 
 _seed_one_blob();
 fd = _db_fd(_g_db);
@@ -93,7 +93,7 @@ page_write(fd, _g_fp, buf);
 _try_read();
 patra_close(_g_db);
 
-# ── 3. BY_NEXT pointing to itself (cycle) ───────────────────
+# -- 3. BY_NEXT pointing to itself (cycle) -------------------
 
 _seed_one_blob();
 fd = _db_fd(_g_db);
@@ -103,7 +103,7 @@ page_write(fd, _g_fp, buf);
 _try_read();
 patra_close(_g_db);
 
-# ── 4. BY_NEXT pointing past end-of-file ────────────────────
+# -- 4. BY_NEXT pointing past end-of-file --------------------
 
 _seed_one_blob();
 fd = _db_fd(_g_db);
@@ -113,7 +113,7 @@ page_write(fd, _g_fp, buf);
 _try_read();
 patra_close(_g_db);
 
-# ── 5. BY_LEN negative ──────────────────────────────────────
+# -- 5. BY_LEN negative --------------------------------------
 
 _seed_one_blob();
 fd = _db_fd(_g_db);

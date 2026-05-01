@@ -1,4 +1,4 @@
-# fuzz_btree.fcyr — malformed B-tree page invariants
+# fuzz_btree.fcyr -- malformed B-tree page invariants
 #
 # Builds a valid indexed table, corrupts the root B-tree page in specific
 # ways, and asserts Patra returns cleanly rather than crashing or hanging.
@@ -37,7 +37,7 @@ fn _build_seed() {
     return db;
 }
 
-# ── 1. BT_NKEYS set far past legal cap (63) ─────────────────
+# -- 1. BT_NKEYS set far past legal cap (63) -----------------
 
 var db = _build_seed();
 var root = _root_pg(db);
@@ -52,7 +52,7 @@ var rs = patra_query(db, "SELECT * FROM t WHERE id = 1");
 if (rs != 0) { patra_result_free(rs); }
 patra_close(db);
 
-# ── 2. BT_LEAF flipped to non-{0,1} sentinel ────────────────
+# -- 2. BT_LEAF flipped to non-{0,1} sentinel ----------------
 
 db = _build_seed();
 root = _root_pg(db);
@@ -65,7 +65,7 @@ rs = patra_query(db, "SELECT * FROM t WHERE id = 1");
 if (rs != 0) { patra_result_free(rs); }
 patra_close(db);
 
-# ── 3. Internal node with child pointing past end-of-file ───
+# -- 3. Internal node with child pointing past end-of-file ---
 
 db = _build_seed();
 root = _root_pg(db);
@@ -82,7 +82,7 @@ rs = patra_query(db, "SELECT * FROM t WHERE id = 2");
 if (rs != 0) { patra_result_free(rs); }
 patra_close(db);
 
-# ── 4. Child pointer = root itself (cycle) ──────────────────
+# -- 4. Child pointer = root itself (cycle) ------------------
 
 db = _build_seed();
 root = _root_pg(db);
@@ -99,7 +99,7 @@ rs = patra_query(db, "SELECT * FROM t WHERE id = 2");
 if (rs != 0) { patra_result_free(rs); }
 patra_close(db);
 
-# ── 5. Child = 0 (header page) ──────────────────────────────
+# -- 5. Child = 0 (header page) ------------------------------
 
 db = _build_seed();
 root = _root_pg(db);

@@ -1,4 +1,4 @@
-# fuzz_file.fcyr — Malformed .patra file invariant checks
+# fuzz_file.fcyr -- Malformed .patra file invariant checks
 # Tests that corrupt/truncated files are rejected gracefully.
 # Exit 0 = all pass. Non-zero = invariant ID that failed.
 
@@ -10,7 +10,7 @@ patra_init();
 
 var fpath = "/tmp/patra_fuzz_file.patra";
 
-# ── Wrong magic ─────────────────────────────────────────────
+# -- Wrong magic ---------------------------------------------
 
 # Write a file with garbage magic
 syscall(SYS_UNLINK, fpath);
@@ -25,7 +25,7 @@ syscall(SYS_CLOSE, fd);
 var db = patra_open(fpath);
 if (db != 0) { syscall(SYS_EXIT, 1); }
 
-# ── Truncated file (< 4096 bytes) ───────────────────────────
+# -- Truncated file (< 4096 bytes) ---------------------------
 
 syscall(SYS_UNLINK, fpath);
 fd = syscall(SYS_OPEN, fpath, 194, 420);
@@ -35,7 +35,7 @@ syscall(SYS_CLOSE, fd);
 db = patra_open(fpath);
 if (db != 0) { syscall(SYS_EXIT, 2); }
 
-# ── Zero-length file ────────────────────────────────────────
+# -- Zero-length file ----------------------------------------
 
 syscall(SYS_UNLINK, fpath);
 fd = syscall(SYS_OPEN, fpath, 194, 420);
@@ -46,7 +46,7 @@ db = patra_open(fpath);
 if (db != 0) { patra_close(db); syscall(SYS_EXIT, 3); }
 syscall(SYS_UNLINK, fpath);
 
-# ── Valid file — basic operations must work ──────────────────
+# -- Valid file -- basic operations must work ------------------
 
 syscall(SYS_UNLINK, fpath);
 db = patra_open(fpath);
@@ -87,7 +87,7 @@ patra_result_free(rs);
 
 patra_close(db);
 
-# ── Reopen and verify persistence ────────────────────────────
+# -- Reopen and verify persistence ----------------------------
 
 db = patra_open(fpath);
 if (db == 0) { syscall(SYS_EXIT, 30); }
@@ -96,7 +96,7 @@ if (patra_result_count(rs) != 3) { syscall(SYS_EXIT, 31); }
 patra_result_free(rs);
 patra_close(db);
 
-# ── JSONL round-trip ─────────────────────────────────────────
+# -- JSONL round-trip -----------------------------------------
 
 var jpath = "/tmp/patra_fuzz_file.jsonl";
 syscall(SYS_UNLINK, jpath);
@@ -121,23 +121,23 @@ jsonl_lines_free(lr);
 jsonl_close(jfd);
 syscall(SYS_UNLINK, jpath);
 
-# ── Header verify edge cases ────────────────────────────────
+# -- Header verify edge cases --------------------------------
 
 # All 0xFF
 memset(buf, 255, PAGE_SIZE);
 if (patra_hdr_verify(buf) == PATRA_OK) { syscall(SYS_EXIT, 50); }
 
-# Correct magic but wrong version — rejected as of 1.5.1 (audit 2026-04-21 §3.7)
+# Correct magic but wrong version -- rejected as of 1.5.1 (audit 2026-04-21 §3.7)
 patra_hdr_init(buf);
 store32(buf + 4, 99);
 if (patra_hdr_verify(buf) == PATRA_OK) { syscall(SYS_EXIT, 51); }
 
-# Over-cap table count — rejected as of 1.5.1
+# Over-cap table count -- rejected as of 1.5.1
 patra_hdr_init(buf);
 store64(buf + HDR_TBLCOUNT, 1000);
 if (patra_hdr_verify(buf) == PATRA_OK) { syscall(SYS_EXIT, 52); }
 
-# Out-of-range freehead — rejected as of 1.5.1
+# Out-of-range freehead -- rejected as of 1.5.1
 patra_hdr_init(buf);
 store64(buf + HDR_PGCOUNT, 10);
 store64(buf + HDR_FREEHEAD, 99);

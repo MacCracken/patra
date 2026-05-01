@@ -91,7 +91,7 @@ fn wal_start(db_fd, wal_path) {
     store32(hdr + 4, WAL_VER);
     store64(hdr + 8, _wal_salt1);
     store64(hdr + 16, _wal_salt2);
-    syscall(SYS_WRITE, _wal_fd, hdr, WAL_HDR_SZ);
+    sys_write(_wal_fd, hdr, WAL_HDR_SZ);
     fl_free(hdr);
     return PATRA_OK;
 }
@@ -121,12 +121,12 @@ fn wal_log_page(page_num) {
     memset(buf, 0, WAL_REC_SZ);
     store64(buf, page_num);
     _pt_seek(_wal_db_fd, page_offset(page_num));
-    var nr = syscall(SYS_READ, _wal_db_fd, buf + 8, PAGE_SIZE);
+    var nr = sys_read(_wal_db_fd, buf + 8, PAGE_SIZE);
     if (nr < 0) { nr = 0; }
     # Trailing checksum (salted)
     store64(buf + 8 + PAGE_SIZE, _wal_hash(page_num, buf + 8, _wal_salt1, _wal_salt2));
     # Write record to WAL
-    syscall(SYS_WRITE, _wal_fd, buf, WAL_REC_SZ);
+    sys_write(_wal_fd, buf, WAL_REC_SZ);
     fl_free(buf);
     return 0;
 }
@@ -139,7 +139,7 @@ fn wal_log_page(page_num) {
 fn wal_commit(wal_path) {
     if (_wal_fd >= 0) {
         syscall(SYS_FDATASYNC, _wal_fd);
-        syscall(SYS_CLOSE, _wal_fd);
+        sys_close(_wal_fd);
     }
     if (_wal_db_fd >= 0) {
         syscall(SYS_FDATASYNC, _wal_db_fd);
@@ -155,7 +155,7 @@ fn wal_commit(wal_path) {
 fn _wal_hdr_verify(fd) {
     if (syscall(SYS_LSEEK, fd, 0, 0) < 0) { return PATRA_ERR_IO; }
     var hdr = fl_alloc(WAL_HDR_SZ);
-    var nr = syscall(SYS_READ, fd, hdr, WAL_HDR_SZ);
+    var nr = sys_read(fd, hdr, WAL_HDR_SZ);
     if (nr != WAL_HDR_SZ) { fl_free(hdr); return PATRA_ERR_MAGIC; }
     if (load32(hdr) != WAL_MAGIC) { fl_free(hdr); return PATRA_ERR_MAGIC; }
     if (load32(hdr + 4) != WAL_VER) { fl_free(hdr); return PATRA_ERR_MAGIC; }
@@ -171,7 +171,7 @@ fn _wal_hdr_verify(fd) {
 fn wal_rollback(wal_path) {
     if (_wal_fd < 0) { return 0; }
     if (_wal_hdr_verify(_wal_fd) != PATRA_OK) {
-        syscall(SYS_CLOSE, _wal_fd);
+        sys_close(_wal_fd);
         _wal_fd = 0 - 1;
         _wal_nlog = 0;
         sys_unlink(wal_path);
@@ -180,18 +180,18 @@ fn wal_rollback(wal_path) {
     var buf = fl_alloc(WAL_REC_SZ);
     var done = 0;
     while (done == 0) {
-        var nr = syscall(SYS_READ, _wal_fd, buf, WAL_REC_SZ);
+        var nr = sys_read(_wal_fd, buf, WAL_REC_SZ);
         if (nr != WAL_REC_SZ) { done = 1; continue; }
         var pg = load64(buf);
         var want = load64(buf + 8 + PAGE_SIZE);
         var got = _wal_hash(pg, buf + 8, _wal_salt1, _wal_salt2);
         if (want != got) { done = 1; continue; }
         _pt_seek(_wal_db_fd, page_offset(pg));
-        syscall(SYS_WRITE, _wal_db_fd, buf + 8, PAGE_SIZE);
+        sys_write(_wal_db_fd, buf + 8, PAGE_SIZE);
     }
     fl_free(buf);
     syscall(SYS_FDATASYNC, _wal_db_fd);
-    syscall(SYS_CLOSE, _wal_fd);
+    sys_close(_wal_fd);
     _wal_fd = 0 - 1;
     _wal_nlog = 0;
     sys_unlink(wal_path);
@@ -206,24 +206,24 @@ fn wal_recover(db_fd, wal_path) {
     if (_wal_hdr_verify(wfd) != PATRA_OK) {
         # Bad magic / stale format: refuse to replay. Leave the file on disk
         # so an operator can inspect it; we will not silently corrupt the DB.
-        syscall(SYS_CLOSE, wfd);
+        sys_close(wfd);
         return 1;
     }
     var buf = fl_alloc(WAL_REC_SZ);
     var done = 0;
     while (done == 0) {
-        var nr = syscall(SYS_READ, wfd, buf, WAL_REC_SZ);
+        var nr = sys_read(wfd, buf, WAL_REC_SZ);
         if (nr != WAL_REC_SZ) { done = 1; continue; }
         var pg = load64(buf);
         var want = load64(buf + 8 + PAGE_SIZE);
         var got = _wal_hash(pg, buf + 8, _wal_salt1, _wal_salt2);
         if (want != got) { done = 1; continue; }
         _pt_seek(db_fd, page_offset(pg));
-        syscall(SYS_WRITE, db_fd, buf + 8, PAGE_SIZE);
+        sys_write(db_fd, buf + 8, PAGE_SIZE);
     }
     fl_free(buf);
     syscall(SYS_FDATASYNC, db_fd);
-    syscall(SYS_CLOSE, wfd);
+    sys_close(wfd);
     sys_unlink(wal_path);
     return 1;
 }

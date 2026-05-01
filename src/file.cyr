@@ -118,7 +118,7 @@ fn patra_hdr_init(buf) {
 # Read header page from file into buffer
 fn patra_hdr_read(fd, buf) {
     if (_pt_seek(fd, 0) < 0) { return PATRA_ERR_IO; }
-    if (syscall(SYS_READ, fd, buf, PAGE_SIZE) != PAGE_SIZE) { return PATRA_ERR_IO; }
+    if (sys_read(fd, buf, PAGE_SIZE) != PAGE_SIZE) { return PATRA_ERR_IO; }
     return PATRA_OK;
 }
 
@@ -127,7 +127,7 @@ fn patra_hdr_read(fd, buf) {
 # Write the header page without fdatasync (group-commit path).
 fn patra_hdr_write_nosync(fd, buf) {
     if (_pt_seek(fd, 0) < 0) { return PATRA_ERR_IO; }
-    if (syscall(SYS_WRITE, fd, buf, PAGE_SIZE) != PAGE_SIZE) { return PATRA_ERR_IO; }
+    if (sys_write(fd, buf, PAGE_SIZE) != PAGE_SIZE) { return PATRA_ERR_IO; }
     return PATRA_OK;
 }
 
@@ -180,9 +180,9 @@ fn _pt_file_create(path) {
     var buf = pg_alloc();
     patra_hdr_init(buf);
     _pt_seek(fd, 0);
-    var r = syscall(SYS_WRITE, fd, buf, PAGE_SIZE);
+    var r = sys_write(fd, buf, PAGE_SIZE);
     pg_free(buf);
-    if (r != PAGE_SIZE) { syscall(SYS_CLOSE, fd); return 0 - 1; }
+    if (r != PAGE_SIZE) { sys_close(fd); return 0 - 1; }
     return fd;
 }
 

@@ -13,7 +13,7 @@ fn jsonl_open(path) {
 
 # Close JSONL file
 fn jsonl_close(fd) {
-    syscall(SYS_CLOSE, fd);
+    sys_close(fd);
     return 0;
 }
 
@@ -22,9 +22,9 @@ fn jsonl_close(fd) {
 # Append raw data + newline with exclusive lock
 fn jsonl_append(fd, data, len) {
     patra_lock_ex(fd);
-    var w = syscall(SYS_WRITE, fd, data, len);
+    var w = sys_write(fd, data, len);
     if (w < 0) { patra_unlock(fd); return PATRA_ERR_IO; }
-    syscall(SYS_WRITE, fd, "\n", 1);
+    sys_write(fd, "\n", 1);
     syscall(SYS_FDATASYNC, fd);
     patra_unlock(fd);
     return PATRA_OK;
@@ -181,7 +181,7 @@ fn jsonl_read(fd) {
     var eof = 0;
     while (eof == 0) {
         if (rd >= size) { eof = 1; continue; }
-        var n = syscall(SYS_READ, fd, data + rd, size - rd);
+        var n = sys_read(fd, data + rd, size - rd);
         if (n <= 0) { eof = 1; continue; }
         rd = rd + n;
     }
@@ -359,7 +359,7 @@ fn jsonl_count(fd) {
     var count = 0;
     var eof = 0;
     while (eof == 0) {
-        var n = syscall(SYS_READ, fd, buf, 4096);
+        var n = sys_read(fd, buf, 4096);
         if (n <= 0) { eof = 1; continue; }
         for (var i = 0; i < n; i = i + 1) {
             if (load8(buf + i) == 10) { count = count + 1; }

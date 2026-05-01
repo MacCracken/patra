@@ -1,4 +1,4 @@
-# patra.tcyr — Patra test suite (v0.1 + v0.2)
+# patra.tcyr -- Patra test suite (v0.1 + v0.2)
 
 include "src/lib.cyr"
 include "lib/assert.cyr"
@@ -7,7 +7,7 @@ var _tpath = "/tmp/patra_test.patra";
 
 fn cleanup() { syscall(SYS_UNLINK, _tpath); }
 
-# ── v0.1: Header ────────────────────────────────────────────
+# -- v0.1: Header --------------------------------------------
 
 fn test_header() {
     test_group("header");
@@ -23,7 +23,7 @@ fn test_header() {
     fl_free(buf);
 }
 
-# ── v0.1: File create ───────────────────────────────────────
+# -- v0.1: File create ---------------------------------------
 
 fn test_file_create() {
     test_group("file create");
@@ -37,7 +37,7 @@ fn test_file_create() {
     syscall(SYS_CLOSE, fd);
 }
 
-# ── v0.1: Page alloc / free ─────────────────────────────────
+# -- v0.1: Page alloc / free ---------------------------------
 
 fn test_page_alloc() {
     test_group("page alloc");
@@ -56,7 +56,7 @@ fn test_page_alloc() {
     syscall(SYS_CLOSE, fd);
 }
 
-# ── v0.1: Page read / write ─────────────────────────────────
+# -- v0.1: Page read / write ---------------------------------
 
 fn test_page_rw() {
     test_group("page read write");
@@ -79,7 +79,7 @@ fn test_page_rw() {
     syscall(SYS_CLOSE, fd);
 }
 
-# ── v0.1: Row encoding ──────────────────────────────────────
+# -- v0.1: Row encoding --------------------------------------
 
 fn test_row_encoding() {
     test_group("row encoding");
@@ -105,7 +105,7 @@ fn test_row_encoding() {
     fl_free(schema);
 }
 
-# ── v0.1: SQL tokenizer ─────────────────────────────────────
+# -- v0.1: SQL tokenizer -------------------------------------
 
 fn test_tokenize() {
     test_group("tokenize");
@@ -145,7 +145,7 @@ fn test_tokenize_v2() {
     assert_eq(_tok_type(3), TK_LIMIT, "LIMIT");
 }
 
-# ── v0.1: SQL parser ────────────────────────────────────────
+# -- v0.1: SQL parser ----------------------------------------
 
 fn test_parse_create() {
     test_group("parse create");
@@ -186,7 +186,7 @@ fn test_parse_bad_sql() {
     assert_eq(sql_parse(), PATRA_ERR_SYNTAX, "no projection");
 }
 
-# ── v0.2: SQL parser extensions ──────────────────────────────
+# -- v0.2: SQL parser extensions ------------------------------
 
 fn test_parse_select_where() {
     test_group("parse select where");
@@ -265,7 +265,7 @@ fn test_parse_delete() {
     assert_eq(load64(_sql_pr + PR_WHERE_N), 0, "no where");
 }
 
-# ── v0.1: Full integration ──────────────────────────────────
+# -- v0.1: Full integration ----------------------------------
 
 fn test_create_insert_select() {
     test_group("create insert select");
@@ -297,7 +297,7 @@ fn test_errors() {
     patra_close(db);
 }
 
-# ── v0.2: WHERE ──────────────────────────────────────────────
+# -- v0.2: WHERE ----------------------------------------------
 
 fn _setup_people(db) {
     patra_exec(db, "CREATE TABLE people (id INT, name STR, age INT)");
@@ -388,7 +388,7 @@ fn test_where_no_match() {
     patra_close(db);
 }
 
-# ── v0.2: ORDER BY ───────────────────────────────────────────
+# -- v0.2: ORDER BY -------------------------------------------
 
 fn test_order_by() {
     test_group("order by");
@@ -412,7 +412,7 @@ fn test_order_by() {
     patra_close(db);
 }
 
-# ── v0.2: LIMIT ──────────────────────────────────────────────
+# -- v0.2: LIMIT ----------------------------------------------
 
 fn test_limit() {
     test_group("limit");
@@ -444,7 +444,7 @@ fn test_where_order_limit() {
     patra_close(db);
 }
 
-# ── v0.2: UPDATE ─────────────────────────────────────────────
+# -- v0.2: UPDATE ---------------------------------------------
 
 fn test_update() {
     test_group("update");
@@ -487,7 +487,7 @@ fn test_update_multi_set() {
     patra_close(db);
 }
 
-# ── v0.2: DELETE ─────────────────────────────────────────────
+# -- v0.2: DELETE ---------------------------------------------
 
 fn test_delete() {
     test_group("delete");
@@ -552,7 +552,7 @@ fn test_delete_then_insert() {
     patra_close(db);
 }
 
-# ── v0.4: JSONL ──────────────────────────────────────────────
+# -- v0.4: JSONL ----------------------------------------------
 
 var _jpath = "/tmp/patra_test.jsonl";
 fn jcleanup() { syscall(SYS_UNLINK, _jpath); return 0; }
@@ -666,7 +666,7 @@ fn test_jsonl_empty() {
     jcleanup();
 }
 
-# ── v0.3: B-tree ─────────────────────────────────────────────
+# -- v0.3: B-tree ---------------------------------------------
 
 fn test_btree_basic() {
     test_group("btree basic");
@@ -775,7 +775,7 @@ fn test_indexed_select() {
     var db = patra_open(_tpath);
     _setup_people(db);
 
-    # id is first INT column — should be indexed
+    # id is first INT column -- should be indexed
     var rs = patra_query(db, "SELECT * FROM people WHERE id = 3");
     assert_eq(patra_result_count(rs), 1, "found by index");
     assert_streq(patra_result_get_str(rs, 0, 1), "carol", "correct row");
@@ -840,7 +840,7 @@ fn test_btree_many() {
     patra_close(db);
 }
 
-# ── v0.10: Aggregates ─────────────────────────────────────────
+# -- v0.10: Aggregates -----------------------------------------
 
 fn test_aggregates() {
     test_group("aggregates");
@@ -898,7 +898,7 @@ fn test_aggregate_where() {
     patra_close(db);
 }
 
-# ── v0.10: CREATE INDEX ──────────────────────────────────────
+# -- v0.10: CREATE INDEX --------------------------------------
 
 fn test_create_index() {
     test_group("create index");
@@ -936,7 +936,7 @@ fn test_create_index() {
     patra_close(db);
 }
 
-# ── v0.8.1: Indexed range scan ───────────────────────────────
+# -- v0.8.1: Indexed range scan -------------------------------
 
 fn test_indexed_range() {
     test_group("indexed range");
@@ -1003,11 +1003,9 @@ fn test_indexed_range_with_filter() {
     patra_close(db);
 }
 
+# -- v0.11: SHA-256 ------------------------------------------
 
-# ── v0.11: SHA-256 ──────────────────────────────────────────
-
-
-# ── v0.11: Transactions ─────────────────────────────────────
+# -- v0.11: Transactions -------------------------------------
 
 fn test_transaction_commit() {
     test_group("tx commit");
@@ -1044,7 +1042,7 @@ fn test_transaction_rollback() {
     patra_result_free(rs);
     patra_close(db);
 }
-# ── Coverage: persistence ────────────────────────────────────
+# -- Coverage: persistence ------------------------------------
 
 fn test_persistence() {
     test_group("persistence");
@@ -1073,7 +1071,7 @@ fn test_persistence() {
     patra_close(db);
 }
 
-# ── Coverage: page overflow ──────────────────────────────────
+# -- Coverage: page overflow ----------------------------------
 
 fn test_page_overflow() {
     test_group("page overflow");
@@ -1094,7 +1092,7 @@ fn test_page_overflow() {
     patra_close(db);
 }
 
-# ── Coverage: string edge cases ──────────────────────────────
+# -- Coverage: string edge cases ------------------------------
 
 fn test_string_edges() {
     test_group("string edges");
@@ -1109,7 +1107,7 @@ fn test_string_edges() {
     assert_streq(patra_result_get_str(rs, 0, 1), "", "empty val");
     patra_result_free(rs);
 
-    # Max length (63 chars — last byte null)
+    # Max length (63 chars -- last byte null)
     patra_exec(db, "INSERT INTO se VALUES (2, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')");
     rs = patra_query(db, "SELECT * FROM se WHERE id = 2");
     assert_eq(patra_result_count(rs), 1, "max str");
@@ -1124,7 +1122,7 @@ fn test_string_edges() {
     patra_close(db);
 }
 
-# ── Coverage: NEQ and STR comparisons ────────────────────────
+# -- Coverage: NEQ and STR comparisons ------------------------
 
 fn test_neq_and_str_cmp() {
     test_group("neq and str cmp");
@@ -1158,7 +1156,7 @@ fn test_neq_and_str_cmp() {
     patra_close(db);
 }
 
-# ── Coverage: multi-table isolation ──────────────────────────
+# -- Coverage: multi-table isolation --------------------------
 
 fn test_multi_table_isolation() {
     test_group("multi table isolation");
@@ -1190,7 +1188,7 @@ fn test_multi_table_isolation() {
     patra_close(db);
 }
 
-# ── Coverage: SQL edge cases ─────────────────────────────────
+# -- Coverage: SQL edge cases ---------------------------------
 
 fn test_order_by_multi() {
     test_group("order by multi");
@@ -1198,7 +1196,7 @@ fn test_order_by_multi() {
     var db = patra_open(_tpath);
     _setup_people(db);
 
-    # ORDER BY age ASC, name ASC — age 25 has bob and dave
+    # ORDER BY age ASC, name ASC -- age 25 has bob and dave
     var rs = patra_query(db, "SELECT * FROM people ORDER BY age, name");
     assert_eq(patra_result_get_int(rs, 0, 2), 25, "first age 25");
     assert_streq(patra_result_get_str(rs, 0, 1), "bob", "bob before dave");
@@ -1265,7 +1263,7 @@ fn test_sql_semicolons() {
     assert_eq(sql_parse(), PATRA_OK, "delete semi");
 }
 
-# ── Coverage: JSONL special chars ────────────────────────────
+# -- Coverage: JSONL special chars ----------------------------
 
 fn test_jsonl_field_extract() {
     test_group("jsonl field extract");
@@ -1320,12 +1318,12 @@ fn test_jsonl_special_chars() {
     jcleanup();
 }
 
-# ── v1.5.3: audit P2 hardening + layout invariant ────────────
+# -- v1.5.3: audit P2 hardening + layout invariant ------------
 
 # Guards future parser growth against silently overrunning the 4096-byte
 # `_sql_pr` buffer. Each statement type stores its per-item entries at
 # PR_ITEMS, but only SELECT uses PR_AGG_* / PR_PROJ_N / PR_ORDERBY_COLS
-# — so PR_ITEMS can legitimately overlap those ranges for CREATE / INSERT /
+# -- so PR_ITEMS can legitimately overlap those ranges for CREATE / INSERT /
 # UPDATE. The invariants we actually need:
 #   - every PR_ITEMS write for any statement type fits within 4096
 #   - SELECT's projection list (which uses PR_ITEMS) must stop before PR_AGG_TYPE
@@ -1341,10 +1339,10 @@ fn test_parse_result_layout_invariant() {
     assert(PR_ITEMS + MAX_COLS * SET_SZ <= 4096, "UPDATE set items in 4096");
 
     # SELECT projection list shares PR_ITEMS with other statement types but
-    # only SELECT uses PR_AGG_TYPE/PR_PROJ_N — the projection must therefore
+    # only SELECT uses PR_AGG_TYPE/PR_PROJ_N -- the projection must therefore
     # fit below PR_AGG_TYPE to avoid overwriting its own aggregate metadata.
     assert(PR_ITEMS + MAX_COLS * SEL_SZ <= PR_AGG_TYPE,
-           "SELECT projection fits before PR_AGG_TYPE");
+    "SELECT projection fits before PR_AGG_TYPE");
 
     # Aggregate metadata ordering
     assert(PR_AGG_COL_LEN + 8 <= PR_PROJ_N, "agg metadata before PR_PROJ_N");
@@ -1352,23 +1350,23 @@ fn test_parse_result_layout_invariant() {
 
     # ORDER-BY columns zone holds OB_MAX × OB_SZ entries before PR_WHERE
     assert(PR_ORDERBY_COLS + OB_MAX * OB_SZ <= PR_WHERE,
-           "ORDERBY_COLS fits before PR_WHERE");
+    "ORDERBY_COLS fits before PR_WHERE");
 
     # WHERE condition zone holds WH_MAX × WH_ENTRY_SZ entries within 4096
     assert(PR_WHERE + WH_MAX * WH_ENTRY_SZ <= 4096,
-           "PR_WHERE * WH_MAX fits in 4096");
+    "PR_WHERE * WH_MAX fits in 4096");
 }
 
-# ── v1.5.2: audit P1 hardening ───────────────────────────────
+# -- v1.5.2: audit P1 hardening -------------------------------
 
-# §4.2 #9 — JSON escape covers all control bytes 0x00–0x1F.
+# §4.2 #9 -- JSON escape covers all control bytes 0x00–0x1F.
 fn test_json_escape_control_chars() {
     test_group("json escape control chars");
     var dst = fl_alloc(256);
     var src = fl_alloc(32);
 
     # Insert each 0x00-0x1F byte and verify output
-    # 0x00 (NUL) → [NUL]
+    # 0x00 (NUL) -> [NUL]
     memset(src, 0, 32);
     store8(src, 0);
     var w = _json_escape(dst, src, 1);
@@ -1380,25 +1378,25 @@ fn test_json_escape_control_chars() {
     assert_eq(load8(dst + 4), 48, "0");
     assert_eq(load8(dst + 5), 48, "0");
 
-    # 0x08 → \b
+    # 0x08 -> \b
     store8(src, 8);
     w = _json_escape(dst, src, 1);
     assert_eq(w, 2, "\\b is 2 chars");
     assert_eq(load8(dst + 1), 98, "b");
 
-    # 0x0C → \f
+    # 0x0C -> \f
     store8(src, 12);
     w = _json_escape(dst, src, 1);
     assert_eq(w, 2, "\\f is 2 chars");
     assert_eq(load8(dst + 1), 102, "f");
 
-    # 0x01 → [NUL]
+    # 0x01 -> [NUL]
     store8(src, 1);
     w = _json_escape(dst, src, 1);
     assert_eq(w, 6, "\\u0001 is 6 chars");
     assert_eq(load8(dst + 5), 49, "last hex = '1'");
 
-    # 0x1F → [NUL]
+    # 0x1F -> [NUL]
     store8(src, 31);
     w = _json_escape(dst, src, 1);
     assert_eq(w, 6, "\\u001f is 6 chars");
@@ -1420,7 +1418,7 @@ fn test_json_escape_control_chars() {
     fl_free(dst);
 }
 
-# §4.2 (new) — jsonl_get_int refuses overflow-inducing input.
+# §4.2 (new) -- jsonl_get_int refuses overflow-inducing input.
 fn test_jsonl_get_int_overflow() {
     test_group("jsonl_get_int overflow");
     # 25-digit value overflows i64; pre-1.5.2 silently wrapped.
@@ -1440,13 +1438,13 @@ fn test_jsonl_get_int_overflow() {
     v = jsonl_get_int(line3, strlen(line3), "x", 1);
     assert_eq(v, 922337203685477580, "cutoff value parses");
 
-    # Any further digit overflows → returns 0
+    # Any further digit overflows -> returns 0
     var line4 = "{\"x\": 9223372036854775820}";
     v = jsonl_get_int(line4, strlen(line4), "x", 1);
     assert_eq(v, 0, "MAX+n overflow rejected");
 }
 
-# §4.2 #14 — O_NOFOLLOW refuses to open a symlinked DB path.
+# §4.2 #14 -- O_NOFOLLOW refuses to open a symlinked DB path.
 fn test_symlink_refused() {
     test_group("symlink refused");
     var target = "/tmp/patra_nofollow_real.patra";
@@ -1454,7 +1452,7 @@ fn test_symlink_refused() {
     syscall(SYS_UNLINK, target);
     syscall(SYS_UNLINK, link);
 
-    # Create a real db at target, then symlink link → target
+    # Create a real db at target, then symlink link -> target
     var db = patra_open(target);
     assert(db != 0, "real db open");
     patra_close(db);
@@ -1469,7 +1467,7 @@ fn test_symlink_refused() {
     syscall(SYS_UNLINK, target);
 }
 
-# §4.2 #12 — page_offset overflow returns sentinel; page_alloc via
+# §4.2 #12 -- page_offset overflow returns sentinel; page_alloc via
 # corrupted HDR_FREEHEAD does not wild-seek.
 fn test_page_offset_overflow() {
     test_group("page_offset overflow");
@@ -1482,7 +1480,7 @@ fn test_page_offset_overflow() {
     assert(page_offset(0 - 5) < 0, "negative rejected");
 }
 
-# §2.9 — wal_commit issues fdatasync on the DB fd before unlink.
+# §2.9 -- wal_commit issues fdatasync on the DB fd before unlink.
 # Hard to test directly without an fsync instrumentation hook; sanity-check
 # that a committed transaction survives close/reopen, which it must.
 fn test_wal_commit_durable() {
@@ -1504,16 +1502,16 @@ fn test_wal_commit_durable() {
     patra_close(db);
 }
 
-# ── v1.5.1: audit-driven hardening ───────────────────────────
+# -- v1.5.1: audit-driven hardening ---------------------------
 
-# §4.2 #10 — INSERT with too many values returns PATRA_ERR_COLCOUNT
+# §4.2 #10 -- INSERT with too many values returns PATRA_ERR_COLCOUNT
 # before trampling past PR_ITEMS.
 fn test_insert_value_count_bounded() {
     test_group("insert value count bounded");
     cleanup();
     var db = patra_open(_tpath);
     patra_exec(db, "CREATE TABLE t (x INT)");
-    # 200 values into a 1-col table — must reject during parse
+    # 200 values into a 1-col table -- must reject during parse
     var sql[4096];
     memcpy(&sql, "INSERT INTO t VALUES (", 22);
     var w = 22;
@@ -1527,13 +1525,13 @@ fn test_insert_value_count_bounded() {
     patra_close(db);
 }
 
-# §4.2 #11 — WHERE with too many conditions returns an error.
+# §4.2 #11 -- WHERE with too many conditions returns an error.
 fn test_where_condition_count_bounded() {
     test_group("where condition count bounded");
     cleanup();
     var db = patra_open(_tpath);
     patra_exec(db, "CREATE TABLE t (x INT)");
-    # 100 AND conditions — exceeds WH_MAX=32
+    # 100 AND conditions -- exceeds WH_MAX=32
     var sql[4096];
     memcpy(&sql, "SELECT * FROM t WHERE x = 1", 27);
     var w = 27;
@@ -1542,13 +1540,13 @@ fn test_where_condition_count_bounded() {
         w = w + 10;
     }
     store8(&sql + w, 0);
-    # Beyond cap → parse fails and query returns null
+    # Beyond cap -> parse fails and query returns null
     var rs = patra_query(db, &sql);
     assert_eq(rs, 0, "over-capped WHERE rejected");
     patra_close(db);
 }
 
-# §4.2 #7 (subset) — bare random-bytes WAL is refused, no silent replay.
+# §4.2 #7 (subset) -- bare random-bytes WAL is refused, no silent replay.
 fn test_wal_bad_magic_refused() {
     test_group("wal bad magic refused");
     cleanup();
@@ -1577,7 +1575,7 @@ fn test_wal_bad_magic_refused() {
     syscall(SYS_UNLINK, wpath);
 }
 
-# §4.2 (new) — valid WAL with a forged tail record (bad checksum) replays
+# §4.2 (new) -- valid WAL with a forged tail record (bad checksum) replays
 # up to the bad record and stops.
 fn test_wal_checksum_stops_replay() {
     test_group("wal checksum stops replay");
@@ -1613,7 +1611,7 @@ fn test_wal_checksum_stops_replay() {
     patra_close(db);
 }
 
-# §4.2 (new) — patra_hdr_verify rejects over-cap table count.
+# §4.2 (new) -- patra_hdr_verify rejects over-cap table count.
 fn test_hdr_verify_bad_tblcount() {
     test_group("hdr verify bad tblcount");
     var buf = fl_alloc(PAGE_SIZE);
@@ -1640,7 +1638,7 @@ fn test_hdr_verify_bad_tblcount() {
     fl_free(buf);
 }
 
-# §4.2 #6 (subset) — malformed B-tree child pointer caught by page_read_checked.
+# §4.2 #6 (subset) -- malformed B-tree child pointer caught by page_read_checked.
 # We fabricate a root leaf that claims to be internal with a child pointing
 # past end-of-file; the indexed SELECT must not crash.
 fn test_btree_bad_child_pointer() {
@@ -1651,7 +1649,7 @@ fn test_btree_bad_child_pointer() {
     patra_exec(db, "INSERT INTO t VALUES (1, 10)");
     patra_exec(db, "INSERT INTO t VALUES (2, 20)");
 
-    # Locate the B-tree root and corrupt it: flip leaf→internal and set
+    # Locate the B-tree root and corrupt it: flip leaf->internal and set
     # child 0 = huge out-of-range page number.
     var hdr = _db_hdr(db);
     var fd = _db_fd(db);
@@ -1674,7 +1672,7 @@ fn test_btree_bad_child_pointer() {
     # Query must return without crashing (bounds check on page_read intercepts
     # the bogus child pointer; depth cap also provides backstop).
     var rs = patra_query(db, "SELECT * FROM t WHERE id = 1");
-    # Don't assert a specific count — the tree is deliberately broken.
+    # Don't assert a specific count -- the tree is deliberately broken.
     # We only assert patra_query returned without crashing.
     if (rs != 0) { patra_result_free(rs); }
     assert(1, "survived bad child pointer");
@@ -1682,7 +1680,7 @@ fn test_btree_bad_child_pointer() {
     patra_close(db);
 }
 
-# ── v1.5: B-tree full-tree page reclaim ──────────────────────
+# -- v1.5: B-tree full-tree page reclaim ----------------------
 
 fn _free_list_len(db) {
     var hdr = _db_hdr(db);
@@ -1719,7 +1717,7 @@ fn test_btree_page_reclaim_drop() {
     patra_exec(db, "DROP TABLE r");
     var free_after = _free_list_len(db);
 
-    # Pre-1.5.0: tbl_drop only freed the B-tree root → delta dominated by
+    # Pre-1.5.0: tbl_drop only freed the B-tree root -> delta dominated by
     # a handful of data pages. Post-1.5.0: every internal + leaf page is
     # reclaimed too. For 300 keys we expect well over 5 B-tree pages alone.
     assert(free_after - free_before >= 5, "multi-level b-tree pages reclaimed");
@@ -1746,7 +1744,7 @@ fn test_btree_page_reclaim_alter_add() {
     var fd = _db_fd(db);
     var pgcount_before = load64(hdr + HDR_PGCOUNT);
 
-    # ALTER ADD INT has minimal row-size impact (8 bytes) — the new B-tree
+    # ALTER ADD INT has minimal row-size impact (8 bytes) -- the new B-tree
     # rebuild's page demand is almost identical to the old tree's freed pages.
     patra_exec(db, "ALTER TABLE a ADD COLUMN y INT");
 
@@ -1766,7 +1764,7 @@ fn test_btree_page_reclaim_alter_add() {
     patra_close(db);
 }
 
-# ── v1.4: ALTER TABLE ────────────────────────────────────────
+# -- v1.4: ALTER TABLE ----------------------------------------
 
 fn test_parse_alter() {
     test_group("parse alter");
@@ -1831,7 +1829,7 @@ fn test_alter_drop_indexed_col() {
     patra_exec(db, "INSERT INTO di VALUES (1, 'a', 10)");
     patra_exec(db, "INSERT INTO di VALUES (2, 'b', 20)");
 
-    # Drop the indexed column → index torn down
+    # Drop the indexed column -> index torn down
     assert_eq(patra_exec(db, "ALTER TABLE di DROP COLUMN id"), PATRA_OK, "drop indexed");
 
     var rs = patra_query(db, "SELECT * FROM di");
@@ -1867,7 +1865,7 @@ fn test_alter_drop_before_indexed() {
     patra_exec(db, "INSERT INTO bi VALUES ('y', 2, 20)");
     patra_exec(db, "INSERT INTO bi VALUES ('z', 3, 30)");
 
-    # Drop tag (col 0). Indexed col id shifts from 1 → 0.
+    # Drop tag (col 0). Indexed col id shifts from 1 -> 0.
     assert_eq(patra_exec(db, "ALTER TABLE bi DROP COLUMN tag"), PATRA_OK, "drop col0");
 
     # Indexed query on id still works with the rebuilt index at its new position
@@ -1886,13 +1884,13 @@ fn test_alter_drop_last_col_rejected() {
     var db = patra_open(_tpath);
     patra_exec(db, "CREATE TABLE sole (id INT)");
     assert_eq(patra_exec(db, "ALTER TABLE sole DROP COLUMN id"),
-              PATRA_ERR_COLCOUNT, "can't go to 0 cols");
+    PATRA_ERR_COLCOUNT, "can't go to 0 cols");
 
     # 2-col table: drop one is fine, can't drop the other
     patra_exec(db, "CREATE TABLE two (id INT, name STR)");
-    assert_eq(patra_exec(db, "ALTER TABLE two DROP COLUMN name"), PATRA_OK, "2→1 ok");
+    assert_eq(patra_exec(db, "ALTER TABLE two DROP COLUMN name"), PATRA_OK, "2->1 ok");
     assert_eq(patra_exec(db, "ALTER TABLE two DROP COLUMN id"),
-              PATRA_ERR_COLCOUNT, "1→0 rejected");
+    PATRA_ERR_COLCOUNT, "1->0 rejected");
     patra_close(db);
 }
 
@@ -1902,9 +1900,9 @@ fn test_alter_drop_unknown() {
     var db = patra_open(_tpath);
     patra_exec(db, "CREATE TABLE u (id INT, name STR)");
     assert_eq(patra_exec(db, "ALTER TABLE u DROP COLUMN ghost"),
-              PATRA_ERR_NOTFOUND, "unknown col");
+    PATRA_ERR_NOTFOUND, "unknown col");
     assert_eq(patra_exec(db, "ALTER TABLE ghost DROP COLUMN x"),
-              PATRA_ERR_NOTFOUND, "unknown table");
+    PATRA_ERR_NOTFOUND, "unknown table");
     patra_close(db);
 }
 
@@ -1949,11 +1947,11 @@ fn test_alter_rename_table() {
     # Collision rejected
     patra_exec(db, "CREATE TABLE other (id INT)");
     assert_eq(patra_exec(db, "ALTER TABLE renamed RENAME TO other"),
-              PATRA_ERR_EXISTS, "collision rejected");
+    PATRA_ERR_EXISTS, "collision rejected");
 
     # Unknown source
     assert_eq(patra_exec(db, "ALTER TABLE ghost RENAME TO x"),
-              PATRA_ERR_NOTFOUND, "unknown source");
+    PATRA_ERR_NOTFOUND, "unknown source");
 
     patra_close(db);
 }
@@ -1967,16 +1965,16 @@ fn test_alter_rename_column() {
     patra_exec(db, "INSERT INTO r VALUES (2, 'bob', 25)");
     patra_exec(db, "INSERT INTO r VALUES (3, 'carol', 35)");
 
-    # Rename name → label
+    # Rename name -> label
     assert_eq(patra_exec(db, "ALTER TABLE r RENAME COLUMN name TO label"),
-              PATRA_OK, "rename ok");
+    PATRA_OK, "rename ok");
 
     # WHERE on new name works
     var rs = patra_query(db, "SELECT * FROM r WHERE label = 'bob'");
     assert_eq(patra_result_count(rs), 1, "new name usable in WHERE");
     patra_result_free(rs);
 
-    # WHERE on old name no longer resolves — returns no matches
+    # WHERE on old name no longer resolves -- returns no matches
     rs = patra_query(db, "SELECT * FROM r WHERE name = 'bob'");
     assert_eq(patra_result_count(rs), 0, "old name no longer resolves");
     patra_result_free(rs);
@@ -1994,11 +1992,11 @@ fn test_alter_rename_column() {
 
     # Rename to existing col name rejected
     assert_eq(patra_exec(db, "ALTER TABLE r RENAME COLUMN label TO age"),
-              PATRA_ERR_EXISTS, "collision rejected");
+    PATRA_ERR_EXISTS, "collision rejected");
 
     # Rename unknown col rejected
     assert_eq(patra_exec(db, "ALTER TABLE r RENAME COLUMN ghost TO x"),
-              PATRA_ERR_NOTFOUND, "unknown col rejected");
+    PATRA_ERR_NOTFOUND, "unknown col rejected");
 
     patra_close(db);
 }
@@ -2010,11 +2008,11 @@ fn test_alter_add_column_empty() {
     patra_exec(db, "CREATE TABLE e (id INT)");
 
     assert_eq(patra_exec(db, "ALTER TABLE e ADD COLUMN name STR"),
-              PATRA_OK, "add col on empty");
+    PATRA_OK, "add col on empty");
 
     # Insert with the new shape
     assert_eq(patra_exec(db, "INSERT INTO e VALUES (1, 'hello')"),
-              PATRA_OK, "insert 2-col");
+    PATRA_OK, "insert 2-col");
 
     var rs = patra_query(db, "SELECT * FROM e");
     assert_eq(patra_result_cols(rs), 2, "2 cols post-alter");
@@ -2035,7 +2033,7 @@ fn test_alter_add_column_populated() {
     patra_exec(db, "INSERT INTO p VALUES (3, 'carol')");
 
     assert_eq(patra_exec(db, "ALTER TABLE p ADD COLUMN age INT"),
-              PATRA_OK, "add col ok");
+    PATRA_OK, "add col ok");
 
     # Existing rows keep their values; new col defaults to 0
     var rs = patra_query(db, "SELECT * FROM p");
@@ -2093,9 +2091,9 @@ fn test_alter_add_column_collision() {
     var db = patra_open(_tpath);
     patra_exec(db, "CREATE TABLE c (id INT, name STR)");
     assert_eq(patra_exec(db, "ALTER TABLE c ADD COLUMN id INT"),
-              PATRA_ERR_EXISTS, "duplicate col rejected");
+    PATRA_ERR_EXISTS, "duplicate col rejected");
     assert_eq(patra_exec(db, "ALTER TABLE ghost ADD COLUMN x INT"),
-              PATRA_ERR_NOTFOUND, "unknown table");
+    PATRA_ERR_NOTFOUND, "unknown table");
     patra_close(db);
 }
 
@@ -2117,7 +2115,7 @@ fn test_alter_add_persists() {
     patra_close(db);
 }
 
-# ── v1.3: VACUUM / B-tree compaction ─────────────────────────
+# -- v1.3: VACUUM / B-tree compaction -------------------------
 
 fn _count_leaf_entries(fd, pg, inc_tombs) {
     var buf = fl_alloc(PAGE_SIZE);
@@ -2216,7 +2214,7 @@ fn test_vacuum_no_index() {
     test_group("vacuum no index");
     cleanup();
     var db = patra_open(_tpath);
-    # STR-only table has no auto-index and no CREATE INDEX → VACUUM is a no-op
+    # STR-only table has no auto-index and no CREATE INDEX -> VACUUM is a no-op
     patra_exec(db, "CREATE TABLE s (name STR)");
     patra_exec(db, "INSERT INTO s VALUES ('a')");
     assert_eq(patra_exec(db, "VACUUM s"), PATRA_OK, "no-op ok");
@@ -2231,7 +2229,7 @@ fn test_vacuum_unknown_table() {
     patra_close(db);
 }
 
-# ── v1.3: LIKE operator ──────────────────────────────────────
+# -- v1.3: LIKE operator --------------------------------------
 
 fn test_parse_like() {
     test_group("parse like");
@@ -2288,13 +2286,13 @@ fn test_like_contains() {
     var db = patra_open(_tpath);
     _setup_people(db);
 
-    # %a% → names containing 'a'
+    # %a% -> names containing 'a'
     var rs = patra_query(db, "SELECT * FROM people WHERE name LIKE '%a%'");
     # alice, carol, dave all contain 'a'; bob, eve don't
     assert_eq(patra_result_count(rs), 3, "3 contain a");
     patra_result_free(rs);
 
-    # %l% → alice, carol
+    # %l% -> alice, carol
     rs = patra_query(db, "SELECT * FROM people WHERE name LIKE '%l%'");
     assert_eq(patra_result_count(rs), 2, "2 contain l");
     patra_result_free(rs);
@@ -2308,7 +2306,7 @@ fn test_like_underscore() {
     var db = patra_open(_tpath);
     _setup_people(db);
 
-    # b_b → exactly 3 chars, starts with b, ends with b
+    # b_b -> exactly 3 chars, starts with b, ends with b
     var rs = patra_query(db, "SELECT * FROM people WHERE name LIKE 'b_b'");
     assert_eq(patra_result_count(rs), 1, "matched bob");
     assert_streq(patra_result_get_str(rs, 0, 1), "bob", "is bob");
@@ -2328,7 +2326,7 @@ fn test_like_literal() {
     var db = patra_open(_tpath);
     _setup_people(db);
 
-    # No wildcards → exact equality semantics
+    # No wildcards -> exact equality semantics
     var rs = patra_query(db, "SELECT * FROM people WHERE name LIKE 'alice'");
     assert_eq(patra_result_count(rs), 1, "exact alice");
     patra_result_free(rs);
@@ -2346,7 +2344,7 @@ fn test_like_literal() {
     patra_close(db);
 }
 
-# ── v1.2: SELECT column list ─────────────────────────────────
+# -- v1.2: SELECT column list ---------------------------------
 
 fn test_select_col_single() {
     test_group("select col single");
@@ -2372,7 +2370,7 @@ fn test_select_col_multi() {
     var db = patra_open(_tpath);
     _setup_people(db);
 
-    # Project (name, age) — drop id, reorder
+    # Project (name, age) -- drop id, reorder
     var rs = patra_query(db, "SELECT name, age FROM people");
     assert_eq(patra_result_cols(rs), 2, "2 cols");
     assert_streq(patra_result_col_name(rs, 0), "name", "col0=name");
@@ -2427,7 +2425,7 @@ fn test_select_col_unknown() {
     var db = patra_open(_tpath);
     _setup_people(db);
 
-    # Unknown column — patra_query returns 0
+    # Unknown column -- patra_query returns 0
     var rs = patra_query(db, "SELECT ghost FROM people");
     assert_eq(rs, 0, "unknown col returns 0");
 
@@ -2450,7 +2448,7 @@ fn test_select_col_duplicate() {
     patra_close(db);
 }
 
-# ── v0.16: DROP TABLE ───────────────────────────────────────
+# -- v0.16: DROP TABLE ---------------------------------------
 
 fn test_drop_table() {
     test_group("drop table");
@@ -2526,7 +2524,7 @@ fn test_drop_table_persistence() {
     patra_exec(db, "DROP TABLE dp");
     patra_close(db);
 
-    # Reopen — table should still be gone
+    # Reopen -- table should still be gone
     db = patra_open(_tpath);
     var rs = patra_query(db, "SELECT * FROM dp");
     assert_eq(rs, 0, "gone after reopen");
@@ -2544,7 +2542,7 @@ fn test_drop_parse_errors() {
     assert_eq(sql_parse(), PATRA_ERR_SYNTAX, "drop table no name");
 }
 
-# ── v0.16: WAL overflow ────────────────────────────────────
+# -- v0.16: WAL overflow ------------------------------------
 
 fn test_wal_overflow() {
     test_group("wal overflow");
@@ -2580,7 +2578,7 @@ fn test_wal_overflow() {
     patra_close(db);
 }
 
-# ── v0.17: Hardening ────────────────────────────────────────
+# -- v0.17: Hardening ----------------------------------------
 
 fn test_update_indexed_col() {
     test_group("update indexed col");
@@ -2640,7 +2638,7 @@ fn test_drop_recreate() {
     assert_eq(patra_result_get_int(rs, 0, 1), 20, "y=20");
     patra_result_free(rs);
 
-    # Old data is gone — only 1 row, not 2
+    # Old data is gone -- only 1 row, not 2
     rs = patra_query(db, "SELECT COUNT(*) FROM reuse");
     assert_eq(patra_result_get_int(rs, 0, 0), 1, "count=1");
     patra_result_free(rs);
@@ -2707,7 +2705,7 @@ fn test_multipage_indexed() {
     patra_close(db);
 }
 
-# ── v1.6: BLOB column ───────────────────────────────────────
+# -- v1.6: BLOB column ---------------------------------------
 
 # Fill `buf` with a deterministic byte pattern of length `len`. Pattern is
 # `(i + seed) & 0xFF` so the full range of byte values is exercised.
@@ -2766,12 +2764,12 @@ fn test_bytes_create_table() {
     cleanup();
     var db = patra_open(_tpath);
     assert_eq(patra_exec(db, "CREATE TABLE objects (hash STR, content BLOB)"),
-              PATRA_OK, "create");
+    PATRA_OK, "create");
 
-    # SQL INSERT on a BLOB column must reject — there's no way to carry
+    # SQL INSERT on a BLOB column must reject -- there's no way to carry
     # binary payloads through the tokenizer.
     assert_eq(patra_exec(db, "INSERT INTO objects VALUES ('abc', 'def')"),
-              PATRA_ERR_TYPE, "sql insert rejected");
+    PATRA_ERR_TYPE, "sql insert rejected");
     patra_close(db);
 }
 
@@ -2803,7 +2801,7 @@ fn test_bytes_empty() {
     cleanup();
     var db = patra_open(_tpath);
     patra_exec(db, "CREATE TABLE objects (hash STR, content BLOB)");
-    # Empty blob: ptr NULL, len 0 → no chain pages allocated.
+    # Empty blob: ptr NULL, len 0 -> no chain pages allocated.
     assert_eq(_obj_insert(db, "hash_empty", 0, 0), PATRA_OK, "insert empty");
     var rs = patra_query(db, "SELECT * FROM objects");
     assert_eq(patra_result_get_bytes_len(rs, 0, 1), 0, "len 0");
@@ -2821,7 +2819,7 @@ fn test_bytes_multipage() {
     var db = patra_open(_tpath);
     patra_exec(db, "CREATE TABLE objects (hash STR, content BLOB)");
 
-    # 10_000 bytes → ceil(10000/4072) = 3 chain pages
+    # 10_000 bytes -> ceil(10000/4072) = 3 chain pages
     var sz = 10000;
     var payload = fl_alloc(sz);
     _bytes_fill(payload, sz, 7);
@@ -2891,10 +2889,10 @@ fn test_bytes_delete_frees_chain() {
 
     # DELETE with a WHERE on hash narrows to one row
     assert_eq(patra_exec(db, "DELETE FROM objects WHERE hash = 'big1'"),
-              PATRA_OK, "delete ok");
+    PATRA_OK, "delete ok");
 
     var pg_after = load64(hdr + HDR_PGCOUNT);
-    # Page count doesn't shrink — freed pages go onto the free list.
+    # Page count doesn't shrink -- freed pages go onto the free list.
     assert_eq(pg_after, pg_before, "pgcount unchanged");
     # Free-list head must be non-zero if pages were reclaimed
     assert_eq(load64(hdr + HDR_FREEHEAD) != 0, 1, "freehead set");
@@ -2968,10 +2966,10 @@ fn test_bytes_update_rejected() {
 
     # Cannot UPDATE a BLOB column via SQL
     assert_eq(patra_exec(db, "UPDATE objects SET content = 'nope' WHERE hash = 'h_upd'"),
-              PATRA_ERR_TYPE, "update blob rejected");
+    PATRA_ERR_TYPE, "update blob rejected");
     # Non-BLOB columns still updatable
     assert_eq(patra_exec(db, "UPDATE objects SET hash = 'h_renamed' WHERE hash = 'h_upd'"),
-              PATRA_OK, "hash update ok");
+    PATRA_OK, "hash update ok");
     patra_close(db);
 }
 
@@ -2984,7 +2982,7 @@ fn test_bytes_alter_add() {
     patra_exec(db, "INSERT INTO t VALUES (2, 'bob')");
 
     assert_eq(patra_exec(db, "ALTER TABLE t ADD COLUMN data BLOB"),
-              PATRA_OK, "add blob col");
+    PATRA_OK, "add blob col");
 
     var rs = patra_query(db, "SELECT * FROM t");
     assert_eq(patra_result_count(rs), 2, "2 rows");
@@ -3027,7 +3025,7 @@ fn test_bytes_alter_drop_frees() {
     var fh_before = load64(hdr + HDR_FREEHEAD);
 
     assert_eq(patra_exec(db, "ALTER TABLE objects DROP COLUMN content"),
-              PATRA_OK, "drop blob col");
+    PATRA_OK, "drop blob col");
 
     # Free list must have grown (chain pages reclaimed by drop)
     var fh_after = load64(hdr + HDR_FREEHEAD);
@@ -3074,7 +3072,7 @@ fn test_prepare_insert_select() {
     var ins = patra_prepare(db, "INSERT INTO t VALUES (1, 'alice')");
     assert(ins != 0, "prepare insert ok");
     assert_eq(patra_exec_prepared(db, ins), PATRA_OK, "insert run 1");
-    # Re-running the same prepared stmt — same row inserted again.
+    # Re-running the same prepared stmt -- same row inserted again.
     assert_eq(patra_exec_prepared(db, ins), PATRA_OK, "insert run 2");
     patra_finalize(ins);
 
@@ -3120,7 +3118,7 @@ fn test_prepare_syntax_error() {
     cleanup();
     var db = patra_open(_tpath);
     var bad = patra_prepare(db, "BANANA");
-    assert_eq(bad, 0, "bad SQL → 0 stmt");
+    assert_eq(bad, 0, "bad SQL -> 0 stmt");
     patra_close(db);
 }
 
@@ -3138,7 +3136,7 @@ fn test_prepare_owns_sql_buffer() {
     memcpy(sql, src, n);
     store8(sql + n, 0);
     var p = patra_prepare(db, sql);
-    # Trash the input — must not break the prepared stmt.
+    # Trash the input -- must not break the prepared stmt.
     memset(sql, 0, 64);
     fl_free(sql);
 
@@ -3157,7 +3155,7 @@ fn test_prepare_finalize_safe() {
 
 fn test_prepare_str_index() {
     test_group("prepared INSERT OR IGNORE on STR-indexed");
-    # Exercises the slab + memeq256 + prepared path together — the three
+    # Exercises the slab + memeq256 + prepared path together -- the three
     # 1.8.2 changes in one workload.
     cleanup();
     var db = patra_open(_tpath);
@@ -3166,7 +3164,7 @@ fn test_prepare_str_index() {
     patra_exec(db, "INSERT INTO objs VALUES ('first', 1)");
 
     var p = patra_prepare(db, "INSERT OR IGNORE INTO objs VALUES ('first', 99)");
-    # Run 10 times — every run hits the conflict probe + memeq256 verify.
+    # Run 10 times -- every run hits the conflict probe + memeq256 verify.
     for (var i = 0; i < 10; i = i + 1) {
         assert_eq(patra_exec_prepared(db, p), PATRA_OK, "ignored");
     }
@@ -3190,7 +3188,7 @@ fn test_sync_mode_batch_visibility() {
     test_group("BATCH mode same-process visibility");
     # In BATCH mode the writes aren't fsync'd per exec, but they're still
     # in OS page cache + addressable through this fd, so SELECTs see them.
-    # Crash-durability isn't asserted here — that needs OS-level coordination
+    # Crash-durability isn't asserted here -- that needs OS-level coordination
     # we can't run inside the test binary.
     cleanup();
     var db = patra_open(_tpath);
@@ -3229,7 +3227,7 @@ fn test_sync_mode_close_flushes() {
     patra_set_sync_mode(db, PATRA_SYNC_BATCH);
     patra_exec(db, "CREATE TABLE t (id INT)");
     patra_exec(db, "INSERT INTO t VALUES (42)");
-    # Close without explicit flush — must not lose data.
+    # Close without explicit flush -- must not lose data.
     patra_close(db);
 
     var db2 = patra_open(_tpath);
@@ -3251,7 +3249,7 @@ fn test_sync_mode_reopen_default() {
     patra_close(db);
 
     var db2 = patra_open(_tpath);
-    assert_eq(patra_get_sync_mode(db2), PATRA_SYNC_FULL, "reopen → FULL");
+    assert_eq(patra_get_sync_mode(db2), PATRA_SYNC_FULL, "reopen -> FULL");
     patra_close(db2);
 }
 
@@ -3316,14 +3314,14 @@ fn test_str_index_or_ignore_dedup() {
     patra_exec(db, "INSERT INTO objs VALUES ('alpha', 100)");
     patra_exec(db, "INSERT INTO objs VALUES ('beta', 200)");
 
-    # Conflicting hash 'alpha' — must be ignored, original val preserved.
+    # Conflicting hash 'alpha' -- must be ignored, original val preserved.
     assert_eq(patra_exec(db, "INSERT OR IGNORE INTO objs VALUES ('alpha', 999)"), PATRA_OK, "ignored");
     var rs = patra_query(db, "SELECT * FROM objs WHERE hash = 'alpha'");
     assert_eq(patra_result_count(rs), 1, "still 1 alpha");
     assert_eq(patra_result_get_int(rs, 0, 1), 100, "original val preserved");
     patra_result_free(rs);
 
-    # Non-conflicting hash 'gamma' — must insert.
+    # Non-conflicting hash 'gamma' -- must insert.
     assert_eq(patra_exec(db, "INSERT OR IGNORE INTO objs VALUES ('gamma', 300)"), PATRA_OK, "miss inserts");
     var rs2 = patra_query(db, "SELECT * FROM objs");
     assert_eq(patra_result_count(rs2), 3, "3 rows total");
@@ -3401,7 +3399,7 @@ fn test_str_index_collision_safety() {
     patra_exec(db, "CREATE TABLE objs (hash STR, val INT)");
     patra_exec(db, "CREATE INDEX ON objs (hash)");
     # Distinct hashes that all collide on a degenerate hash (none expected
-    # for djb2 over short distinct strings) — at minimum, exercise the
+    # for djb2 over short distinct strings) -- at minimum, exercise the
     # verify-on-hit path with 50 distinct STR keys.
     for (var i = 0; i < 50; i = i + 1) {
         var sb = fl_alloc(8);
@@ -3430,7 +3428,7 @@ fn test_str_index_collision_safety() {
     var qb = fl_alloc(8);
     memset(qb, 0, 8);
     store8(qb, 98);     # 'b'
-    store8(qb + 1, 109); # 'm' → "bm"
+    store8(qb + 1, 109); # 'm' -> "bm"
     var rs2 = patra_query(db, "SELECT * FROM objs WHERE hash = 'bm'");
     assert_eq(patra_result_count(rs2), 1, "exactly 1 match for 'bm'");
     fl_free(qb);
@@ -3494,8 +3492,8 @@ fn test_insert_or_ignore_no_index() {
     test_group("INSERT OR IGNORE no index");
     cleanup();
     var db = patra_open(_tpath);
-    # First column STR → auto-index doesn't fire (auto-index is INT-only,
-    # table.cyr:80-88) and no CREATE INDEX issued → no conflict surface.
+    # First column STR -> auto-index doesn't fire (auto-index is INT-only,
+    # table.cyr:80-88) and no CREATE INDEX issued -> no conflict surface.
     # INSERT OR IGNORE must behave as plain INSERT in this case.
     patra_exec(db, "CREATE TABLE notes (body STR, id INT)");
     patra_exec(db, "INSERT INTO notes VALUES ('first', 1)");
@@ -3533,7 +3531,7 @@ fn test_result_str_len() {
     patra_exec(db, "INSERT INTO t VALUES (1, '')");
     patra_exec(db, "INSERT INTO t VALUES (2, 'alice')");
 
-    # 255 'a' bytes — the COL_STR_SZ-1 ceiling row_write_str clamps to.
+    # 255 'a' bytes -- the COL_STR_SZ-1 ceiling row_write_str clamps to.
     var max = fl_alloc(256);
     memset(max, 0, 256);
     for (var i = 0; i < 255; i = i + 1) { store8(max + i, 97); }
@@ -3561,7 +3559,7 @@ fn test_result_str_len() {
     patra_close(db);
 }
 
-# ── Runner ──────────────────────────────────────────────────
+# -- Runner --------------------------------------------------
 
 fn main() {
     alloc_init();
@@ -3636,7 +3634,7 @@ fn main() {
     test_indexed_range_with_filter();
 
     # v0.11 SHA-256 + WAL + transactions
-    # sha256 tests removed — crypto is sigil's responsibility
+    # sha256 tests removed -- crypto is sigil's responsibility
     test_transaction_commit();
     test_transaction_rollback();
 

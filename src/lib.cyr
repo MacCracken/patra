@@ -82,13 +82,13 @@ fn patra_open(path) {
         var ok = patra_hdr_read(fd, tmp);
         if (ok != PATRA_OK) {
             pg_free(tmp);
-            syscall(SYS_CLOSE, fd);
+            sys_close(fd);
             _pt_err("patra: cannot read header");
             return 0;
         }
         if (patra_hdr_verify(tmp) != PATRA_OK) {
             pg_free(tmp);
-            syscall(SYS_CLOSE, fd);
+            sys_close(fd);
             _pt_err("patra: invalid magic");
             return 0;
         }
@@ -125,7 +125,7 @@ fn patra_close(db) {
         syscall(SYS_FDATASYNC, fd);
     }
     pg_free(load64(db + DB_HDR));
-    syscall(SYS_CLOSE, fd);
+    sys_close(fd);
     fl_free(db);
     return 0;
 }
