@@ -5,9 +5,45 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.4] - 2026-05-11
+
+### Changed
+
+- **Stdlib annotation pass**: every public fn in `src/*.cyr`
+  carries a `: i64` return-type annotation. Mechanical pass
+  matching cyrius's v5.11.x annotation arc; parse-only, zero
+  runtime / codegen change.
+- `cyrius` pin bumped 5.8.64 → 5.11.4 — required for `: i64`
+  return-type syntax (v5.10.x REAL TYPE SYSTEM).
+- `dist/patra.cyr` regenerated via `cyrius distlib` at v1.9.4.
+  Ready for next cyrius-side fold-in slot.
+
+### Verified
+
+- `cyrius build src/lib.cyr build/patra`: green.
+
 ## [1.9.3] - 2026-05-05
 
-**TODO:** describe this release.
+### Changed
+
+- `cyrius` pin bumped 5.7.48 → 5.8.64 ahead of the cyrius v5.8.65
+  stdlib foldin. Patra is on the foldin manifest; this patch is
+  the prerequisite for cyrius's `[deps].patra.tag` to point at
+  1.9.3 in the foldin slot.
+- `[deps.sakshi].tag` bumped 0.9.0 → 2.2.3 — closes a 1.3.0+
+  version-of-sakshi gap (patra had been pinned to a very old
+  sakshi). Modules path corrected at the same time:
+  `"sakshi.cyr"` → `"dist/sakshi.cyr"` (the canonical convention
+  used by every other dep manifest).
+- No source changes beyond the manifest fixes. `dist/patra.cyr`
+  rebuilt at 4785 lines.
+
+### Verified
+
+- `cyrius test`: **620 / 620** asserts pass against cyrius 5.8.64
+  with sakshi 2.2.3 resolved.
+- Manifest/module path now canonical; future bumps won't trip the
+  resolver.
 
 ## [1.9.2] - 2026-04-30
 

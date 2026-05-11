@@ -42,7 +42,7 @@ enum WalConst {
 # Draw 16 bytes of randomness into (salt1, salt2). Prefers SYS_GETRANDOM;
 # if unavailable (very old kernel / restricted container), falls back to
 # a time + tx-counter mix — weaker but still unique per transaction.
-fn _wal_gen_salts() {
+fn _wal_gen_salts(): i64 {
     var buf = fl_alloc(16);
     var nr = syscall(SYS_GETRANDOM, buf, 16, 0);
     if (nr == 16) {
@@ -63,7 +63,7 @@ fn _wal_gen_salts() {
 # cross-WAL replay. Does not defeat an attacker who can read .wal and the
 # algorithm simultaneously (same-host read gives them the salts). Any
 # stronger guarantee requires a secret outside the filesystem.
-fn _wal_hash(pg, page_data, salt1, salt2) {
+fn _wal_hash(pg, page_data, salt1, salt2): i64 {
     var h = salt1 * 2654435761 + pg;
     h = h + 5381;
     for (var i = 0; i < PAGE_SIZE; i = i + 1) {
@@ -73,7 +73,7 @@ fn _wal_hash(pg, page_data, salt1, salt2) {
 }
 
 # Begin WAL logging for a transaction
-fn wal_start(db_fd, wal_path) {
+fn wal_start(db_fd, wal_path): i64 {
     _wal_fd = sys_open(wal_path, 578, 420);
     # O_RDWR | O_CREAT | O_TRUNC = 2 + 64 + 512 = 578
     if (_wal_fd < 0) { _wal_fd = 0 - 1; return PATRA_ERR_IO; }
@@ -97,16 +97,16 @@ fn wal_start(db_fd, wal_path) {
 }
 
 # Returns 1 if WAL logging is active
-fn wal_is_active() {
+fn wal_is_active(): i64 {
     if (_wal_fd >= 0) { return 1; }
     return 0;
 }
 
 # Returns 1 if WAL overflowed (more than 64 pages in transaction)
-fn wal_overflowed() { return _wal_overflow; }
+fn wal_overflowed(): i64 { return _wal_overflow; }
 
 # Log before-image of a page (called from page_write)
-fn wal_log_page(page_num) {
+fn wal_log_page(page_num): i64 {
     if (_wal_fd < 0) { return 0; }
     # Check if already logged
     for (var i = 0; i < _wal_nlog; i = i + 1) {
@@ -136,7 +136,7 @@ fn wal_log_page(page_num) {
 # writes were durable. A crash in that window lost committed data. Now we
 # fdatasync the DB fd before unlink, guaranteeing that by the time the WAL
 # disappears, the committed pages have reached disk.
-fn wal_commit(wal_path) {
+fn wal_commit(wal_path): i64 {
     if (_wal_fd >= 0) {
         syscall(SYS_FDATASYNC, _wal_fd);
         sys_close(_wal_fd);
@@ -152,7 +152,7 @@ fn wal_commit(wal_path) {
 
 # Verify WAL header and load its salts into the module globals. Returns
 # PATRA_OK, or PATRA_ERR_MAGIC on bad magic / unsupported version / short read.
-fn _wal_hdr_verify(fd) {
+fn _wal_hdr_verify(fd): i64 {
     if (syscall(SYS_LSEEK, fd, 0, 0) < 0) { return PATRA_ERR_IO; }
     var hdr = fl_alloc(WAL_HDR_SZ);
     var nr = sys_read(fd, hdr, WAL_HDR_SZ);
@@ -168,7 +168,7 @@ fn _wal_hdr_verify(fd) {
 # Rollback: restore before-images from WAL, delete it. Stops replay on a
 # checksum mismatch — earlier records still apply, the record with the bad
 # hash and everything after it is skipped.
-fn wal_rollback(wal_path) {
+fn wal_rollback(wal_path): i64 {
     if (_wal_fd < 0) { return 0; }
     if (_wal_hdr_verify(_wal_fd) != PATRA_OK) {
         sys_close(_wal_fd);
@@ -200,7 +200,7 @@ fn wal_rollback(wal_path) {
 
 # Recover from crash: if WAL file exists, replay it. Returns 1 on replay
 # attempt (even if bad magic — the file is then left for inspection).
-fn wal_recover(db_fd, wal_path) {
+fn wal_recover(db_fd, wal_path): i64 {
     var wfd = sys_open(wal_path, 0, 0);
     if (wfd < 0) { return 0; }
     if (_wal_hdr_verify(wfd) != PATRA_OK) {

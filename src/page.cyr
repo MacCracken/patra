@@ -4,14 +4,14 @@
 # overflow so callers' `_pt_seek` check catches it. Audit 2026-04-21 §2.4:
 # i64 `num * PAGE_SIZE` wraps for num ≥ 2^51; we cap at num ≤ 2^50 to leave
 # headroom.
-fn page_offset(num) {
+fn page_offset(num): i64 {
     if (num < 0) { return 0 - 1; }
     if (num > 1125899906842624) { return 0 - 1; }
     return PAGE_SIZE + num * PAGE_SIZE;
 }
 
 # Read a page from file into buffer
-fn page_read(fd, num, buf) {
+fn page_read(fd, num, buf): i64 {
     if (_pt_seek(fd, page_offset(num)) < 0) { return PATRA_ERR_IO; }
     if (sys_read(fd, buf, PAGE_SIZE) != PAGE_SIZE) { return PATRA_ERR_IO; }
     return PATRA_OK;
@@ -21,14 +21,14 @@ fn page_read(fd, num, buf) {
 # (past end of file). Used on any page number read from on-disk data —
 # closes the Magellan-class OOB-read vector where a malformed .patra file
 # can point a B-tree child at arbitrary page numbers.
-fn page_read_checked(fd, hdr, num, buf) {
+fn page_read_checked(fd, hdr, num, buf): i64 {
     if (num <= 0) { return PATRA_ERR_PAGE; }
     if (num >= load64(hdr + HDR_PGCOUNT)) { return PATRA_ERR_PAGE; }
     return page_read(fd, num, buf);
 }
 
 # Write a page from buffer to file (WAL-logged)
-fn page_write(fd, num, buf) {
+fn page_write(fd, num, buf): i64 {
     wal_log_page(num);
     if (_pt_seek(fd, page_offset(num)) < 0) { return PATRA_ERR_IO; }
     if (sys_write(fd, buf, PAGE_SIZE) != PAGE_SIZE) { return PATRA_ERR_IO; }
@@ -36,7 +36,7 @@ fn page_write(fd, num, buf) {
 }
 
 # Allocate a new page (from free list or extend file)
-fn page_alloc(fd, hdr) {
+fn page_alloc(fd, hdr): i64 {
     var fh = load64(hdr + HDR_FREEHEAD);
     if (fh != 0) {
         var buf = fl_alloc(PAGE_SIZE);
@@ -57,7 +57,7 @@ fn page_alloc(fd, hdr) {
 }
 
 # Free a page (add to free list)
-fn page_free(fd, hdr, num) {
+fn page_free(fd, hdr, num): i64 {
     var buf = fl_alloc(PAGE_SIZE);
     memset(buf, 0, PAGE_SIZE);
     store64(buf + FP_TYPE, PAGE_FREE);
@@ -68,7 +68,7 @@ fn page_free(fd, hdr, num) {
 }
 
 # Initialize buffer as empty data page
-fn page_init_data(buf) {
+fn page_init_data(buf): i64 {
     memset(buf, 0, PAGE_SIZE);
     store64(buf + DP_TYPE, PAGE_DATA);
 }

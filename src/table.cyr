@@ -4,11 +4,11 @@ var _tbl_last_ref = 0;
 var _tbl_lp_idx = 0 - 1;
 var _tbl_lp_page = 0;
 
-fn _tbl_entry(hdr, idx) {
+fn _tbl_entry(hdr, idx): i64 {
     return hdr + HDR_TBLDIR + idx * TBL_ENTRY_SZ;
 }
 
-fn _tbl_name_eq(entry, name, nlen) {
+fn _tbl_name_eq(entry, name, nlen): i64 {
     var elen = strlen(entry + TBL_NAME);
     if (elen != nlen) { return 0; }
     return memeq(entry + TBL_NAME, name, nlen);
@@ -19,7 +19,7 @@ fn _tbl_name_eq(entry, name, nlen) {
 # schema has no BLOB columns. Also used during ALTER DROP COLUMN on a
 # BLOB column, where the dropped column's chain must be freed; in that
 # case the caller skips the row-wide sweep and targets the one column.
-fn _tbl_free_row_bytes(fd, hdr, row, schema, ncols) {
+fn _tbl_free_row_bytes(fd, hdr, row, schema, ncols): i64 {
     for (var i = 0; i < ncols; i = i + 1) {
         var ctype = load64(schema + SCH_START + i * SCH_ENTRY_SZ + SCH_CTYPE);
         if (ctype == COL_BYTES) {
@@ -35,7 +35,7 @@ fn _tbl_free_row_bytes(fd, hdr, row, schema, ncols) {
 
 # True (1) if the schema has at least one BLOB column. Cheap guard so
 # non-BLOB tables skip the per-row chain scan on DROP/DELETE.
-fn _tbl_has_bytes(schema, ncols) {
+fn _tbl_has_bytes(schema, ncols): i64 {
     for (var i = 0; i < ncols; i = i + 1) {
         var ctype = load64(schema + SCH_START + i * SCH_ENTRY_SZ + SCH_CTYPE);
         if (ctype == COL_BYTES) { return 1; }
@@ -44,7 +44,7 @@ fn _tbl_has_bytes(schema, ncols) {
 }
 
 # Find table by name, returns index or -1
-fn tbl_find(hdr, name, nlen) {
+fn tbl_find(hdr, name, nlen): i64 {
     var count = load64(hdr + HDR_TBLCOUNT);
     for (var i = 0; i < count; i = i + 1) {
         if (_tbl_name_eq(_tbl_entry(hdr, i), name, nlen)) {
@@ -57,7 +57,7 @@ fn tbl_find(hdr, name, nlen) {
 # col_names: array of (ptr, len) pairs — 16 bytes each
 # col_types: array of i64 — 8 bytes each
 # Create table with schema and data pages
-fn tbl_create(fd, hdr, name, nlen, col_names, col_types, ncols) {
+fn tbl_create(fd, hdr, name, nlen, col_names, col_types, ncols): i64 {
     if (load64(hdr + HDR_TBLCOUNT) >= MAX_TABLES) { return PATRA_ERR_FULL; }
     if (ncols > MAX_COLS) { return PATRA_ERR_COLCOUNT; }
     if (tbl_find(hdr, name, nlen) >= 0) { return PATRA_ERR_EXISTS; }
@@ -112,7 +112,7 @@ fn tbl_create(fd, hdr, name, nlen, col_names, col_types, ncols) {
 }
 
 # Drop table: free data pages, schema page, compact directory
-fn tbl_drop(fd, hdr, idx) {
+fn tbl_drop(fd, hdr, idx): i64 {
     _tbl_lp_idx = 0 - 1;
     var entry = _tbl_entry(hdr, idx);
     var spg = load64(entry + TBL_SCHEMA);
@@ -173,7 +173,7 @@ fn tbl_drop(fd, hdr, idx) {
 }
 
 # Insert a row into table
-fn tbl_insert(fd, hdr, idx, row_data, row_sz) {
+fn tbl_insert(fd, hdr, idx, row_data, row_sz): i64 {
     var entry = _tbl_entry(hdr, idx);
     var buf = pg_alloc();
 
@@ -224,7 +224,7 @@ fn tbl_insert(fd, hdr, idx, row_data, row_sz) {
 
 # Scan all rows (no filter). Returns rows copied.
 # Scan all rows into output buffer, returns count
-fn tbl_scan(fd, hdr, idx, out, row_sz) {
+fn tbl_scan(fd, hdr, idx, out, row_sz): i64 {
     var entry = _tbl_entry(hdr, idx);
     var cur = load64(entry + TBL_ROOT);
     var buf = pg_alloc();
@@ -245,7 +245,7 @@ fn tbl_scan(fd, hdr, idx, out, row_sz) {
 
 # Filtered scan — copies matching rows into out. Returns count.
 # Scan rows matching WHERE into output, returns count
-fn tbl_scan_where(fd, hdr, idx, out, row_sz, schema, ncols, pr) {
+fn tbl_scan_where(fd, hdr, idx, out, row_sz, schema, ncols, pr): i64 {
     var entry = _tbl_entry(hdr, idx);
     var cur = load64(entry + TBL_ROOT);
     var buf = pg_alloc();
@@ -270,7 +270,7 @@ fn tbl_scan_where(fd, hdr, idx, out, row_sz, schema, ncols, pr) {
 
 # Update matching rows in-place. Returns PATRA_OK or error.
 # Update matching rows in-place
-fn tbl_update(fd, hdr, idx, row_sz, schema, ncols, pr) {
+fn tbl_update(fd, hdr, idx, row_sz, schema, ncols, pr): i64 {
     var entry = _tbl_entry(hdr, idx);
     var cur = load64(entry + TBL_ROOT);
     var buf = pg_alloc();
@@ -354,7 +354,7 @@ fn tbl_update(fd, hdr, idx, row_sz, schema, ncols, pr) {
 
 # Delete matching rows with page compaction. Returns PATRA_OK.
 # Delete matching rows with page compaction
-fn tbl_delete(fd, hdr, idx, row_sz, schema, ncols, pr) {
+fn tbl_delete(fd, hdr, idx, row_sz, schema, ncols, pr): i64 {
     _tbl_lp_idx = 0 - 1;
     var entry = _tbl_entry(hdr, idx);
     var cur = load64(entry + TBL_ROOT);

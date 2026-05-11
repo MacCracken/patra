@@ -160,49 +160,49 @@ var _sql_toks = 0;
 var _sql_ntoks = 0;
 var _sql_pr = 0;
 
-fn _sql_init() {
+fn _sql_init(): i64 {
     _sql_toks = fl_alloc(MAX_TOKENS * TOK_SZ);
     _sql_pr = fl_alloc(4096);
 }
 
 # ── Token access ────────────────────
 
-fn _tok_set(i, typ, ptr, len) {
+fn _tok_set(i, typ, ptr, len): i64 {
     var base = _sql_toks + i * TOK_SZ;
     store64(base + TOK_TYPE, typ);
     store64(base + TOK_PTR, ptr);
     store64(base + TOK_LEN, len);
 }
 
-fn _tok_type(i) { return load64(_sql_toks + i * TOK_SZ + TOK_TYPE); }
-fn _tok_ptr(i)  { return load64(_sql_toks + i * TOK_SZ + TOK_PTR); }
-fn _tok_len(i)  { return load64(_sql_toks + i * TOK_SZ + TOK_LEN); }
+fn _tok_type(i): i64 { return load64(_sql_toks + i * TOK_SZ + TOK_TYPE); }
+fn _tok_ptr(i): i64 { return load64(_sql_toks + i * TOK_SZ + TOK_PTR); }
+fn _tok_len(i): i64 { return load64(_sql_toks + i * TOK_SZ + TOK_LEN); }
 
 # ── Character classification ────────────────────
 
-fn _to_upper(c) {
+fn _to_upper(c): i64 {
     if (c >= 97) { if (c <= 122) { return c - 32; } }
     return c;
 }
 
-fn _is_alpha(c) {
+fn _is_alpha(c): i64 {
     if (c >= 65) { if (c <= 90)  { return 1; } }
     if (c >= 97) { if (c <= 122) { return 1; } }
     if (c == 95) { return 1; }
     return 0;
 }
 
-fn _is_digit(c) {
+fn _is_digit(c): i64 {
     if (c >= 48) { if (c <= 57) { return 1; } }
     return 0;
 }
 
-fn _is_alnum(c) {
+fn _is_alnum(c): i64 {
     if (_is_alpha(c)) { return 1; }
     return _is_digit(c);
 }
 
-fn _is_ws(c) {
+fn _is_ws(c): i64 {
     if (c == 32) { return 1; }
     if (c == 9)  { return 1; }
     if (c == 10) { return 1; }
@@ -212,7 +212,7 @@ fn _is_ws(c) {
 
 # ── Keyword matching ───────────────────────
 
-fn _kw_eq(ptr, len, kw) {
+fn _kw_eq(ptr, len, kw): i64 {
     var kl = strlen(kw);
     if (len != kl) { return 0; }
     for (var i = 0; i < len; i = i + 1) {
@@ -221,7 +221,7 @@ fn _kw_eq(ptr, len, kw) {
     return 1;
 }
 
-fn _classify_ident(ptr, len) {
+fn _classify_ident(ptr, len): i64 {
     if (_kw_eq(ptr, len, "CREATE")) { return TK_CREATE; }
     if (_kw_eq(ptr, len, "TABLE"))  { return TK_TABLE; }
     if (_kw_eq(ptr, len, "INSERT")) { return TK_INSERT; }
@@ -267,7 +267,7 @@ fn _classify_ident(ptr, len) {
 # ── Tokenizer ────────────────────
 
 # Tokenize SQL string into token array
-fn sql_tokenize(input) {
+fn sql_tokenize(input): i64 {
     var pos = 0;
     var n = 0;
     var slen = strlen(input);
@@ -382,7 +382,7 @@ fn sql_tokenize(input) {
 
 # ── Helpers ────────────────────
 
-fn _pt_atoi(ptr, len) {
+fn _pt_atoi(ptr, len): i64 {
     var r = 0;
     for (var i = 0; i < len; i = i + 1) {
         r = r * 10 + (load8(ptr + i) - 48);
@@ -390,7 +390,7 @@ fn _pt_atoi(ptr, len) {
     return r;
 }
 
-fn _tok_to_cmpop(pos) {
+fn _tok_to_cmpop(pos): i64 {
     var tt = _tok_type(pos);
     if (tt == TK_EQ)  { return CMP_EQ; }
     if (tt == TK_NEQ) { return CMP_NEQ; }
@@ -404,7 +404,7 @@ fn _tok_to_cmpop(pos) {
 
 # ── WHERE parser (shared by SELECT, UPDATE, DELETE) ─────────
 
-fn _parse_where(pos) {
+fn _parse_where(pos): i64 {
     if (_tok_type(pos) != TK_WHERE) { return pos; }
     pos = pos + 1;
 
@@ -473,7 +473,7 @@ fn _parse_where(pos) {
 
 # ── Parsers ────────────────────
 
-fn _parse_create() {
+fn _parse_create(): i64 {
     var pos = 0;
     if (_tok_type(pos) != TK_CREATE) { return PATRA_ERR_SYNTAX; }
     pos = pos + 1;
@@ -517,7 +517,7 @@ fn _parse_create() {
     return PATRA_OK;
 }
 
-fn _parse_insert() {
+fn _parse_insert(): i64 {
     var pos = 0;
     if (_tok_type(pos) != TK_INSERT) { return PATRA_ERR_SYNTAX; }
     pos = pos + 1;
@@ -573,7 +573,7 @@ fn _parse_insert() {
     return PATRA_OK;
 }
 
-fn _parse_select() {
+fn _parse_select(): i64 {
     # SELECT * | agg(col) FROM tbl [WHERE] [ORDER BY] [LIMIT]
     var pos = 0;
     if (_tok_type(pos) != TK_SELECT) { return PATRA_ERR_SYNTAX; }
@@ -696,7 +696,7 @@ fn _parse_select() {
     return PATRA_OK;
 }
 
-fn _parse_update() {
+fn _parse_update(): i64 {
     # UPDATE table SET col = val [, ...] [WHERE ...]
     var pos = 0;
     if (_tok_type(pos) != TK_UPDATE) { return PATRA_ERR_SYNTAX; }
@@ -754,7 +754,7 @@ fn _parse_update() {
     return PATRA_OK;
 }
 
-fn _parse_delete() {
+fn _parse_delete(): i64 {
     # DELETE FROM table [WHERE ...]
     var pos = 0;
     if (_tok_type(pos) != TK_DELETE) { return PATRA_ERR_SYNTAX; }
@@ -773,7 +773,7 @@ fn _parse_delete() {
     return PATRA_OK;
 }
 
-fn _parse_create_index() {
+fn _parse_create_index(): i64 {
     # CREATE INDEX ON table (col)
     var pos = 0;
     if (_tok_type(pos) != TK_CREATE) { return PATRA_ERR_SYNTAX; }
@@ -798,7 +798,7 @@ fn _parse_create_index() {
     return PATRA_OK;
 }
 
-fn _parse_drop() {
+fn _parse_drop(): i64 {
     # DROP TABLE name
     var pos = 0;
     if (_tok_type(pos) != TK_DROP) { return PATRA_ERR_SYNTAX; }
@@ -812,7 +812,7 @@ fn _parse_drop() {
     return PATRA_OK;
 }
 
-fn _parse_alter() {
+fn _parse_alter(): i64 {
     # ALTER TABLE t ADD COLUMN name INT|STR
     # ALTER TABLE t RENAME TO new_name
     # ALTER TABLE t RENAME COLUMN old TO new
@@ -888,7 +888,7 @@ fn _parse_alter() {
     return PATRA_ERR_SYNTAX;
 }
 
-fn _parse_vacuum() {
+fn _parse_vacuum(): i64 {
     # VACUUM tblname — reclaim B-tree tombstones for a table
     var pos = 0;
     if (_tok_type(pos) != TK_VACUUM) { return PATRA_ERR_SYNTAX; }
@@ -901,7 +901,7 @@ fn _parse_vacuum() {
 }
 
 # Parse tokenized SQL into parse result
-fn sql_parse() {
+fn sql_parse(): i64 {
     memset(_sql_pr, 0, 4096);
     var tt = _tok_type(0);
     if (tt == TK_CREATE) {

@@ -89,26 +89,26 @@ enum Sync { SYS_FDATASYNC = 75; }
 # ── Low-level operations ────────────────────
 
 # Seek to byte offset in file
-fn _pt_seek(fd, off) {
+fn _pt_seek(fd, off): i64 {
     return syscall(SYS_LSEEK, fd, off, 0);
 }
 
 # Apply flock operation to fd
-fn _pt_flock(fd, op) {
+fn _pt_flock(fd, op): i64 {
     return syscall(SYS_FLOCK, fd, op);
 }
 
 # Acquire exclusive (write) lock
-fn patra_lock_ex(fd)  { return _pt_flock(fd, LOCK_EX); }
+fn patra_lock_ex(fd): i64 { return _pt_flock(fd, LOCK_EX); }
 # Acquire shared (read) lock
-fn patra_lock_sh(fd)  { return _pt_flock(fd, LOCK_SH); }
+fn patra_lock_sh(fd): i64 { return _pt_flock(fd, LOCK_SH); }
 # Release lock
-fn patra_unlock(fd)   { return _pt_flock(fd, LOCK_UN); }
+fn patra_unlock(fd): i64 { return _pt_flock(fd, LOCK_UN); }
 
 # ── Header management ────────────────────
 
 # Initialize header buffer with magic and defaults
-fn patra_hdr_init(buf) {
+fn patra_hdr_init(buf): i64 {
     memset(buf, 0, PAGE_SIZE);
     store32(buf + HDR_MAGIC, PATRA_MAGIC);
     store32(buf + HDR_VER, PATRA_VER);
@@ -116,7 +116,7 @@ fn patra_hdr_init(buf) {
 }
 
 # Read header page from file into buffer
-fn patra_hdr_read(fd, buf) {
+fn patra_hdr_read(fd, buf): i64 {
     if (_pt_seek(fd, 0) < 0) { return PATRA_ERR_IO; }
     if (sys_read(fd, buf, PAGE_SIZE) != PAGE_SIZE) { return PATRA_ERR_IO; }
     return PATRA_OK;
@@ -125,14 +125,14 @@ fn patra_hdr_read(fd, buf) {
 # Write header page from buffer to file without fdatasync. Used by the
 # group-commit path (1.8.0) — caller is responsible for syncing later.
 # Write the header page without fdatasync (group-commit path).
-fn patra_hdr_write_nosync(fd, buf) {
+fn patra_hdr_write_nosync(fd, buf): i64 {
     if (_pt_seek(fd, 0) < 0) { return PATRA_ERR_IO; }
     if (sys_write(fd, buf, PAGE_SIZE) != PAGE_SIZE) { return PATRA_ERR_IO; }
     return PATRA_OK;
 }
 
 # Write header page from buffer to file with fdatasync
-fn patra_hdr_write(fd, buf) {
+fn patra_hdr_write(fd, buf): i64 {
     var r = patra_hdr_write_nosync(fd, buf);
     if (r != PATRA_OK) { return r; }
     syscall(SYS_FDATASYNC, fd);
@@ -143,7 +143,7 @@ fn patra_hdr_write(fd, buf) {
 # rejects a malformed header that would let `tbl_find` walk past the 63-entry
 # table directory or let `page_alloc` dereference a bogus free-list head.
 # Verify header magic, version, and internal bounds.
-fn patra_hdr_verify(buf) {
+fn patra_hdr_verify(buf): i64 {
     if (load32(buf + HDR_MAGIC) != PATRA_MAGIC) { return PATRA_ERR_MAGIC; }
     if (load32(buf + HDR_VER) != PATRA_VER) { return PATRA_ERR_MAGIC; }
     var pgc = load64(buf + HDR_PGCOUNT);
@@ -160,7 +160,7 @@ fn patra_hdr_verify(buf) {
 }
 
 # Log error message via sakshi
-fn _pt_err(msg) {
+fn _pt_err(msg): i64 {
     sakshi_error(msg, strlen(msg));
 }
 
@@ -174,7 +174,7 @@ enum OpenFlag { O_NOFOLLOW = 131072; }
 # Create new .patra file (O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW,
 # mode 0644 = 420). O_EXCL already refuses an existing target; O_NOFOLLOW
 # additionally refuses a symlink pointed at the target path.
-fn _pt_file_create(path) {
+fn _pt_file_create(path): i64 {
     var fd = sys_open(path, 194 + O_NOFOLLOW, 420);
     if (fd < 0) { return 0 - 1; }
     var buf = pg_alloc();
@@ -187,7 +187,7 @@ fn _pt_file_create(path) {
 }
 
 # Open existing .patra file (O_RDWR | O_NOFOLLOW). Refuses symlinked targets.
-fn _pt_file_open(path) {
+fn _pt_file_open(path): i64 {
     return sys_open(path, 2 + O_NOFOLLOW, 0);
 }
 
@@ -205,7 +205,7 @@ enum SlabConst { PG_SLAB_MAX = 32; }
 var _pg_slab_stack = 0;
 var _pg_slab_top = 0;
 
-fn _pg_slab_init() {
+fn _pg_slab_init(): i64 {
     if (_pg_slab_stack == 0) {
         _pg_slab_stack = alloc(PG_SLAB_MAX * 8);
     }
@@ -213,7 +213,7 @@ fn _pg_slab_init() {
 }
 
 # Allocate a 4KB buffer from the page slab, falling back to fl_alloc on miss.
-fn pg_alloc() {
+fn pg_alloc(): i64 {
     _pg_slab_init();
     if (_pg_slab_top > 0) {
         _pg_slab_top = _pg_slab_top - 1;
@@ -223,7 +223,7 @@ fn pg_alloc() {
 }
 
 # Return a 4KB buffer to the page slab, or to fl_free if the slab is full.
-fn pg_free(buf) {
+fn pg_free(buf): i64 {
     if (buf == 0) { return 0; }
     _pg_slab_init();
     if (_pg_slab_top < PG_SLAB_MAX) {

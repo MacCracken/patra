@@ -7,12 +7,12 @@
 
 # O_RDWR | O_CREAT | O_APPEND | O_NOFOLLOW = 2 + 64 + 1024 + 131072 = 132162
 # O_NOFOLLOW added in 1.5.2 (audit §2.8).
-fn jsonl_open(path) {
+fn jsonl_open(path): i64 {
     return sys_open(path, 132162, 420);
 }
 
 # Close JSONL file
-fn jsonl_close(fd) {
+fn jsonl_close(fd): i64 {
     sys_close(fd);
     return 0;
 }
@@ -20,7 +20,7 @@ fn jsonl_close(fd) {
 # ── Append ────────────────────
 
 # Append raw data + newline with exclusive lock
-fn jsonl_append(fd, data, len) {
+fn jsonl_append(fd, data, len): i64 {
     patra_lock_ex(fd);
     var w = sys_write(fd, data, len);
     if (w < 0) { patra_unlock(fd); return PATRA_ERR_IO; }
@@ -32,7 +32,7 @@ fn jsonl_append(fd, data, len) {
 
 # ── JSON string escaping ────────────────────
 
-fn _hex_digit(v) {
+fn _hex_digit(v): i64 {
     if (v < 10) { return 48 + v; }
     return 87 + v;
 }
@@ -47,7 +47,7 @@ fn _hex_digit(v) {
 # `simdjson` in strict mode) reject raw control bytes. Pre-1.5.2 Patra could
 # emit invalid JSON whenever a STR column contained a byte outside the five
 # originally-escaped chars.
-fn _json_escape(dst, src, slen) {
+fn _json_escape(dst, src, slen): i64 {
     var w = 0;
     var cap = slen * 6 + 8;
     for (var i = 0; i < slen; i = i + 1) {
@@ -89,7 +89,7 @@ fn _json_escape(dst, src, slen) {
 # NUL bytes without being silently truncated by strlen — audit 2026-04-21 §2.6
 # log-forging case. Emits `[NUL]` for any NUL, producing valid JSON in all cases.
 # Pass `vlens = 0` to fall back to strlen on every STR value (legacy behavior).
-fn json_build_lens(buf, max, keys, vals, vlens, types, n) {
+fn json_build_lens(buf, max, keys, vals, vlens, types, n): i64 {
     var pos = 0;
     store8(buf + pos, 123); pos = pos + 1;
 
@@ -137,14 +137,14 @@ fn json_build_lens(buf, max, keys, vals, vlens, types, n) {
 # kind of registration. The `patra_*` namespace prefix matches
 # the convention used elsewhere in patra (`patra_open`, `patra_close`,
 # etc.). See cyrius `docs/audit/2026-04-26-stdlib-fn-collisions.md`.
-fn patra_json_build(buf, max, keys, vals, types, n) {
+fn patra_json_build(buf, max, keys, vals, types, n): i64 {
     return json_build_lens(buf, max, keys, vals, 0, types, n);
 }
 
 # Length-aware JSONL append. vlens is an array of explicit lengths for STR
 # values (ignored for INT). Added in 1.5.3 to close the embedded-NUL
 # truncation in `jsonl_append_obj` without breaking existing callers.
-fn jsonl_append_obj_lens(fd, keys, vals, vlens, types, n) {
+fn jsonl_append_obj_lens(fd, keys, vals, vlens, types, n): i64 {
     var buf = fl_alloc(4096);
     var len = json_build_lens(buf, 4096, keys, vals, vlens, types, n);
     jsonl_append(fd, buf, len);
@@ -153,7 +153,7 @@ fn jsonl_append_obj_lens(fd, keys, vals, vlens, types, n) {
 }
 
 # Legacy append — strlen-based. Kept for backward compatibility.
-fn jsonl_append_obj(fd, keys, vals, types, n) {
+fn jsonl_append_obj(fd, keys, vals, types, n): i64 {
     return jsonl_append_obj_lens(fd, keys, vals, 0, types, n);
 }
 
@@ -164,7 +164,7 @@ fn jsonl_append_obj(fd, keys, vals, types, n) {
 enum JlrOff { JLR_COUNT = 0; JLR_DATA = 8; JLR_LINES = 16; JLR_SZ = 24; }
 
 # Read all lines from JSONL file into indexed result
-fn jsonl_read(fd) {
+fn jsonl_read(fd): i64 {
     patra_lock_sh(fd);
     var size = syscall(SYS_LSEEK, fd, 0, 2);
     syscall(SYS_LSEEK, fd, 0, 0);
@@ -225,22 +225,22 @@ fn jsonl_read(fd) {
 }
 
 # Get number of lines in read result
-fn jsonl_lines_count(lr) { return load64(lr + JLR_COUNT); }
+fn jsonl_lines_count(lr): i64 { return load64(lr + JLR_COUNT); }
 
 # Get pointer to line data at index
-fn jsonl_lines_get(lr, idx) {
+fn jsonl_lines_get(lr, idx): i64 {
     var lines = load64(lr + JLR_LINES);
     return load64(lines + idx * 16);
 }
 
 # Get length of line at index
-fn jsonl_lines_len(lr, idx) {
+fn jsonl_lines_len(lr, idx): i64 {
     var lines = load64(lr + JLR_LINES);
     return load64(lines + idx * 16 + 8);
 }
 
 # Free read result and all buffers
-fn jsonl_lines_free(lr) {
+fn jsonl_lines_free(lr): i64 {
     if (lr == 0) { return 0; }
     var d = load64(lr + JLR_DATA);
     var l = load64(lr + JLR_LINES);
@@ -253,7 +253,7 @@ fn jsonl_lines_free(lr) {
 # ── Field extraction ────────────────────
 
 # Find "key": in a JSON line. Returns offset past the colon+space, or -1.
-fn _jl_find_key(line, llen, key, klen) {
+fn _jl_find_key(line, llen, key, klen): i64 {
     var i = 0;
     var result = 0 - 1;
     var done = 0;
@@ -302,7 +302,7 @@ fn _jl_find_key(line, llen, key, klen) {
 # Get string value for key from JSON line. Returns ptr to content (inside quotes), sets len.
 # out_len: pointer to store length. Returns pointer or 0.
 # Extract string field from JSON line by key
-fn jsonl_get_str(line, llen, key, klen, out_len) {
+fn jsonl_get_str(line, llen, key, klen, out_len): i64 {
     var off = _jl_find_key(line, llen, key, klen);
     if (off < 0) { return 0; }
     if (off >= llen) { return 0; }
@@ -322,7 +322,7 @@ fn jsonl_get_str(line, llen, key, klen, out_len) {
 # Get integer value for key from JSON line. Returns the value, 0 if not
 # found, or 0 on i64 overflow. Audit 2026-04-21 §2.7: pre-1.5.2 a 25-digit
 # input silently wrapped to an attacker-chosen i64 — flag it and refuse.
-fn jsonl_get_int(line, llen, key, klen) {
+fn jsonl_get_int(line, llen, key, klen): i64 {
     var off = _jl_find_key(line, llen, key, klen);
     if (off < 0) { return 0; }
     if (off >= llen) { return 0; }
@@ -352,7 +352,7 @@ fn jsonl_get_int(line, llen, key, klen) {
 # ── Count lines ────────────────────
 
 # Count lines in JSONL file
-fn jsonl_count(fd) {
+fn jsonl_count(fd): i64 {
     patra_lock_sh(fd);
     syscall(SYS_LSEEK, fd, 0, 0);
     var buf = fl_alloc(4096);

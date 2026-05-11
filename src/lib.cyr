@@ -60,7 +60,7 @@ enum RsOff {
 # ── Init ────────────────────
 
 # Initialize patra (call once before use)
-fn patra_init() {
+fn patra_init(): i64 {
     _sql_init();
     sakshi_set_level(SK_WARN);
 }
@@ -68,7 +68,7 @@ fn patra_init() {
 # ── Open / Close ────────────────────
 
 # Open or create a .patra database file
-fn patra_open(path) {
+fn patra_open(path): i64 {
     _tbl_lp_idx = 0 - 1;
     var fd = _pt_file_open(path);
     if (fd < 0) {
@@ -118,7 +118,7 @@ fn patra_open(path) {
 }
 
 # Close the database, flushing any pending BATCH-mode writes first.
-fn patra_close(db) {
+fn patra_close(db): i64 {
     if (db == 0) { return 0; }
     var fd = load64(db + DB_FD);
     if (load64(db + DB_BATCH_PENDING) != 0) {
@@ -130,11 +130,11 @@ fn patra_close(db) {
     return 0;
 }
 
-fn _db_fd(db)  { return load64(db + DB_FD); }
-fn _db_hdr(db) { return load64(db + DB_HDR); }
+fn _db_fd(db): i64 { return load64(db + DB_FD); }
+fn _db_hdr(db): i64 { return load64(db + DB_HDR); }
 
 # Set group-commit mode (PATRA_SYNC_FULL or PATRA_SYNC_BATCH); flushes first.
-fn patra_set_sync_mode(db, mode) {
+fn patra_set_sync_mode(db, mode): i64 {
     if (load64(db + DB_BATCH_PENDING) != 0) {
         syscall(SYS_FDATASYNC, load64(db + DB_FD));
         store64(db + DB_BATCH_PENDING, 0);
@@ -144,10 +144,10 @@ fn patra_set_sync_mode(db, mode) {
 }
 
 # Return the current group-commit mode for this DB handle.
-fn patra_get_sync_mode(db) { return load64(db + DB_SYNC_MODE); }
+fn patra_get_sync_mode(db): i64 { return load64(db + DB_SYNC_MODE); }
 
 # Force durability of any pending BATCH-mode writes. No-op in FULL mode.
-fn patra_flush(db) {
+fn patra_flush(db): i64 {
     if (load64(db + DB_BATCH_PENDING) != 0) {
         syscall(SYS_FDATASYNC, load64(db + DB_FD));
         store64(db + DB_BATCH_PENDING, 0);
@@ -159,7 +159,7 @@ fn patra_flush(db) {
 # legacy synchronous header-write-with-fdatasync. BATCH mode writes the
 # header without syncing, increments the pending counter, and triggers
 # an auto-flush every PATRA_BATCH_FLUSH_N writes to bound the crash window.
-fn _db_hdr_commit(db, fd, hdr) {
+fn _db_hdr_commit(db, fd, hdr): i64 {
     if (load64(db + DB_SYNC_MODE) == PATRA_SYNC_BATCH) {
         var r = patra_hdr_write_nosync(fd, hdr);
         if (r != PATRA_OK) { return r; }
@@ -176,7 +176,7 @@ fn _db_hdr_commit(db, fd, hdr) {
 
 # ── Exec: CREATE TABLE ────────────────────
 
-fn _exec_create(db) {
+fn _exec_create(db): i64 {
     var fd = _db_fd(db);
     var hdr = _db_hdr(db);
 
@@ -206,7 +206,7 @@ fn _exec_create(db) {
 
 # ── Exec: INSERT ────────────────────
 
-fn _exec_insert(db) {
+fn _exec_insert(db): i64 {
     var fd = _db_fd(db);
     var hdr = _db_hdr(db);
 
@@ -345,7 +345,7 @@ fn _exec_insert(db) {
 
 # ── Exec: UPDATE ────────────────────
 
-fn _exec_update(db) {
+fn _exec_update(db): i64 {
     var fd = _db_fd(db);
     var hdr = _db_hdr(db);
 
@@ -381,7 +381,7 @@ fn _exec_update(db) {
 
 # ── Exec: DELETE ────────────────────
 
-fn _exec_delete(db) {
+fn _exec_delete(db): i64 {
     var fd = _db_fd(db);
     var hdr = _db_hdr(db);
 
@@ -413,7 +413,7 @@ fn _exec_delete(db) {
 
 # ── Exec: DROP TABLE ────────────────────
 
-fn _exec_drop(db) {
+fn _exec_drop(db): i64 {
     var fd = _db_fd(db);
     var hdr = _db_hdr(db);
 
@@ -437,7 +437,7 @@ fn _exec_drop(db) {
 # ── Exec: ALTER TABLE ────────────────────
 
 # ALTER TABLE t RENAME TO new
-fn _exec_alter_rename_tbl(db) {
+fn _exec_alter_rename_tbl(db): i64 {
     var fd = _db_fd(db);
     var hdr = _db_hdr(db);
 
@@ -472,7 +472,7 @@ fn _exec_alter_rename_tbl(db) {
 }
 
 # ALTER TABLE t RENAME COLUMN old TO new
-fn _exec_alter_rename_col(db) {
+fn _exec_alter_rename_col(db): i64 {
     var fd = _db_fd(db);
     var hdr = _db_hdr(db);
 
@@ -527,7 +527,7 @@ fn _exec_alter_rename_col(db) {
 # Gathers all rows, frees old data+btree pages, rewrites schema, re-inserts rows
 # with the default value (0 / empty string) in the new trailing column. The B-tree
 # is rebuilt when the table had an index.
-fn _exec_alter_add(db) {
+fn _exec_alter_add(db): i64 {
     var fd = _db_fd(db);
     var hdr = _db_hdr(db);
 
@@ -658,7 +658,7 @@ fn _exec_alter_add(db) {
 # torn down. If the dropped column PRECEDES the indexed column in schema
 # order, SCH_IDX_COL shifts left by one. In all surviving-index cases the
 # B-tree is rebuilt because refs change with row rewriting.
-fn _exec_alter_drop_col(db) {
+fn _exec_alter_drop_col(db): i64 {
     var fd = _db_fd(db);
     var hdr = _db_hdr(db);
 
@@ -807,7 +807,7 @@ fn _exec_alter_drop_col(db) {
 
 # ── Exec: VACUUM ────────────────────
 
-fn _exec_vacuum(db) {
+fn _exec_vacuum(db): i64 {
     var fd = _db_fd(db);
     var hdr = _db_hdr(db);
 
@@ -838,7 +838,7 @@ fn _exec_vacuum(db) {
 
 # ── Exec: CREATE INDEX ────────────────────
 
-fn _exec_create_index(db) {
+fn _exec_create_index(db): i64 {
     var fd = _db_fd(db);
     var hdr = _db_hdr(db);
 
@@ -900,7 +900,7 @@ fn _exec_create_index(db) {
 # ── Transactions ────────────────────
 
 # Begin an explicit transaction (lock + WAL)
-fn patra_begin(db) {
+fn patra_begin(db): i64 {
     if (load64(db + DB_TX)) { return PATRA_OK; }
     var fd = _db_fd(db);
     var wpath = load64(db + DB_PATH);
@@ -912,7 +912,7 @@ fn patra_begin(db) {
 }
 
 # Commit transaction (sync + unlock)
-fn patra_commit(db) {
+fn patra_commit(db): i64 {
     if (load64(db + DB_TX) == 0) { return PATRA_OK; }
     var fd = _db_fd(db);
     var wpath = load64(db + DB_PATH);
@@ -926,7 +926,7 @@ fn patra_commit(db) {
 }
 
 # Rollback transaction (restore pages + unlock)
-fn patra_rollback(db) {
+fn patra_rollback(db): i64 {
     if (load64(db + DB_TX) == 0) { return PATRA_OK; }
     var wpath = load64(db + DB_PATH);
     wal_rollback(wpath);
@@ -939,7 +939,7 @@ fn patra_rollback(db) {
 # ── patra_exec ────────────────────
 
 # Execute a DDL/DML SQL statement
-fn patra_exec(db, sql) {
+fn patra_exec(db, sql): i64 {
     if (db == 0) { return PATRA_ERR_IO; }
     sql_tokenize(sql);
     var r = sql_parse();
@@ -962,7 +962,7 @@ fn patra_exec(db, sql) {
 
 # ── Sorting for ORDER BY ────────────────────
 
-fn _strcmp_nn(a, b) {
+fn _strcmp_nn(a, b): i64 {
     var i = 0;
     while (1) {
         var ca = load8(a + i);
@@ -974,7 +974,7 @@ fn _strcmp_nn(a, b) {
     return 0;
 }
 
-fn _rs_field_off(rs, col) {
+fn _rs_field_off(rs, col): i64 {
     var types = load64(rs + RS_TYPES);
     var off = 0;
     for (var i = 0; i < col; i = i + 1) {
@@ -987,7 +987,7 @@ fn _rs_field_off(rs, col) {
 }
 
 # Compare two rows on multiple ORDER BY columns. Returns >0 if a should come after b.
-fn _cmp_rows(rs, ra, rb, ob_idxs, ob_types, ob_dirs, obn) {
+fn _cmp_rows(rs, ra, rb, ob_idxs, ob_types, ob_dirs, obn): i64 {
     for (var k = 0; k < obn; k = k + 1) {
         var ci = load64(ob_idxs + k * 8);
         var ct = load64(ob_types + k * 8);
@@ -1008,7 +1008,7 @@ fn _cmp_rows(rs, ra, rb, ob_idxs, ob_types, ob_dirs, obn) {
     return 0;
 }
 
-fn _sort_result_multi(rs, ob_idxs, ob_types, ob_dirs, obn) {
+fn _sort_result_multi(rs, ob_idxs, ob_types, ob_dirs, obn): i64 {
     var data = load64(rs + RS_DATA);
     var rsz = load64(rs + RS_ROWSZ);
     var nrows = load64(rs + RS_NROWS);
@@ -1033,7 +1033,7 @@ fn _sort_result_multi(rs, ob_idxs, ob_types, ob_dirs, obn) {
 # ── patra_query (SELECT with WHERE, ORDER BY, LIMIT) ────────
 
 # Execute a SELECT query, returns result set
-fn patra_query(db, sql) {
+fn patra_query(db, sql): i64 {
     if (db == 0) { return 0; }
     sql_tokenize(sql);
     var r = sql_parse();
@@ -1042,7 +1042,7 @@ fn patra_query(db, sql) {
     return _patra_query_exec(db);
 }
 
-fn _patra_query_exec(db) {
+fn _patra_query_exec(db): i64 {
     var fd = _db_fd(db);
     var hdr = _db_hdr(db);
 
@@ -1417,7 +1417,7 @@ enum StmtOff {
 # The handle owns a copy of the SQL string; safe to free the input
 # immediately after this call. Caller must patra_finalize when done.
 # Tokenize + parse SQL once and return an opaque, reusable stmt handle.
-fn patra_prepare(db, sql) {
+fn patra_prepare(db, sql): i64 {
     if (db == 0) { return 0; }
     if (sql == 0) { return 0; }
     var slen = strlen(sql);
@@ -1439,7 +1439,7 @@ fn patra_prepare(db, sql) {
 }
 
 # Free a prepared statement and its owned SQL buffer.
-fn patra_finalize(stmt) {
+fn patra_finalize(stmt): i64 {
     if (stmt == 0) { return 0; }
     var sbuf = load64(stmt + STMT_SQL);
     if (sbuf != 0) { fl_free(sbuf); }
@@ -1452,7 +1452,7 @@ fn patra_finalize(stmt) {
 # tables/values. Single-threaded; the global is overwritten per call.
 # Word-at-a-time copy because stdlib memcpy is byte-by-byte and 4KB
 # per call would eat most of the prepare win.
-fn _stmt_restore(stmt) {
+fn _stmt_restore(stmt): i64 {
     var src = stmt + STMT_PR_BUF;
     var i = 0;
     while (i < 4096) {
@@ -1463,7 +1463,7 @@ fn _stmt_restore(stmt) {
 }
 
 # Execute a prepared DDL/DML statement, skipping tokenize + parse.
-fn patra_exec_prepared(db, stmt) {
+fn patra_exec_prepared(db, stmt): i64 {
     if (db == 0) { return PATRA_ERR_IO; }
     if (stmt == 0) { return PATRA_ERR_SYNTAX; }
     _stmt_restore(stmt);
@@ -1483,7 +1483,7 @@ fn patra_exec_prepared(db, stmt) {
 }
 
 # Execute a prepared SELECT, returning a result set or 0.
-fn patra_query_prepared(db, stmt) {
+fn patra_query_prepared(db, stmt): i64 {
     if (db == 0) { return 0; }
     if (stmt == 0) { return 0; }
     _stmt_restore(stmt);
@@ -1494,19 +1494,19 @@ fn patra_query_prepared(db, stmt) {
 # ── Result set accessors ────────────────────
 
 # Get number of rows in result set
-fn patra_result_count(rs) { return load64(rs + RS_NROWS); }
+fn patra_result_count(rs): i64 { return load64(rs + RS_NROWS); }
 # Get number of columns in result set
-fn patra_result_cols(rs)  { return load64(rs + RS_NCOLS); }
+fn patra_result_cols(rs): i64 { return load64(rs + RS_NCOLS); }
 
 # Get integer value at (row, col)
-fn patra_result_get_int(rs, row, col) {
+fn patra_result_get_int(rs, row, col): i64 {
     var data = load64(rs + RS_DATA);
     var rsz = load64(rs + RS_ROWSZ);
     return load64(data + row * rsz + _rs_field_off(rs, col));
 }
 
 # Get string pointer at (row, col)
-fn patra_result_get_str(rs, row, col) {
+fn patra_result_get_str(rs, row, col): i64 {
     var data = load64(rs + RS_DATA);
     var rsz = load64(rs + RS_ROWSZ);
     return data + row * rsz + _rs_field_off(rs, col);
@@ -1516,7 +1516,7 @@ fn patra_result_get_str(rs, row, col) {
 # stopping at the first NUL or COL_STR_SZ. Returns -1 if the column isn't STR.
 # Mirrors patra_result_get_bytes_len so consumers can drop ad-hoc strnlen.
 # Byte length of a STR value at (row, col), or -1 if the column isn't STR.
-fn patra_result_get_str_len(rs, row, col) {
+fn patra_result_get_str_len(rs, row, col): i64 {
     var types = load64(rs + RS_TYPES);
     if (load64(types + col * 8) != COL_STR) { return 0 - 1; }
     var data = load64(rs + RS_DATA);
@@ -1531,20 +1531,20 @@ fn patra_result_get_str_len(rs, row, col) {
 }
 
 # Get column name at index
-fn patra_result_col_name(rs, col) {
+fn patra_result_col_name(rs, col): i64 {
     var names = load64(rs + RS_NAMES);
     return names + col * SCH_CNAME_MAX;
 }
 
 # Get column type at index (COL_INT or COL_STR)
-fn patra_result_col_type(rs, col) {
+fn patra_result_col_type(rs, col): i64 {
     var types = load64(rs + RS_TYPES);
     return load64(types + col * 8);
 }
 
 # Get column type at index (COL_INT or COL_STR)
 # Length of a BLOB value at (row, col). Returns -1 if the column isn't BLOB.
-fn patra_result_get_bytes_len(rs, row, col) {
+fn patra_result_get_bytes_len(rs, row, col): i64 {
     var types = load64(rs + RS_TYPES);
     if (load64(types + col * 8) != COL_BYTES) { return 0 - 1; }
     var data = load64(rs + RS_DATA);
@@ -1557,7 +1557,7 @@ fn patra_result_get_bytes_len(rs, row, col) {
 # PATRA_ERR_TYPE for non-BLOB columns, or PATRA_ERR_PAGE on a malformed
 # chain. The empty blob (length 0) returns PATRA_OK with no bytes read.
 # Read a BYTES column's payload into a caller-allocated `out` buffer.
-fn patra_result_read_bytes(db, rs, row, col, out) {
+fn patra_result_read_bytes(db, rs, row, col, out): i64 {
     var types = load64(rs + RS_TYPES);
     if (load64(types + col * 8) != COL_BYTES) { return PATRA_ERR_TYPE; }
     var data = load64(rs + RS_DATA);
@@ -1571,7 +1571,7 @@ fn patra_result_read_bytes(db, rs, row, col, out) {
 }
 
 # Free result set and all buffers
-fn patra_result_free(rs) {
+fn patra_result_free(rs): i64 {
     if (rs != 0) { fl_free(rs); }
     return 0;
 }
@@ -1588,7 +1588,7 @@ fn patra_result_free(rs) {
 # Arrays whose slots aren't consulted can be 0 (null). Returns PATRA_OK,
 # PATRA_ERR_NOTFOUND, PATRA_ERR_COLCOUNT, or PATRA_ERR_TYPE.
 # Programmatic row insert; the only path that can write BYTES columns.
-fn patra_insert_row(db, tname, tnlen, ncols, types, ivals, sptrs, slens, bptrs, blens) {
+fn patra_insert_row(db, tname, tnlen, ncols, types, ivals, sptrs, slens, bptrs, blens): i64 {
     var fd = _db_fd(db);
     var hdr = _db_hdr(db);
 

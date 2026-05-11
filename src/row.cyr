@@ -1,7 +1,7 @@
 # row.cyr — row encoding/decoding (i64 + fixed-length strings)
 
 # Size in bytes for a column type (INT=8, STR=256, BLOB=16)
-fn row_col_size(ctype) {
+fn row_col_size(ctype): i64 {
     if (ctype == COL_INT)  { return COL_INT_SZ; }
     if (ctype == COL_BYTES) { return COL_BYTES_SZ; }
     return COL_STR_SZ;
@@ -9,7 +9,7 @@ fn row_col_size(ctype) {
 
 # Compute total row size from a schema page buffer
 # Total row size from schema page
-fn row_compute_size(schema, ncols) {
+fn row_compute_size(schema, ncols): i64 {
     var sz = 0;
     for (var i = 0; i < ncols; i = i + 1) {
         var ct = load64(schema + SCH_START + i * SCH_ENTRY_SZ + SCH_CTYPE);
@@ -20,7 +20,7 @@ fn row_compute_size(schema, ncols) {
 
 # Byte offset of column col_idx within a row
 # Byte offset of column within a row
-fn row_field_offset(schema, ncols, col) {
+fn row_field_offset(schema, ncols, col): i64 {
     var off = 0;
     for (var i = 0; i < col; i = i + 1) {
         var ct = load64(schema + SCH_START + i * SCH_ENTRY_SZ + SCH_CTYPE);
@@ -30,13 +30,13 @@ fn row_field_offset(schema, ncols, col) {
 }
 
 # Write i64 value to row at offset
-fn row_write_int(row, off, val) {
+fn row_write_int(row, off, val): i64 {
     store64(row + off, val);
 }
 
 # Write string value padded to COL_STR_SZ (256 bytes), null-terminated
 # Write string value to row at offset (padded to 64 bytes)
-fn row_write_str(row, off, ptr, len) {
+fn row_write_str(row, off, ptr, len): i64 {
     memset(row + off, 0, COL_STR_SZ);
     var n = len;
     if (n > COL_STR_SZ - 1) { n = COL_STR_SZ - 1; }
@@ -44,29 +44,29 @@ fn row_write_str(row, off, ptr, len) {
 }
 
 # Read i64 value from row at offset
-fn row_read_int(row, off) {
+fn row_read_int(row, off): i64 {
     return load64(row + off);
 }
 
 # Returns pointer to the 256-byte string field (null-terminated)
 # Read string pointer from row at offset
-fn row_read_str(row, off) {
+fn row_read_str(row, off): i64 {
     return row + off;
 }
 
 # Write blob ref (first_page, length) into the 16-byte BLOB field
-fn row_write_bytes_ref(row, off, first_page, blen) {
+fn row_write_bytes_ref(row, off, first_page, blen): i64 {
     store64(row + off + BR_PAGE, first_page);
     store64(row + off + BR_LEN,  blen);
 }
 
 # Read blob ref first page from row at offset
-fn row_read_bytes_page(row, off) {
+fn row_read_bytes_page(row, off): i64 {
     return load64(row + off + BR_PAGE);
 }
 
 # Read blob ref length from row at offset
-fn row_read_bytes_len(row, off) {
+fn row_read_bytes_len(row, off): i64 {
     return load64(row + off + BR_LEN);
 }
 
@@ -74,7 +74,7 @@ fn row_read_bytes_len(row, off) {
 # the hot inner loop of the INSERT OR IGNORE STR conflict probe; both
 # slots are guaranteed COL_STR_SZ-aligned (256 / 8 = 32 word loads).
 # Returns 1 if equal, 0 otherwise.
-fn _memeq256(a, b) {
+fn _memeq256(a, b): i64 {
     var i = 0;
     while (i < COL_STR_SZ) {
         if (load64(a + i) != load64(b + i)) { return 0; }
@@ -88,7 +88,7 @@ fn _memeq256(a, b) {
 # "alice" (len 5) hashes identically to the 256-byte zero-padded slot
 # row_write_str produced. WHERE-indexed-eq verifies hits with where_eval,
 # so collisions are correctness-neutral; djb2 is enough.
-fn _str_hash64(ptr, len) {
+fn _str_hash64(ptr, len): i64 {
     var h = 5381;
     var n = len;
     if (n > COL_STR_SZ - 1) { n = COL_STR_SZ - 1; }
@@ -106,7 +106,7 @@ fn _str_hash64(ptr, len) {
 
 # Index key for the indexed column `ic` of `row`. INT cols return the
 # raw i64; STR cols return _str_hash64 of the 256-byte slot.
-fn _idx_key_from_row(schema, ncols, ic, row) {
+fn _idx_key_from_row(schema, ncols, ic, row): i64 {
     var ct = load64(schema + SCH_START + ic * SCH_ENTRY_SZ + SCH_CTYPE);
     var off = row_field_offset(schema, ncols, ic);
     if (ct == COL_INT) { return row_read_int(row, off); }
