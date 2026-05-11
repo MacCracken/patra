@@ -138,7 +138,15 @@ jobs:
       - name: Verify version consistency
         run: |
           FILE_VERSION=$(cat VERSION | tr -d '[:space:]')
-          CYML_VERSION=$(grep '^version = ' cyrius.cyml | head -1 | sed 's/version = "\(.*\)"/\1/')
-          [ "$FILE_VERSION" = "$CYML_VERSION" ] || { echo "VERSION ($FILE_VERSION) != cyrius.cyml ($CYML_VERSION)"; exit 1; }
+          CYML_RAW=$(grep '^version = ' cyrius.cyml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          # ${file:VERSION} template means cyml derives version from the
+          # VERSION file — VERSION is the single source of truth. Resolve
+          # the template to the file content for the consistency check.
+          if [ "$CYML_RAW" = "\${file:VERSION}" ]; then
+              CYML_VERSION="$FILE_VERSION"
+          else
+              CYML_VERSION="$CYML_RAW"
+          fi
+          [ "$FILE_VERSION" = "$CYML_VERSION" ] || { echo "VERSION ($FILE_VERSION) != cyrius.cyml ($CYML_RAW)"; exit 1; }
           grep -q "$FILE_VERSION" CHANGELOG.md || { echo "version not in changelog"; exit 1; }
-          echo "Version consistent: $FILE_VERSION"
+          echo "Version consistent: $FILE_VERSION (cyml: $CYML_RAW)"
