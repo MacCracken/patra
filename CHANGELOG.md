@@ -5,6 +5,61 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.5] - 2026-05-21
+
+**Cyrius 6.0 toolchain bump.** Pins `cyrius` 5.11.4 → 6.0.1 —
+patra's first major-version cyrius bump. Cyrius 6.0 renames the
+named compiler (`cc5` → `cycc`, `cc5_aarch64` → `cycc_aarch64`)
+and removes the legacy aliases on the release-asset path, but
+patra's CI invokes the `cyrius` CLI wrapper (`cyrius build`,
+`cyrius test`, `cyrius lint`, `cyrius distlib`) rather than the
+named-compiler binary directly, so no workflow surgery was
+required for the rename itself. Pattern-match against agnosys
+(commits 4588938 + b1e9eca) — that repo's CI invokes
+`cc5 --version` as a verify step and ships an aarch64
+cross-build, so it had to migrate both call sites; patra's
+narrower CI surface inherits the rename transparently.
+
+### Changed
+
+- `cyrius` pin bumped 5.11.4 → 6.0.1 in `cyrius.cyml`. Major
+  bump driven by the `cc5` → `cycc` compiler-binary rename
+  (Cyrius 6.0 release manifest). No language-level breakage
+  surfaced in patra: lint clean (0 warnings on `src/lib.cyr`
+  include graph), full test sweep green.
+- `dist/patra.cyr` regenerated via `cyrius distlib` at v1.9.5
+  (4785 lines, unchanged shape — bundle regen tracks the
+  package.version stamp).
+
+### Verified (cyrius 6.0.1, x86_64)
+
+- `cyrius test tests/tcyr/patra.tcyr`: **620 / 620** pass.
+- 6 / 6 fuzz harnesses clean (btree, bytes, file, jsonl, sql,
+  wal); each ran to completion under the 10s CI timeout.
+- `cyrius bench tests/bcyr/patra.bcyr`: 35 benchmarks complete;
+  no regressions vs 1.9.4 baseline
+  (btree_insert_1k 4µs, btree_search_1k 2µs,
+  insert_500_sync_batch 81µs, insert_1k_prepared 14µs).
+- `cyrius build programs/demo.cyr`: DCE-clean, 322 unreachable
+  fns NOPed (59,889 bytes).
+- libro integration: **15 / 15** asserts pass.
+- vidya integration: **19 / 19** asserts pass.
+- aarch64 cross-build of `src/lib.cyr`: produces a valid ARM
+  aarch64 ELF (1262 unreachable fns NOPed) — confirms 1.9.1's
+  aarch64 portability still holds under cyrius 6.0.
+
+### Notes
+
+- CI workflows (`.github/workflows/ci.yml`,
+  `.github/workflows/release.yml`) are unchanged: patra's
+  install path copies `$CYRIUS_DIR/bin/*` wholesale, so it
+  picks up `cycc` automatically when present and continues to
+  copy any legacy `cc5` binary if a transitional release ships
+  both. No `cc5 --version` / `cc5_aarch64` references existed
+  in patra to update — the only `cc5` mention in-tree is the
+  historical-incident comment in `scripts/version-bump.sh`
+  describing cyrius's own pre-5.6.39 drift, kept as context.
+
 ## [1.9.4] - 2026-05-11
 
 ### Changed
