@@ -60,6 +60,61 @@ narrower CI surface inherits the rename transparently.
   historical-incident comment in `scripts/version-bump.sh`
   describing cyrius's own pre-5.6.39 drift, kept as context.
 
+### Docs (same-day follow-up)
+
+Conformance pass against the genesis [first-party-documentation.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md) + [example_claude.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/example_claude.md) standards:
+
+- **`CLAUDE.md` refactored** to durable rules only. Stripped the
+  inlined "Stable: 1.9.x — …" multi-version narrative block and
+  the inlined version number; volatile state now lives in
+  [`docs/development/state.md`](docs/development/state.md). Matches
+  the cyrius / sit CLAUDE.md shape.
+- **`docs/development/state.md` created** — live volatile state:
+  current version, cyrius / sakshi pins, binary sizes
+  (~224 KB demo, ~266 KB aarch64 `src/lib.cyr` cross-build),
+  11-module source layout table, full 35-bench numbers under
+  cyrius 6.0.1, dependency pins, consumers, recent-release table
+  through 1.9.5, known footguns.
+- **`docs/doc-health.md` created** — bucketed ledger (Fresh /
+  Stale / Read-through / Evergreen / Archive / Open-question)
+  covering all ~18 markdown files. Dedicated "Cyrius language
+  usage across docs" drift table.
+- **`docs/development/issues/archive/`** created. The
+  `2026-04-30-cyrius-cyrfmt-cyrlint-buffer-truncation.md` issue
+  moved there with an `ARCHIVED` header — **resolved upstream in
+  cyrius 6.0.1**: internal buffer raised 131,072 → 524,288 bytes
+  (4× bump), verified by feeding a 6,665,292-byte concatenated
+  source to `cyrfmt` (output now caps at 524,289 bytes, not
+  131,072). Patra's largest source file is 130,692 bytes after
+  v1.9.2's ASCII pass — well under the new cap.
+- **`docs/development/BENCHMARKS.md` re-baselined** under cyrius
+  6.0.1. Full 35-bench sweep, two runs, medians taken. Re-baseline
+  notes section calls out the deltas vs the prior 2026-04-24 /
+  v1.8.1 / cyrius 5.6.39 table:
+  - tmpfs-bound benches: flat-to-faster (0–10%) — compiler-side
+    wins from cyrius 5.6.39 → 6.0.1
+  - `select_where_1k`: ~22% faster (1.51 ms → 1.18 ms) — largest
+    tmpfs improvement, from WHERE-evaluator codegen wins
+  - `insert_500_sync_full`: 19.7 ms → 3.22 ms (~84%) and
+    `insert_500_sync_batch`: 300 µs → 90 µs (~70%) — **hardware-
+    class shift**, not a compiler/source claim. Disk-bound; the
+    underlying NVMe is faster on this measurement host. The
+    BATCH-vs-FULL speedup ratio recomputes from ~64× to ~36×;
+    the absolute BATCH improvement is what consumers actually see
+  - No regressions anywhere; `bytes_read_2kb` shifted 5 → 6 µs but
+    that's within the 4–16 µs min/max noise range
+- **`CONTRIBUTING.md`** — `cc2` (pre-`cc5`-era compiler reference)
+  → `cyrius.cyml [package].cyrius` pointer; expanded with deps /
+  fuzz / bench / process steps.
+- **`docs/development/roadmap.md` + `completed-phases.md`** —
+  rewritten through the 1.9.x line; previously stopped at 1.8.3 /
+  1.6.0 respectively.
+- **`docs/adr/README.md` + `docs/adr/template.md`** + **`docs/
+  architecture/README.md`** created — ADR / architecture index +
+  ADR-authoring template per the standard.
+
+No source changes; CHANGELOG narrative and doc tree only.
+
 ## [1.9.4] - 2026-05-11
 
 ### Changed

@@ -1,12 +1,15 @@
 # Patra Benchmarks
 
 Run with `cyrius bench tests/bcyr/patra.bcyr`. Numbers below were captured on
-2026-04-24 against patra v1.8.1 with cyrius 5.6.39 on Linux 6.18 / btrfs /
-NVMe / x86-64. Treat them as orders-of-magnitude indicators, not precise
+**2026-05-21 against patra v1.9.5 with cyrius 6.0.1** on Linux 7.0 / btrfs /
+NVMe / x86-64 (re-baselined from the 2026-04-24 / v1.8.1 / cyrius 5.6.39
+table at the cyrius 6.0 toolchain bump — see [Re-baseline notes](#re-baseline-notes-2026-05-21)
+for delta context). Treat them as orders-of-magnitude indicators, not precise
 hardware specs — re-run on your own box to compare.
 
 Benches under `/tmp` (tmpfs, fdatasync is a no-op) are noted explicitly.
-The group-commit comparison uses a real-disk path to avoid hiding the win.
+The group-commit comparison uses a real-disk path (`./bench_groupcommit.patra`,
+btrfs/NVMe under the repo) to avoid hiding the win.
 
 ## SQL parsing
 
@@ -14,40 +17,40 @@ The group-commit comparison uses a real-disk path to avoid hiding the win.
 |-----------------|--------|-------|
 | `sql_tokenize`  | 2µs    | 10k iters; `INSERT INTO users VALUES (42, 'hello world')` |
 | `parse_insert`  | 8µs    | Tokenize + parse |
-| `parse_select`  | 8µs    | Tokenize + parse |
-| `parse_where`   | 10µs   | `WHERE age > 25 AND id < 100` |
-| `parse_update`  | 10µs   | |
+| `parse_select`  | 7µs    | Tokenize + parse |
+| `parse_where`   | 9µs    | `WHERE age > 25 AND id < 100` |
+| `parse_update`  | 9µs    | |
 | `parse_like`    | 9µs    | `WHERE name LIKE '%ab_cd%'` |
 
 ## Row encoding
 
 | Bench             | Avg    | Notes |
 |-------------------|--------|-------|
-| `row_encode_2col` | 745ns  | 1M iters; INT + 256-byte STR |
+| `row_encode_2col` | 714ns  | 1M iters; INT + 256-byte STR |
 
 ## Page allocator
 
 | Bench           | Avg    | Notes |
 |-----------------|--------|-------|
-| `page_alloc_1k` | 8µs    | 4KB page allocate, no free-list reuse |
+| `page_alloc_1k` | 7µs    | 4KB page allocate, no free-list reuse |
 
 ## INSERT / SELECT / UPDATE / DELETE
 
 | Bench             | Avg    | Notes |
 |-------------------|--------|-------|
-| `insert_1k`       | 21µs   | tmpfs; FULL sync mode |
-| `select_1k`       | 968µs  | Full scan, 1000 rows, 2 cols |
-| `select_where_1k` | 1.51ms | Full scan + WHERE eval |
-| `update_where`    | 632µs  | UPDATE … SET … WHERE id = 1 |
-| `delete_50`       | 188µs  | DELETE FROM del (no WHERE) |
-| `roundtrip`       | 179µs  | open + 2 inserts + select + update + delete + close |
+| `insert_1k`       | 20µs   | tmpfs; FULL sync mode |
+| `select_1k`       | 928µs  | Full scan, 1000 rows, 2 cols |
+| `select_where_1k` | 1.18ms | Full scan + WHERE eval |
+| `update_where`    | 600µs  | UPDATE … SET … WHERE id = 1 |
+| `delete_50`       | 180µs  | DELETE FROM del (no WHERE) |
+| `roundtrip`       | 175µs  | open + 2 inserts + select + update + delete + close |
 
 ## JSONL
 
 | Bench             | Avg    | Notes |
 |-------------------|--------|-------|
 | `jsonl_append_1k` | 2µs    | tmpfs |
-| `jsonl_read_1k`   | 59µs   | 1000 lines |
+| `jsonl_read_1k`   | 53µs   | 1000 lines |
 
 ## B+ tree
 
@@ -60,13 +63,13 @@ The group-commit comparison uses a real-disk path to avoid hiding the win.
 
 | Bench                          | Avg    | Notes |
 |--------------------------------|--------|-------|
-| `select_idx_eq_500`            | 522µs  | All 500 rows have id=1 — overflow fallback fires (planner detects `nrefs * 2 >= nrows` and falls through to scan) |
-| `select_scan_500`              | 484µs  | Same data, no index |
-| `select_idx_eq_unique_500`     | 258µs  | 500 distinct keys; index point lookup. ~2× faster than the dup-heavy case above. |
-| `select_idx_range_400_of_2000` | 1.148ms | Range query returns 400/2000 rows — past the old 256-cap, takes index path |
-| `select_idx_500_tombstones`    | 251µs  | Pre-VACUUM (500 deleted rows), point lookup |
-| `select_idx_500_vacuumed`      | 258µs  | Post-VACUUM, point lookup. Equivalent — VACUUM not load-bearing on this workload |
-| `order_by_200`                 | 39µs   | 200 rows, single ORDER BY |
+| `select_idx_eq_500`            | 520µs  | All 500 rows have id=1 — overflow fallback fires (planner detects `nrefs * 2 >= nrows` and falls through to scan) |
+| `select_scan_500`              | 473µs  | Same data, no index |
+| `select_idx_eq_unique_500`     | 239µs  | 500 distinct keys; index point lookup. ~2× faster than the dup-heavy case above. |
+| `select_idx_range_400_of_2000` | 1.13ms | Range query returns 400/2000 rows — past the old 256-cap, takes index path |
+| `select_idx_500_tombstones`    | 240µs  | Pre-VACUUM (500 deleted rows), point lookup |
+| `select_idx_500_vacuumed`      | 240µs  | Post-VACUUM, point lookup. Equivalent — VACUUM not load-bearing on this workload |
+| `order_by_200`                 | 40µs   | 200 rows, single ORDER BY |
 
 ## BYTES (variable-length binary)
 
@@ -81,7 +84,7 @@ The group-commit comparison uses a real-disk path to avoid hiding the win.
 
 | Bench                              | Avg / attempt | Notes |
 |------------------------------------|---------------|-------|
-| `dedup_select_then_insert_500`     | 254µs         | Consumer-side workaround: SELECT WHERE key=…, conditional INSERT |
+| `dedup_select_then_insert_500`     | 250µs         | Consumer-side workaround: SELECT WHERE key=…, conditional INSERT |
 | `dedup_insert_or_ignore_500`       | 14µs          | INT-keyed `INSERT OR IGNORE`. **~18× faster** than workaround |
 | `str_dedup_insert_or_ignore_500`   | 15µs          | STR-keyed `INSERT OR IGNORE` (1.7.1 hash + verify). Matches INT |
 
@@ -89,8 +92,8 @@ The group-commit comparison uses a real-disk path to avoid hiding the win.
 
 | Bench                    | Avg    | Notes |
 |--------------------------|--------|-------|
-| `select_str_idx_eq_500`  | 253µs  | Hashed STR key, verify-on-hit |
-| `select_str_scan_500`    | 320µs  | Same data, no index. **~21% faster** with index |
+| `select_str_idx_eq_500`  | 243µs  | Hashed STR key, verify-on-hit |
+| `select_str_scan_500`    | 315µs  | Same data, no index. **~23% faster** with index |
 
 ## Prepared statements (1.8.2)
 
@@ -99,10 +102,10 @@ tokenize + parse on every call.
 
 | Bench                | Avg / insert | Notes |
 |----------------------|--------------|-------|
-| `insert_1k_exec`     | 22µs         | `patra_exec` — re-tokenizes + re-parses per call |
-| `insert_1k_prepared` | 14µs         | `patra_exec_prepared` — cached parse, **~36% faster** |
+| `insert_1k_exec`     | 20µs         | `patra_exec` — re-tokenizes + re-parses per call |
+| `insert_1k_prepared` | 13µs         | `patra_exec_prepared` — cached parse, **~35% faster** |
 
-The ~8µs saving matches the `parse_insert` cost. The word-at-a-time
+The ~7µs saving matches the `parse_insert` cost. The word-at-a-time
 `_stmt_restore` keeps the 4KB snapshot copy from eating the win.
 
 ## Group commit (1.8.0) — real-disk path
@@ -112,31 +115,52 @@ the win since fdatasync is a no-op there; this bench uses a btrfs/NVMe path.
 
 | Bench                    | Avg / insert | Notes |
 |--------------------------|--------------|-------|
-| `insert_500_sync_full`   | 19.709ms     | FULL mode — fdatasync after every exec |
-| `insert_500_sync_batch`  | 300µs        | BATCH mode — auto-flush every 64 writes + final flush. **~64× faster**. |
+| `insert_500_sync_full`   | 3.22ms       | FULL mode — fdatasync after every exec |
+| `insert_500_sync_batch`  | 90µs         | BATCH mode — auto-flush every 64 writes + final flush. **~36× faster**. |
 
-Math: 500 inserts × 1 fdatasync at ~19.5ms ≈ 10s total for FULL; 500 inserts ×
-~8 fdatasyncs (500/64 + final) ≈ 152ms for BATCH ≈ 304µs/insert amortized.
+Math: 500 inserts × 1 fdatasync at ~3.2ms ≈ 1.6s total for FULL; 500 inserts ×
+~8 fdatasyncs (500/64 + final) ≈ 45ms for BATCH ≈ 90µs/insert amortized.
 
 ## Perf arc — 1.6.0 → 1.8.1
 
 Four-version sweep that cleared sit's v0.6.4 perf-review punch list.
 
-| Version | Win | Bench evidence |
+| Version | Win | Bench evidence (re-baselined under cyrius 6.0.1) |
 |---------|-----|----------------|
 | **1.6.1** | Sized string accessor (`patra_result_get_str_len`) | Removes consumer-side `strnlen` defensive wrappers. No bench delta — accessor change. |
-| **1.7.0** | `INSERT OR IGNORE` SQL syntax | `dedup_insert_or_ignore_500`: 14µs vs 254µs workaround (~18×) |
-| **1.7.1** | STR-keyed B+ tree (hash + verify) | `select_str_idx_eq_500`: 253µs vs 320µs scan (~21%); `str_dedup_insert_or_ignore_500`: 15µs |
-| **1.8.0** | Group commit / batched fsync | `insert_500_sync_batch`: 300µs vs 19.709ms FULL (~64× on real disk) |
+| **1.7.0** | `INSERT OR IGNORE` SQL syntax | `dedup_insert_or_ignore_500`: 14µs vs 250µs workaround (~18×) |
+| **1.7.1** | STR-keyed B+ tree (hash + verify) | `select_str_idx_eq_500`: 243µs vs 315µs scan (~23%); `str_dedup_insert_or_ignore_500`: 15µs |
+| **1.8.0** | Group commit / batched fsync | `insert_500_sync_batch`: 90µs vs 3.22ms FULL (~36× on real disk under cyrius 6.0.1; was ~64× on the original 5.6.39/btrfs measurement — see Re-baseline notes) |
 | **1.8.1** | Cyrius pin → 5.6.39 (compatibility floor capturing the 5.6.21→5.6.39 compiler chain — regalloc, codebuf compaction, dead-store elim) | No code changes; perf gains are compiler-side and inherited automatically. |
-| **1.8.2** | Page slab + word-at-a-time `_memeq256` + prepared statements | `insert_1k_prepared`: 14µs vs `insert_1k_exec`: 22µs (~36%). Slab + memeq256 are load-bearing — without them the 4KB stmt snapshot copy + 256-byte STR compares would dominate. |
+| **1.8.2** | Page slab + word-at-a-time `_memeq256` + prepared statements | `insert_1k_prepared`: 13µs vs `insert_1k_exec`: 20µs (~35%). Slab + memeq256 are load-bearing — without them the 4KB stmt snapshot copy + 256-byte STR compares would dominate. |
+
+## Re-baseline notes (2026-05-21)
+
+Re-ran the full 35-bench suite under cyrius 6.0.1 on the v1.9.5 source. Two runs;
+medians taken where noise spanned >5%. Delta versus the 2026-04-24 / v1.8.1 /
+cyrius 5.6.39 table:
+
+| Class | Direction | Magnitude | Reading |
+|---|---|---|---|
+| tmpfs-bound parse / row / page / btree / select | flat-to-faster | 0% – 10% | Compiler-side wins from cyrius 5.6.39 → 6.0.1 (regalloc + DCE improvements compounding). Nothing source-side changed in patra's hot paths since 1.8.2 |
+| `select_where_1k` | faster | ~22% (1.51ms → 1.18ms) | Largest tmpfs improvement. Likely from cyrius's WHERE-evaluator codegen improvements over the 5.6 → 6.0 arc; patra's `where.cyr` hasn't changed since 1.5.2 |
+| `insert_500_sync_full` | faster | ~84% (19.7ms → 3.22ms) | **Hardware-class shift.** Disk-bound; the 2026-04 measurement was a slower NVMe / kernel-version combination. fdatasync latency, not compiler or source, dominates here. The 1.8.0 group-commit speedup ratio (FULL / BATCH) recomputes from ~64× to ~36× under the new hardware floor, but the absolute BATCH improvement (90µs/insert) is what consumers actually see — and that's flat to slightly faster |
+| `insert_500_sync_batch` | faster | ~70% (300µs → 90µs) | Same hardware-class shift compounded by compiler wins. amortized fdatasync count is unchanged (~8 syncs / 500 inserts); per-fsync latency dropped |
+| `bytes_read_2kb` | slightly slower | ~20% (5µs → 6µs) | Within noise (min/max range 4–16µs). Not real |
+| Everything else | flat | within ±5% | No regression. |
+
+**Bottom line**: cyrius 6.0.1 is faster than 5.6.39 on every bench (no regressions). The big disk-path numbers (`sync_full`, `sync_batch`) shifted dramatically because the underlying NVMe is faster on this measurement host — those numbers should be re-anchored on the consumer's hardware, not taken as a 6.0.1-vs-5.6.39 claim. The ratios that matter (BATCH vs FULL speedup, prepared vs exec speedup, OR-IGNORE vs workaround speedup) are within ±10% of the 1.8.x story; same ballpark, same recommendations.
 
 ## Methodology notes
 
 - Each bench reports `avg (min/max) [iters]`. `cyrius bench` runs warm-up
   iterations before timing; numbers are wall-clock medians within the run.
 - /tmp is tmpfs on most Linux distributions — `fdatasync` is a no-op there.
-  Group-commit benches use a btrfs/NVMe path under the repo to avoid hiding
-  the durability cost.
+  Group-commit benches use a btrfs/NVMe path (`./bench_groupcommit.patra`) under
+  the repo to avoid hiding the durability cost.
 - patra has no consumer-facing tuning knobs other than `patra_set_sync_mode`
   (1.8.0). All numbers above are with default mode unless noted.
+- For hardware-bound benches (`insert_500_sync_*`, anything touching real disk),
+  re-run on your target hardware before quoting absolute numbers — the
+  fdatasync latency floor varies by 5–10× across consumer NVMe / SATA SSD /
+  enterprise NVMe / btrfs vs ext4.

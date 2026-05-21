@@ -1,10 +1,13 @@
 # cyrlint / cyrfmt — 128 KB internal buffer truncates large source files
 
+> **ARCHIVED 2026-05-21 — RESOLVED upstream in cyrius 6.0.1.** Internal buffer raised 131,072 bytes (128 KB) → 524,288 bytes (512 KB), a 4× bump. Verified by feeding a 6,665,292-byte concatenated `.cyr` to `cyrfmt` under cyrius 6.0.1: output capped at 524,289 bytes (new ceiling) instead of 131,072 (old ceiling). Patra's largest source file (`tests/tcyr/patra.tcyr`, 130,692 bytes after v1.9.2's ASCII pass) is now ~4× under the cap and won't trigger truncation. Note the *underlying* shape (fixed-size internal buffer) still exists — a future test-growth past 512 KB would re-surface the same symptom; track at that point. Filed against 5.7.48; archived after the cyrius 6.0.1 pin landed in patra 1.9.5.
+
 **Filed:** 2026-04-30 (during patra 1.9.2 lint-cleanup pass)
 **Cyrius version observed:** 5.7.48 (and likely all earlier 5.7.x; pre-dates patra's 5.7.8 pin too)
+**Cyrius version resolved:** 6.0.1 (buffer raised 128 KB → 512 KB)
 **Tools affected:** `cyrlint`, `cyrfmt` (both via the `cyrius` wrapper and directly)
-**Severity:** HIGH for `cyrfmt --write` (silent data loss), MEDIUM for `cyrlint` (false-positive warnings)
-**Repro:** any `.cyr` / `.tcyr` / `.bcyr` / `.fcyr` source > 131,072 bytes
+**Severity:** HIGH for `cyrfmt --write` (silent data loss), MEDIUM for `cyrlint` (false-positive warnings) — both **historical** under 6.0.1+
+**Repro:** any `.cyr` / `.tcyr` / `.bcyr` / `.fcyr` source > 131,072 bytes (old cap) / > 524,288 bytes (new cap, still latent shape)
 
 ## Summary
 

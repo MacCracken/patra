@@ -1,15 +1,24 @@
 # Patra — Claude Code Instructions
 
+> This file is **preferences, process, and procedures** — durable rules
+> that change rarely. Volatile state (current version, binary sizes,
+> test counts, in-flight work, consumers, recent releases) lives in
+> [`docs/development/state.md`](docs/development/state.md), bumped every
+> release. Do not inline state here — it rots within a minor cut.
+
+---
+
 ## Project Identity
 
 **Patra** (Sanskrit: पत्र — document, record, leaf) — Structured storage and SQL queries for Cyrius. The sovereign database.
 
 - **Type**: Shared library — database engine for the sovereign stack
 - **License**: GPL-3.0-only
-- **Language**: Cyrius (native)
-- **Version**: 1.9.5
+- **Language**: Cyrius (toolchain pinned in `cyrius.cyml [package].cyrius`)
+- **Version**: `VERSION` at the project root is the source of truth — do not inline the number here
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
-- **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
+- **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-standards.md) · [First-Party Documentation](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md)
+- **Shared crates**: [shared-crates.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/shared-crates.md)
 
 ## Goal
 
@@ -17,54 +26,70 @@ Own the database. Zero deps. Pure Cyrius. SQL + B-tree + JSONL in a single `incl
 
 ## Current State
 
-- **Source**: ~4,500 lines across 11 modules
-- **Tests**: 620 assertions, 6 fuzz harnesses, 35 benchmarks (full table in `docs/development/BENCHMARKS.md`)
-- **Stable**: 1.9.5 — cyrius toolchain bump 5.11.4 → 6.0.1, patra's first major-version cyrius bump. Cyrius 6.0 renames the named compiler (`cc5` → `cycc`, `cc5_aarch64` → `cycc_aarch64`) and drops the legacy aliases on the release-asset path. Patra CI invokes the `cyrius` CLI wrapper (`cyrius build/test/lint/distlib`) rather than `cc5` directly, so no workflow rename surgery was required — pattern-matched against agnosys (commits 4588938 + b1e9eca), which had to migrate both a `cc5 --version` verify step and a `cc5_aarch64` cross-build path. All gates green under 6.0.1: lint 0, 620 tests, 6 fuzz, 35 benchmarks (no regression vs 1.9.4 baseline), libro 15/15, vidya 19/19, `src/lib.cyr` aarch64 cross-build clean. `dist/patra.cyr` regenerated at 4785 lines. 1.9.4 — stdlib `: i64` return-type annotation pass on every public fn in `src/*.cyr`, mechanical parse-only update tracking cyrius's v5.11.x annotation arc (REAL TYPE SYSTEM); pin 5.8.64 → 5.11.4. 1.9.3 — pin 5.7.48 → 5.8.64 ahead of cyrius's v5.8.65 stdlib foldin (patra on the foldin manifest); sakshi dep tag 0.9.0 → 2.2.3 and `modules` path `"sakshi.cyr"` → `"dist/sakshi.cyr"` to match the canonical convention. 1.9.2 — clean-surface follow-up to 1.9.1. Banner-comment unicode (`─` × 1558 + `—` × 39 + `→` × 27) → ASCII across `tests/tcyr/patra.tcyr` + `tests/bcyr/patra.bcyr` + four `fuzz/*.fcyr` files: kills 38 `line exceeds 120 characters` lint warnings (cyrlint counts bytes, not chars) and brings `patra.tcyr` from 134,107 → ~131,000 bytes — under cyrfmt/cyrlint's upstream 128 KB internal buffer cap, which had been silently truncating the file mid-identifier and producing a false-positive `unclosed braces at end of file` warning at line 3681. Root cause filed at `docs/development/issues/2026-04-30-cyrius-cyrfmt-cyrlint-buffer-truncation.md`. Plus 27 more sites of `syscall(SYS_CLOSE/SYS_READ/SYS_WRITE, …)` migrated to `sys_close/sys_read/sys_write` wrappers (arch-stable on those numbers, but the wrapper form removes the per-call `syscall arity mismatch` warnings that surfaced during aarch64 cross-build). All gates green: lint 0, fmt 0 drift, 620 tests, 6 fuzz, libro 15/15, vidya 19/19. 1.9.1 — aarch64 portability + toolchain bump 5.7.8 → 5.7.48 (40 patches; the longest minor in cyrius history). Migrated 9 raw `syscall(SYS_OPEN/SYS_UNLINK, …)` sites in `src/{jsonl,file,wal}.cyr` onto the stdlib's arch-translating `sys_open(path, flags, mode)` / `sys_unlink(path)` wrappers — aarch64's syscall table omits both legacy numbers (kernel exposes only AT-variants on arm64). `build/patra-aarch64` now produces a valid ARM aarch64 ELF; unblocks downstream consumers (yukti, vidya, sit, libro) that need to cross-compile through patra. Pass-through on x86_64. 1.9.0 — `json_build` → `patra_json_build` rename (BREAKING, minor bump) to clear a silent collision with `lib/json.cyr::json_build/1` (the general pairs-vec utility); cyrius v5.7.9 surfaces this kind of collision as a `warning: duplicate fn` at registration time. Toolchain pin bumped 5.6.39 → 5.7.8. New `scripts/version-bump.sh` keeps `VERSION` + `cyrius.cyml package.version` + `CLAUDE.md` Version line + a CHANGELOG stub in lockstep — pre-1.9.0, manual bumps could (and did) leave `cyrius.cyml` behind, tripping the CI version-consistency gate. 1.8.3 — release-prep pass (fmt clean, lint 0 warnings across 11 src files, `dist/patra.cyr` regenerated at 4771 lines). 1.8.2 bundled three perf optimizations: (1) **4KB page-slab allocator** (`pg_alloc`/`pg_free` in `src/file.cyr`) — LIFO stack of pre-allocated PAGE_SIZE buffers replaces `fl_alloc(PAGE_SIZE)` at ~45 hot sites in btree/bytes/table/lib; cap PG_SLAB_MAX=32 with freelist fallback. (2) **Word-at-a-time `_memeq256`** in `src/row.cyr` for the INSERT OR IGNORE STR conflict-probe verify path (32 × 8-byte loads vs 256 × 1-byte). (3) **Prepared statements** (`patra_prepare` / `patra_exec_prepared` / `patra_query_prepared` / `patra_finalize`) — parse once, dispatch many; 22µs → 14µs per repeated INSERT (~36% faster). 1.8.1 raised the Cyrius pin to 5.6.39. 1.8.0 shipped group commit / batched fsync — opt-in `PATRA_SYNC_BATCH` mode (`patra_set_sync_mode` / `patra_flush`) auto-flushes every 64 writes; ~64× faster on real-disk inserts (19.5ms → 306µs). 1.7.1 shipped STR-keyed B+ tree indexes via djb2-64 hash + verify-on-hit. 1.7.0 shipped `INSERT OR IGNORE INTO …` SQL (~18× faster than SELECT-then-INSERT workaround on hit). 1.6.1 shipped `patra_result_get_str_len`. 1.6.0 shipped `COL_BYTES` variable-length binary for sit's object store migration: chain-page storage (`BY_DATA_MAX = 4072`), programmatic `patra_insert_row` / `patra_result_read_bytes` API, chain cleanup on DELETE / DROP / ALTER DROP. `BYTES` keyword (canonical) with `BLOB` legacy alias. Cyrius 5.6.39.
-- **Integration**: libro audit log, vidya knowledge index, sit object store
-- **Index**: B+ tree order-64, auto or explicit CREATE INDEX (~39% faster equality select on unique keys, 500 rows; overflow-safe fallback on >256 duplicate refs)
-- **Binary**: 180KB (DCE)
+> Volatile state lives in [`docs/development/state.md`](docs/development/state.md) —
+> current version, binary sizes, test/assertion counts, in-flight slots, recent
+> shipped releases, consumers, verification hosts. Refreshed every release
+> (ideally bumped by the release post-hook). Historical release narrative
+> lives in [`docs/development/completed-phases.md`](docs/development/completed-phases.md)
+> and [`CHANGELOG.md`](CHANGELOG.md).
+>
+> This file (`CLAUDE.md`) is durable rules only. See
+> [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md#claudemd)
+> for what belongs where.
 
-## Consumers
+## Scaffolding
 
-- **libro** — audit log storage (JSONL append-only mode)
-- **daimon** — agent state persistence
-- **vidya** — knowledge index (topic lookup, priority ordering)
-- **agnoshi** — command history
-- **mela** — marketplace data
-- **hoosh** — model registry
-- **sit** — git-format object store (hash STR + content BYTES tables, replacing loose-file layout)
-
-## Dependencies
-
-- **sakshi** — tracing + error handling (via Cyrius stdlib `lib/sakshi.cyr`, ships with Cyrius >= 3.2.1)
-
-No external deps. No libsqlite3. No FFI.
+Project pre-dates `cyrius init`; structure was hand-built and reconciled
+back to first-party-standards layout. **Do not manually create new
+project structure** — use the tools where they apply. If the tools are
+missing something, fix the tools.
 
 ## Quick Start
 
 ```bash
 cyrius build programs/demo.cyr build/demo   # build demo
 ./build/demo                                 # run demo
-cyrius test tests/tcyr/patra.tcyr            # 620 assertions
-cyrius fuzz fuzz/                            # 6 harnesses
-cyrius bench tests/bcyr/patra.bcyr           # 35 benchmarks
+cyrius test tests/tcyr/patra.tcyr            # unit tests (see state.md for current count)
+cyrius fuzz fuzz/                            # fuzz harnesses
+cyrius bench tests/bcyr/patra.bcyr           # benchmarks
 ./build/test_libro                           # libro integration
 ./build/test_vidya                           # vidya integration
+CYRIUS_DCE=1 cyrius build ...                # dead-code-eliminated release build
+cyrius distlib                               # regenerate dist/patra.cyr from [lib] modules
 ```
 
 ## Key Principles
 
+- **Correctness is the optimum sovereignty** — if it's wrong, you don't own it; the bugs own you
+- **Own the database** — no libsqlite3 underneath. Cyrius reads and writes the file format directly
 - **Test after EVERY change** — not after the feature is "done"
 - **ONE change at a time** — never bundle unrelated changes
-- **Research before implementation** — vidya entry before code
-- **3 failed attempts = defer and document** — don't burn time
-- **Fuzz every parser path** — SQL edge cases get invariants
+- **Research before implementation** — check vidya for existing patterns; review Cyrius stdlib for primitives
+- **3 failed attempts = defer and document** — don't burn time in a rabbit hole
+- **Fuzz every parser path** — SQL edge cases get invariants, not assertions
 - **Benchmark before claiming perf** — numbers or it didn't happen
 - **Include order matters** — `file → wal → page → row → bytes → sql → where → btree → table → jsonl`
+- **Driven by consumer needs** — patra has no queued feature backlog. Work lands when a consumer hits a concrete limit; new items name the consumer and the blocker they remove
 
-## P(-1): Scaffold Hardening
+## Rules (Hard Constraints)
 
-Before starting new work on a release, run this audit phase:
+- **Read the genesis repo's CLAUDE.md first** — [agnosticos/CLAUDE.md](https://github.com/MacCracken/agnosticos/blob/main/CLAUDE.md)
+- **Do not commit or push** — the user handles all git operations
+- **NEVER use `gh` CLI** — use `curl` to the GitHub API if needed
+- **Do not link to libsqlite3** — this is a native Cyrius database; no FFI
+- **Do not use floating point** — integer comparisons only in WHERE clauses
+- **Do not implement features beyond the SQL subset in README** — the subset is the contract
+- **Do not skip fuzz / test verification** before claiming a feature works
+- **Do not skip benchmarks** before claiming performance improvements
+- **Do not add Cyrius stdlib includes in individual src files** — `lib.cyr` manages all includes; the manifest resolves stdlib
+- **Do not use `break` in while loops with `var` declarations** — unreliable; use flag + `continue` instead
+- **Do not hardcode toolchain versions in CI YAML** — the `cyrius = "X.Y.Z"` pin in `cyrius.cyml` is the only source of truth
+
+## Process
+
+### P(-1): Scaffold Hardening
+
+Run before any new feature work on a release. The scaffold gets you compiling — P(-1) makes it production-grade. At each minor / v1.0 cut, repeat to pay any debt the slot accreted.
 
 0. Read roadmap, CHANGELOG, and backlog — know what was intended
 1. Test + benchmark sweep: `cyrius test`, `cyrius bench`, `cyrius fuzz`
@@ -72,12 +97,12 @@ Before starting new work on a release, run this audit phase:
 3. Get baseline benchmarks
 4. Internal deep review — gaps, correctness, performance, security
 5. External research — vidya entries, reference implementations, best practices
-6. Additional tests/benchmarks from findings
-7. Post-review benchmarks — prove the wins
-8. Documentation audit — CHANGELOG, roadmap, architecture docs
+6. Additional tests / benchmarks from findings
+7. Post-review benchmarks — prove the wins against step 3
+8. Documentation audit — CHANGELOG, roadmap, `docs/development/state.md`, architecture docs
 9. Repeat if heavy
 
-## Development Loop
+### Development Loop
 
 ```
 1. RESEARCH    — Check vidya, review Cyrius stdlib patterns
@@ -88,23 +113,40 @@ Before starting new work on a release, run this audit phase:
                  ☐ cyrius fuzz fuzz/
 4. IF BROKEN   — Revert, apply ONE change, test, repeat
                  3 failed attempts = defer and document
-5. AUDIT       — Full suite: tests, fuzz, benchmarks, integration
-6. DOCUMENT    — CHANGELOG, roadmap, VERSION, cyrius.cyml in sync
+5. AUDIT       — Full suite: tests, fuzz, benchmarks, integration (libro + vidya)
+6. DOCUMENT    — CHANGELOG, roadmap, `docs/development/state.md`,
+                 VERSION, cyrius.cyml in sync; any ADR the change earned
 ```
+
+### Closeout Pass (before every minor / major bump)
+
+Run before tagging `X.Y.0` or `X.0.0`. Ship as the last patch of the current minor.
+
+1. Full test suite — `cyrius test tests/tcyr/patra.tcyr` clean, zero failures
+2. Benchmark baseline — `cyrius bench tests/bcyr/patra.bcyr`; compare against prior closeout
+3. Dead-code audit — DCE numbers tracked in CHANGELOG (NOPed bytes vs prior cut)
+4. Code review pass — walk diffs end-to-end for missed guards, off-by-ones, silently-ignored errors
+5. Cleanup sweep — stale comments, dead branches, unused includes, orphaned files
+6. Security re-scan — `grep` for new `sys_system`, unchecked writes, unsanitized input, buffer size mismatches
+7. Downstream check — libro + vidya integration tests still pass against the new version
+8. Doc sync — CHANGELOG, roadmap, `docs/development/state.md`, `docs/doc-health.md`, CLAUDE.md (if durable content changed)
+9. Version verify — `VERSION`, `cyrius.cyml` package.version, CHANGELOG header, intended git tag all match
+10. Full build from clean — `rm -rf build && cyrius deps && CYRIUS_DCE=1 cyrius build` passes clean
+11. `dist/patra.cyr` regenerated via `cyrius distlib`
 
 ### Task Sizing
 
-- **Low/Medium**: Batch freely — multiple items per cycle
-- **Large**: Small bites — one module at a time, verify each
-- **If unsure**: Treat as large
+- **Low / Medium effort**: batch freely — multiple items per work-loop cycle
+- **Large effort**: small bites only — break into sub-tasks, verify each before moving to the next
+- **If unsure**: treat as large
 
-### Refactoring
+### Refactoring Policy
 
-- Refactor when the code tells you to — duplication, unclear boundaries, bottlenecks
+- Refactor when the code tells you to — duplication, unclear boundaries, measured bottlenecks
 - Never refactor speculatively. Wait for the third instance
-- Every refactor must pass the same test + fuzz + benchmark gates
+- Every refactor must pass the same test + fuzz + benchmark gates as new code
 
-## Architecture
+## Architecture (durable shape)
 
 ```
 src/
@@ -113,7 +155,7 @@ src/
   page.cyr      — 4KB page alloc/read/write/free list + WAL integration
   row.cyr       — row encoding: i64, 256-byte strings, 16-byte (page, len) bytes-refs
   bytes.cyr     — variable-length binary: chain write/read/free across PAGE_BYTES pages
-  sql.cyr       — tokenizer + recursive descent parser (CREATE/INSERT/SELECT/UPDATE/DELETE/CREATE INDEX/ALTER/VACUUM, INSERT OR IGNORE, aggregates, column-list projection, BYTES/BLOB keyword)
+  sql.cyr       — tokenizer + recursive descent parser
   where.cyr     — WHERE evaluation: 7 operators (incl LIKE), AND/OR; BYTES columns never match
   wal.cyr       — Write-ahead logging: page before-images, crash recovery
   btree.cyr     — B+ tree: order-64, insert/split/search/range/lazy delete/compaction/whole-tree free
@@ -123,66 +165,56 @@ src/
 
 ## Key Constraints
 
-- **Zero dependencies** — no libsqlite3, no FFI, pure Cyrius
+- **Zero dependencies** — no libsqlite3, no FFI, pure Cyrius (sakshi is the only external dep, via Cyrius git registry)
 - **Column types**: `INT` (i64), `STR` (256-byte fixed), `BYTES` (variable-length binary via chain-page overflow; `BLOB` is a legacy alias)
-- **4KB pages** — standard page size, B-tree nodes fit one page
-- **flock for concurrency** — `syscall(73, fd, LOCK_EX/LOCK_UN)` advisory locking
-- **No floating point** — integer comparisons only in WHERE clauses
-- **SQL subset only** — CREATE TABLE, CREATE INDEX, ALTER TABLE (ADD/DROP COLUMN, RENAME TO, RENAME COLUMN), DROP TABLE, INSERT (with optional `OR IGNORE` for indexed-column dedup), SELECT (with `*` / column-list projection / COUNT/SUM/MIN/MAX aggregates), UPDATE, DELETE, VACUUM. WHERE supports `=, !=, <, >, <=, >=, LIKE` + AND/OR. BYTES columns are read/write only (no SQL INSERT/UPDATE/WHERE; use `patra_insert_row` + `patra_result_read_bytes`). No JOINs or subqueries
+- **4 KB pages** — standard page size, B-tree nodes fit one page
+- **flock for concurrency** — advisory locking, multi-reader / single-writer
+- **No floating point** — integer comparisons only in WHERE
+- **SQL subset only** — CREATE TABLE, CREATE INDEX, ALTER TABLE (ADD / DROP COLUMN, RENAME TO, RENAME COLUMN), DROP TABLE, INSERT (with optional `OR IGNORE`), SELECT (`*` / column-list / COUNT/SUM/MIN/MAX aggregates), UPDATE, DELETE, VACUUM. WHERE supports `=, !=, <, >, <=, >=, LIKE` + AND/OR. BYTES columns are programmatic-only (no SQL INSERT / UPDATE / WHERE). No JOINs, no subqueries
 
 ## Cyrius Conventions
 
-- All struct fields are 8 bytes (i64), accessed via `load64`/`store64` with offset
-- Heap allocation via `fl_alloc()`/`fl_free()` (freelist) for data with individual lifetimes
+- All struct fields are 8 bytes (i64), accessed via `load64` / `store64` with offset
+- Heap allocation via `fl_alloc()` / `fl_free()` (freelist) for data with individual lifetimes
 - Bump allocation via `alloc()` for long-lived data (vec, str internals)
-- Enum values for constants — don't consume gvar_toks slots (256 initialized globals limit)
-- Heap-allocate large buffers — `var buf[256000]` bloats binary by 256KB
+- Enum values for constants — don't consume `gvar_toks` slots (256 initialized globals limit)
+- Heap-allocate large buffers — `var buf[256000]` bloats the binary by 256KB
 - `break` in while loops with `var` declarations is unreliable — use flag + `continue`
 - No negative literals — write `(0 - N)` not `-N`
-- No mixed `&&`/`||` — nest `if` blocks
-- `match` is reserved — don't use as variable name
+- No mixed `&&` / `||` in one expression — nest `if` blocks instead
+- `match` is reserved — don't use as a variable name
 - `return;` without value is invalid — always `return 0;`
 - All `var` declarations are function-scoped — no block scoping
-- Max limits: 4,096 variables, 1,024 functions, 256 initialized globals
+- Max limits per compilation unit: 4,096 variables, 1,024 functions, 256 initialized globals
 
-## Key References
+## CI / Release
 
-- `docs/architecture/overview.md` — file format spec, page layouts, SQL pipeline
-- `docs/development/roadmap.md` — completed milestones + backlog
-- `docs/adr/` — architectural decision records (incl. Cyrius 5.5.x DCE)
-- `docs/audit/<date>/` — dated security audits (next: 1.5.1 fixes from 2026-04-21)
-- `CHANGELOG.md` — source of truth for all changes
-- `../vidya/content/` — B-tree, SQL parsing, file format vidya entries
+- **Toolchain pin**: `cyrius = "X.Y.Z"` field in `cyrius.cyml [package]`. No separate `.cyrius-toolchain` file. CI and release both read this; no hardcoded version strings in YAML
+- **Dead-code elimination**: every `cyrius build` in CI and release runs with `CYRIUS_DCE=1`. Binary size is tracked per release in `docs/development/state.md`
+- **Tag filter**: release workflow triggers on `tags: ['[0-9]*']` — semver-only
+- **Version-verify gate**: release asserts `VERSION == cyrius.cyml package.version == git tag` before building
+- **Workflow layout**:
+  - `.github/workflows/ci.yml` — build, lint, test, fuzz, bench, integration; reusable via `workflow_call`
+  - `.github/workflows/release.yml` — version gate → CI gate → DCE build → artifacts (source tarball, bundled `dist/patra.cyr`, DCE demo binary, SHA256SUMS)
+- **Concurrency**: CI uses `cancel-in-progress: true` keyed on workflow + ref
+- **State sync**: release post-hook should bump `docs/development/state.md` (version, binary size, test/bench counts, latest release row). If the hook doesn't, fix the hook — don't hand-maintain state
+- **Version-bump script**: `./scripts/version-bump.sh X.Y.Z` keeps `VERSION` + `cyrius.cyml package.version` + `CLAUDE.md` Version line + a CHANGELOG stub in lockstep. Bumping the cyrius pin is still manual (separate from package version)
 
-## DO NOT
+## Docs
 
-- **Do not commit or push** — the user handles all git operations
-- **NEVER use `gh` CLI**
-- Do not link to libsqlite3 — this is a native Cyrius database
-- Do not use floating point
-- Do not implement features beyond the SQL subset in README
-- Do not use `break` in while loops with `var` declarations — use flag + `continue`
-- Do not skip fuzz/test verification before claiming a feature works
-- Do not add Cyrius stdlib includes in individual src files — `lib.cyr` manages all includes
-- Do not skip benchmarks before claiming performance improvements
+- [`docs/adr/`](docs/adr/) — architecture decision records. *Why did we choose X over Y?*
+- [`docs/architecture/`](docs/architecture/) — non-obvious constraints and quirks. *What can't I derive from the code alone?*
+- [`docs/audit/`](docs/audit/) — dated security-audit reports
+- [`docs/development/roadmap.md`](docs/development/roadmap.md) — consumer-driven backlog
+- [`docs/development/state.md`](docs/development/state.md) — **live state snapshot, refreshed every release**
+- [`docs/development/completed-phases.md`](docs/development/completed-phases.md) — chronological shipped phases + rejected design directions
+- [`docs/development/BENCHMARKS.md`](docs/development/BENCHMARKS.md) — full benchmark table + version-over-version perf history
+- [`docs/development/issues/`](docs/development/issues/) — filed-upstream issue records (cyrius bugs surfaced during patra dev)
+- [`docs/doc-health.md`](docs/doc-health.md) — fresh / stale / archive / open-question ledger across the whole doc tree
+- [`CHANGELOG.md`](CHANGELOG.md) — source of truth for all changes
 
-## Documentation Structure
-
-```
-Root files (required):
-  README.md, CHANGELOG.md, CLAUDE.md, CONTRIBUTING.md,
-  SECURITY.md, CODE_OF_CONDUCT.md, LICENSE, VERSION, cyrius.cyml
-
-docs/ (required):
-  architecture/overview.md — file format spec, page layouts
-  development/roadmap.md — completed, backlog
-
-docs/ (when earned):
-  adr/ — architectural decision records
-  guides/ — usage guides, integration patterns
-  sources.md — source citations for algorithms
-```
+New quirks land in `docs/architecture/` as numbered `NNN-kebab-case.md` notes. New decisions land in `docs/adr/` using `docs/adr/template.md`. **Never renumber either series.** Full doc-tree convention: [first-party-documentation.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md).
 
 ## CHANGELOG Format
 
-Follow [Keep a Changelog](https://keepachangelog.com/). Performance claims MUST include benchmark numbers. Breaking changes get a **Breaking** section with migration guide.
+Follow [Keep a Changelog](https://keepachangelog.com/). Performance claims **must** include benchmark numbers. Breaking changes get a **Breaking** section with migration paragraph. Security fixes get a **Security** section. See [first-party-documentation § CHANGELOG](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md#changelog) for the full conventions.
