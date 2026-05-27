@@ -149,8 +149,8 @@ Full history in [`../../CHANGELOG.md`](../../CHANGELOG.md). Pre-1.6 narrative in
 
 ## CI / verification hosts
 
-- **CI**: x86_64 Linux only — `cyrius build` + lint + 680 tests + 6 fuzz + 36 benchmarks + libro + vidya integration.
-- **Release**: tag-driven on `[0-9]*`; verifies `VERSION == cyrius.cyml package.version == git tag`; ships source tarball + `dist/patra.cyr` bundle + DCE demo binary + SHA256SUMS.
+- **CI**: x86_64 Linux only — `cyrius build` + lint (**hard gate** as of v1.10.1 — any `warn` fails) + 680 tests + 6 fuzz + 36 benchmarks + libro + vidya integration. Toolchain installed via the upstream `install.sh` (v1.10.1, patterned on sigil), version sourced from the `cyrius.cyml` pin; deps resolved via `cyrius deps`.
+- **Release**: tag-driven on `[0-9]*`; verifies `VERSION == cyrius.cyml package.version == git tag`; ships source tarball + `dist/patra.cyr` bundle + DCE demo binary + SHA256SUMS. Same `install.sh` toolchain step as CI.
 - **aarch64**: best-effort. Library (`src/lib.cyr`) cross-builds clean; the `programs/` test binaries do not (still on raw `SYS_UNLINK`) — they're host-only.
 
 ## Known footguns / latent issues

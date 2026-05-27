@@ -34,6 +34,14 @@ patches). Removes the hand-rolled id counter consumers seeded from
   old schema reads `0`, and an old patra opening a new autoinc DB just
   sees a normal INT column — no format break.
 - `dist/patra.cyr` regenerated via `cyrius distlib` (4894 → 4912 lines).
+- **CI/release modernization** (`.github/workflows/{ci,release}.yml`,
+  patterned on sigil): the ~40-line manual cyrius tarball install is
+  replaced by the upstream `install.sh` one-liner, still sourcing the
+  version from the `cyrius.cyml` pin (no hardcoded version in YAML, per
+  CLAUDE.md) and resolving deps via `cyrius deps`. CI `lint` is now a
+  hard gate — any `warn` line fails the build (patra's `src/*.cyr` +
+  `programs/*.cyr` lint clean, so no exemptions needed) — replacing the
+  prior advisory `|| true`.
 
 ### Verified (cyrius 6.0.3, x86_64)
 
