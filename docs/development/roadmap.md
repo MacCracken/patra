@@ -1,10 +1,10 @@
 # Patra Development Roadmap
 
-> **Last refreshed**: 2026-05-27 (yeo-cy-test consumer blockers added to open queue; was 2026-05-21 at v1.9.5 cut)
+> **Last refreshed**: 2026-05-27 (v1.10.0 cut — 2 of 5 yeo-cy-test blockers shipped; was 2026-05-27 at queue-intake)
 >
 > Forward-looking only. Shipped work lives in [`../../CHANGELOG.md`](../../CHANGELOG.md); rejected design directions and phase-level summaries live in [`completed-phases.md`](completed-phases.md). Live state (version, sizes, test counts, consumers) lives in [`state.md`](state.md).
 
-> **Current**: v1.9.5 — cyrius pin 5.11.4 → 6.0.1 (patra's first major-version cyrius bump). 1.9.x line: 1.9.0 BREAKING `json_build` rename → 1.9.1 aarch64 portability → 1.9.2 lint/fmt clean surface → 1.9.3 sakshi tag + path correction → 1.9.4 stdlib `: i64` return-type annotation pass → 1.9.5 cyrius 6.0 bump. Patra serves libro, vidya, daimon, agnoshi, mela, hoosh, and sit.
+> **Current**: v1.10.0 — consumer-driven feature release (yeo-cy-test): column-list INSERT + sakshi transitive-dep doc; cyrius pin 6.0.1 → 6.0.3. 1.9.x line recap: 1.9.0 BREAKING `json_build` rename → 1.9.1 aarch64 portability → 1.9.2 lint/fmt clean surface → 1.9.3 sakshi tag + path correction → 1.9.4 stdlib `: i64` return-type annotation pass → 1.9.5 cyrius 6.0 bump. Patra serves libro, vidya, daimon, agnoshi, mela, hoosh, and sit.
 
 ## Driven by consumer needs
 
@@ -30,6 +30,22 @@ port. patra **worked** — open, CREATE TABLE, positional INSERT, SELECT/ORDER B
 blockers below are ordered by impact for the SY port (lots of stored free text).
 Full write-up: [`secureyeoman/yeo-cy-test/FINDINGS.md`](../../../secureyeoman/yeo-cy-test/FINDINGS.md).
 
+**Shipped in v1.10.0** (2 of 5):
+
+- ✅ **INSERT column list (was MEDIUM).** `INSERT INTO t (a, b) VALUES (…)`
+  binds values to named columns in any order; omitted columns take their
+  zero/empty default. Composes with `OR IGNORE` and prepared statements.
+  Removes the positional-INSERT brittleness when porting SQLx/axum code.
+- ✅ **Undocumented transitive dep on sakshi (was LOW, packaging).**
+  Documented in README § Dependencies + a `cyrius.cyml` maintainer note:
+  cyrius doesn't resolve transitive deps, so consumers must replicate
+  `[deps.sakshi]` alongside `[deps.patra]`. (Inlining sakshi into the dist
+  bundle was rejected for this cut — it risks duplicate-symbol clashes for
+  consumers that also depend on sakshi directly; revisit via ADR if a
+  truly-standalone bundle is ever needed.)
+
+**Still open** (3 of 5), ordered by impact:
+
 - **No SQL string escaping / no bind parameters (HIGH).** `sql_tokenize`
   (`src/…` tokenizer) opens on `'` and closes at the *first* following `'` — no
   `''` doubling, no backslash escapes — and `patra_prepare` bakes literals in at
@@ -40,11 +56,6 @@ Full write-up: [`secureyeoman/yeo-cy-test/FINDINGS.md`](../../../secureyeoman/ye
   before INSERT, decode on read (base64's alphabet has no quotes). The clean
   fix is `patra_bind_text/int/blob` (sqlite3_bind_* shape), which removes both
   the escaping hole and the prepare-time-literal limitation at once.
-- **INSERT has no column list (MEDIUM).** `INSERT INTO t (a, b) VALUES (…)` is a
-  syntax error; `_parse_insert` requires `VALUES` immediately after the table
-  name, so values must be positional in CREATE TABLE order. Brittle as schemas
-  evolve and a porting footgun (SQLx/axum code names columns). **Stopgap:** emit
-  positional INSERTs matching declaration order.
 - **STR columns fixed at 256 bytes (MEDIUM).** `COL_STR_SZ` (incl. NUL) truncates
   silently past that; with base64's 4/3 inflation the effective text cap drops
   to ~189 bytes. `COL_BYTES`/blob pages exist for larger payloads but no SQL
@@ -53,17 +64,12 @@ Full write-up: [`secureyeoman/yeo-cy-test/FINDINGS.md`](../../../secureyeoman/ye
 - **No AUTOINCREMENT / rowid (LOW).** Consumers allocate ids by hand;
   yeo-cy-test seeds its counter from `SELECT id … ORDER BY id` at boot. An auto
   rowid or `INTEGER PRIMARY KEY`-style id would remove the boilerplate.
-- **Undocumented transitive dep on sakshi (LOW, packaging).** `dist/patra.cyr`
-  calls `sakshi_error` / `sakshi_set_level` but doesn't vendor sakshi, so a
-  consumer that adds only `[deps.patra]` fails to link until they also add
-  `[deps.sakshi]`. Either inline sakshi into the dist bundle or document the
-  requirement in the README / `cyrius.cyml`.
 
 ### Pre-existing (toolchain, not consumer-filed)
 
 - **`programs/` aarch64 cross-build** — the three test programs in `programs/` (`demo.cyr`, `test_libro.cyr`, `test_vidya.cyr`) still use raw `syscall(SYS_UNLINK, …)`; the v1.9.1 wrapper migration covered `src/*.cyr` but not the demo harness. Cross-build of `src/lib.cyr` is clean; only the test binaries break under `--aarch64`. Folds into the next consumer-driven release if an aarch64-CI consumer asks for it.
 - **`cyrfmt` / `cyrlint` 128 KB buffer cap (upstream cyrius)** — filed at [`issues/2026-04-30-cyrius-cyrfmt-cyrlint-buffer-truncation.md`](issues/2026-04-30-cyrius-cyrfmt-cyrlint-buffer-truncation.md). v1.9.2's ASCII pass shrank `patra.tcyr` under the cap; re-verify under any meaningful test growth, and chase the upstream fix (same shape as v5.7.36's `cyrius distlib` 64 KB → 256 KB).
-- **`cyrius deps --lock` 0-byte lockfile (cyrius 6.0.1)** — surfaced in v1.9.5 testing. `cyrius deps` emits a 0-byte `cyrius.lock` even though sakshi resolves correctly. Non-blocking for patra (CI doesn't `--verify`); flag if a stricter consumer hits it.
+- ~~**`cyrius deps --lock` 0-byte lockfile (cyrius 6.0.1)**~~ — **resolved in cyrius 6.0.3** (v1.10.0 pin bump). `cyrius deps` now serializes the full lock (81-byte stub → 6595 bytes / 81 deps); the regenerated `cyrius.lock` ships with v1.10.0.
 
 ## v1.0 criteria — met since 1.0.0
 

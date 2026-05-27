@@ -5,6 +5,67 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.0] - 2026-05-27
+
+**Consumer-driven feature release (yeo-cy-test).** Clears two of the
+blockers the SecureYeoman → Cyrius port probe filed against patra
+(2026-05-27): column-list INSERT (MEDIUM) and the sakshi transitive-dep
+packaging gap (LOW). Toolchain pin moves 6.0.1 → 6.0.3 within the 6.0.x
+line. The higher-impact yeo-cy-test items — bind parameters / SQL string
+escaping (HIGH), TEXT/VARLEN columns (MEDIUM), rowid / AUTOINCREMENT
+(LOW) — remain on the [roadmap](docs/development/roadmap.md) for a later
+cut.
+
+### Added
+
+- **Column-list INSERT** — `INSERT INTO t (a, b) VALUES (…)`. Values bind
+  to the named columns by name (any order); columns left unnamed take
+  their zero/empty default. Plain positional `INSERT INTO t VALUES (…)`
+  is unchanged. The value count must equal the named-column count
+  (`PATRA_ERR_COLCOUNT` otherwise); an unknown column name is
+  `PATRA_ERR_NOTFOUND`, a column named twice is `PATRA_ERR_SYNTAX`, and a
+  value whose type mismatches its column is `PATRA_ERR_TYPE`. Composes
+  with `OR IGNORE` and with prepared statements. Removes the positional
+  brittleness yeo-cy-test hit porting SQLx/axum code that names columns.
+  Parser carries the column-name list in the free tail of the 4096-byte
+  parse-result buffer (`PR_INS_COLS` at 2824, past the WHERE region —
+  INSERT never populates WHERE); exec resolves each name via
+  `_wh_resolve_col` and binds into the row.
+
+### Changed
+
+- `cyrius` pin bumped 6.0.1 → 6.0.3 in `cyrius.cyml`. Patch bump within
+  the 6.0.x line. 6.0.3 also heals the 6.0.1 `cyrius deps --lock`
+  regression — `cyrius.lock` now serializes full content (81-byte stub →
+  6595 bytes / 81 deps); the regenerated lock ships with this release.
+- `dist/patra.cyr` regenerated via `cyrius distlib` (4785 → 4894 lines;
+  the column-list parser/exec additions).
+
+### Documentation
+
+- README gains a **Dependencies** section documenting the sakshi
+  transitive-dep requirement: cyrius does not resolve transitive deps, so
+  a consumer declaring `[deps.patra]` must also declare `[deps.sakshi]`
+  at patra's pinned tag or the link fails on undefined `sakshi_*`
+  symbols. Mirrored as a maintainer note in `cyrius.cyml [deps.sakshi]`.
+  The single-include `dist/patra.cyr` bundle carries the same
+  requirement.
+- README **SQL Supported** lists the column-list INSERT form and its
+  bind/default semantics.
+
+### Verified (cyrius 6.0.3, x86_64)
+
+- `cyrius test tests/tcyr/patra.tcyr`: **652 / 652** pass (+32 over
+  v1.9.5 — 6 new column-list INSERT test groups).
+- 6 / 6 fuzz harnesses clean; `fuzz_sql` gains 20 column-list invariants
+  (exit codes 100–119) covering malformed lists, valid named lists,
+  reorder, omitted-column defaults, and the unknown/count error paths.
+- `cyrius bench tests/bcyr/patra.bcyr`: 36 benchmarks complete; no
+  regression vs the v1.9.5 baseline — the column-list branch adds zero
+  overhead to positional INSERT (`parse_insert` 7 µs).
+- Integration: libro 15 / 15, vidya 19 / 19.
+- DCE demo binary: 225,064 bytes (60,606 NOPed) under `CYRIUS_DCE=1`.
+
 ## [1.9.5] - 2026-05-21
 
 **Cyrius 6.0 toolchain bump.** Pins `cyrius` 5.11.4 → 6.0.1 —

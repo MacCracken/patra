@@ -3561,6 +3561,108 @@ fn test_result_str_len() {
 
 # -- Runner --------------------------------------------------
 
+# -- v1.10.0: INSERT column list ------------------------------
+
+fn test_parse_insert_collist() {
+    test_group("parse insert collist");
+    sql_tokenize("INSERT INTO t (id, name) VALUES (1, 'alice')");
+    assert_eq(sql_parse(), PATRA_OK, "named list parses");
+    assert_eq(load64(_sql_pr + PR_INS_NCOLS), 2, "2 named cols");
+    assert_eq(load64(_sql_pr + PR_COUNT), 2, "2 values");
+
+    sql_tokenize("INSERT INTO t VALUES (1, 'alice')");
+    assert_eq(sql_parse(), PATRA_OK, "positional parses");
+    assert_eq(load64(_sql_pr + PR_INS_NCOLS), 0, "positional => 0 named");
+
+    sql_tokenize("INSERT INTO t () VALUES (1)");
+    assert_eq(sql_parse(), PATRA_ERR_SYNTAX, "empty list rejected");
+
+    sql_tokenize("INSERT INTO t (id name) VALUES (1, 2)");
+    assert_eq(sql_parse(), PATRA_ERR_SYNTAX, "missing comma rejected");
+
+    sql_tokenize("INSERT INTO t (id, id) VALUES (1, 2)");
+    assert_eq(sql_parse(), PATRA_ERR_SYNTAX, "duplicate column rejected");
+}
+
+fn test_insert_collist_reorder() {
+    test_group("insert collist reorder");
+    cleanup();
+    var db = patra_open(_tpath);
+    assert_eq(patra_exec(db, "CREATE TABLE t (id INT, name STR, age INT)"), PATRA_OK, "create");
+    # Columns named out of declaration order -- values bind by name.
+    assert_eq(patra_exec(db, "INSERT INTO t (name, age, id) VALUES ('alice', 30, 1)"), PATRA_OK, "reordered insert");
+    var rs = patra_query(db, "SELECT * FROM t");
+    assert_eq(patra_result_count(rs), 1, "1 row");
+    assert_eq(patra_result_get_int(rs, 0, 0), 1, "id bound");
+    assert_streq(patra_result_get_str(rs, 0, 1), "alice", "name bound");
+    assert_eq(patra_result_get_int(rs, 0, 2), 30, "age bound");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_insert_collist_partial() {
+    test_group("insert collist partial");
+    cleanup();
+    var db = patra_open(_tpath);
+    assert_eq(patra_exec(db, "CREATE TABLE t (id INT, name STR, age INT)"), PATRA_OK, "create");
+    # age omitted -- defaults to 0; name omitted -- defaults to empty string.
+    assert_eq(patra_exec(db, "INSERT INTO t (id, name) VALUES (7, 'bob')"), PATRA_OK, "partial insert");
+    assert_eq(patra_exec(db, "INSERT INTO t (id) VALUES (8)"), PATRA_OK, "id-only insert");
+    var rs = patra_query(db, "SELECT * FROM t WHERE id = 7");
+    assert_eq(patra_result_get_int(rs, 0, 2), 0, "omitted INT => 0");
+    patra_result_free(rs);
+    var rs2 = patra_query(db, "SELECT * FROM t WHERE id = 8");
+    assert_streq(patra_result_get_str(rs2, 0, 1), "", "omitted STR => empty");
+    assert_eq(patra_result_get_int(rs2, 0, 2), 0, "omitted INT => 0");
+    patra_result_free(rs2);
+    patra_close(db);
+}
+
+fn test_insert_collist_errors() {
+    test_group("insert collist errors");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (id INT, name STR)");
+    assert_eq(patra_exec(db, "INSERT INTO t (ghost) VALUES (1)"), PATRA_ERR_NOTFOUND, "unknown col");
+    assert_eq(patra_exec(db, "INSERT INTO t (id, name) VALUES (1)"), PATRA_ERR_COLCOUNT, "value count < cols");
+    assert_eq(patra_exec(db, "INSERT INTO t (id) VALUES (1, 2)"), PATRA_ERR_COLCOUNT, "value count > cols");
+    assert_eq(patra_exec(db, "INSERT INTO t (id) VALUES ('str')"), PATRA_ERR_TYPE, "type mismatch");
+    patra_close(db);
+}
+
+fn test_insert_collist_or_ignore() {
+    test_group("insert collist or ignore");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (id INT, name STR)");
+    patra_exec(db, "CREATE INDEX ON t (id)");
+    assert_eq(patra_exec(db, "INSERT INTO t (id, name) VALUES (1, 'a')"), PATRA_OK, "seed row");
+    # OR IGNORE composes with the column list -- the dedup probe reads the
+    # bound id from the built row regardless of value order.
+    assert_eq(patra_exec(db, "INSERT OR IGNORE INTO t (name, id) VALUES ('b', 1)"), PATRA_OK, "ignored dup");
+    var rs = patra_query(db, "SELECT * FROM t");
+    assert_eq(patra_result_count(rs), 1, "still 1 row");
+    assert_streq(patra_result_get_str(rs, 0, 1), "a", "original kept");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_insert_collist_prepared() {
+    test_group("insert collist prepared");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (id INT, name STR)");
+    var ins = patra_prepare(db, "INSERT INTO t (name, id) VALUES ('zed', 9)");
+    assert(ins != 0, "prepare collist insert");
+    assert_eq(patra_exec_prepared(db, ins), PATRA_OK, "run prepared collist");
+    patra_finalize(ins);
+    var rs = patra_query(db, "SELECT * FROM t");
+    assert_eq(patra_result_get_int(rs, 0, 0), 9, "id bound via prepared");
+    assert_streq(patra_result_get_str(rs, 0, 1), "zed", "name bound via prepared");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
 fn main() {
     alloc_init();
     fl_init();
@@ -3773,6 +3875,14 @@ fn main() {
     test_prepare_owns_sql_buffer();
     test_prepare_finalize_safe();
     test_prepare_str_index();
+
+    # v1.10.0 INSERT column list
+    test_parse_insert_collist();
+    test_insert_collist_reorder();
+    test_insert_collist_partial();
+    test_insert_collist_errors();
+    test_insert_collist_or_ignore();
+    test_insert_collist_prepared();
 
     cleanup();
     return assert_summary();

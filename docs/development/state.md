@@ -9,38 +9,41 @@
 
 ## Current
 
-- **Version**: 1.9.5 (read `VERSION` for the authoritative number)
-- **Cyrius toolchain**: 6.0.1 (pinned in `cyrius.cyml [package].cyrius`).
-  First major-version cyrius bump for patra — Cyrius 6.0 renames the
-  named compiler (`cc5` → `cycc`, `cc5_aarch64` → `cycc_aarch64`) and
-  drops the legacy aliases on the release-asset path. Patra's CI
-  invokes the `cyrius` CLI wrapper (`cyrius build/test/lint/distlib`)
-  rather than the named compiler directly, so no workflow rename was
-  required.
+- **Version**: 1.10.0 (read `VERSION` for the authoritative number)
+- **Cyrius toolchain**: 6.0.3 (pinned in `cyrius.cyml [package].cyrius`).
+  Patch bump within the 6.0.x line first adopted at v1.9.5. 6.0.3 also
+  heals the 6.0.1 `cyrius deps --lock` regression — `cyrius.lock` now
+  serializes full content (6595 bytes / 81 deps) instead of the 81-byte
+  stub 6.0.1 emitted.
 - **sakshi pin**: 2.2.3 (`[deps.sakshi].tag`; modules path
-  `dist/sakshi.cyr` — canonical convention since v1.9.3)
-- **Binary**: ~224 KB DCE demo (`programs/demo.cyr`, x86_64). aarch64
-  cross-build of `src/lib.cyr` produces a valid ARM ELF (~266 KB) —
-  confirms 1.9.1's aarch64 portability holds under cyrius 6.0.
-- **Status**: **1.9.x line — release 5 (cyrius 6.0 toolchain bump).**
-  v1.9.5 is a pin-only patch — no source changes. All gates green
-  under 6.0.1; `dist/patra.cyr` regenerated at 4785 lines.
-  Next: consumer-driven feature work — patra has no queued backlog;
-  work lands when a downstream hits a concrete limit (see
-  [`roadmap.md`](roadmap.md)).
+  `dist/sakshi.cyr` — canonical convention since v1.9.3). Transitive:
+  downstream consumers must replicate `[deps.sakshi]` alongside
+  `[deps.patra]` (cyrius does not resolve transitive deps) — documented
+  in README § Dependencies as of v1.10.0.
+- **Binary**: ~225 KB DCE demo (`programs/demo.cyr`, x86_64; 225,064
+  bytes, 60,606 NOPed). aarch64 cross-build of `src/lib.cyr` produces a
+  valid ARM ELF — 1.9.1's aarch64 portability holds under cyrius 6.0.3.
+- **Status**: **1.10.0 — consumer-driven feature release (yeo-cy-test).**
+  Two yeo-cy-test blockers cleared: column-list INSERT
+  (`INSERT INTO t (a, b) VALUES (…)`, MEDIUM) and the sakshi
+  transitive-dep packaging gap (LOW, documented). cyrius pin 6.0.1 →
+  6.0.3. All gates green; `dist/patra.cyr` regenerated at 4894 lines.
+  Deferred from the yeo-cy-test queue: bind parameters / SQL escaping
+  (HIGH), TEXT/VARLEN columns (MEDIUM), rowid/AUTOINCREMENT (LOW) — see
+  [`roadmap.md`](roadmap.md).
 - **Primary target**: Linux x86_64. aarch64 cross-build best-effort
-  (`src/lib.cyr` cross-builds clean under cyrius 6.0.1; the test
+  (`src/lib.cyr` cross-builds clean under cyrius 6.0.3; the test
   programs in `programs/` still use raw `syscall(SYS_UNLINK, …)` and
   do not cross-build — host-only x86_64 for those).
 
 ## Source layout
 
-11 modules, ~4,800 lines total in `src/`.
+11 modules, ~4,875 lines total in `src/`.
 
 | File | Lines | Responsibility |
 |------|------:|----------------|
-| `src/lib.cyr` | 1669 | public API + includes (entry point); `patra_insert_row` / `result_read_bytes`; prepared statements (`patra_prepare` / `_exec_prepared` / `_query_prepared` / `_finalize`) |
-| `src/sql.cyr` | 919 | tokenizer + recursive-descent parser — CREATE / INSERT / SELECT / UPDATE / DELETE / CREATE INDEX / ALTER / VACUUM; INSERT OR IGNORE; aggregates; column-list projection; BYTES / BLOB keyword |
+| `src/lib.cyr` | 1697 | public API + includes (entry point); `patra_insert_row` / `result_read_bytes`; prepared statements (`patra_prepare` / `_exec_prepared` / `_query_prepared` / `_finalize`); column-list INSERT bind (v1.10.0) |
+| `src/sql.cyr` | 962 | tokenizer + recursive-descent parser — CREATE / INSERT / SELECT / UPDATE / DELETE / CREATE INDEX / ALTER / VACUUM; INSERT OR IGNORE; column-list INSERT (v1.10.0); aggregates; column-list projection; BYTES / BLOB keyword |
 | `src/btree.cyr` | 504 | B+ tree order-64; insert / split / search / range / lazy delete / compaction / whole-tree free |
 | `src/table.cyr` | 416 | table create / insert / scan / update / delete + index maintenance + bytes chain cleanup |
 | `src/jsonl.cyr` | 371 | JSON Lines I/O, JSON builder, field extraction, escaping; `patra_json_build` (renamed from `json_build` in v1.9.0) |
@@ -55,14 +58,17 @@
 
 ## Tests / Fuzz / Bench
 
-- **Unit**: `tests/tcyr/patra.tcyr` — **620 / 620** assertions pass under
-  cyrius 6.0.1.
+- **Unit**: `tests/tcyr/patra.tcyr` — **652 / 652** assertions pass under
+  cyrius 6.0.3 (+32 over v1.9.5: 6 column-list INSERT groups).
 - **Fuzz**: 6 harnesses in `fuzz/` — `fuzz_btree`, `fuzz_bytes`,
   `fuzz_file`, `fuzz_jsonl`, `fuzz_sql`, `fuzz_wal`. All clean under the
-  10 s CI timeout.
-- **Benchmarks**: `tests/bcyr/patra.bcyr` — **35 benchmarks**, full
-  table re-baselined under cyrius 6.0.1 at v1.9.5 (see
-  [`BENCHMARKS.md`](BENCHMARKS.md)). Representative subset:
+  10 s CI timeout. `fuzz_sql` gains 20 column-list INSERT invariants
+  (exit codes 100–119) at v1.10.0.
+- **Benchmarks**: `tests/bcyr/patra.bcyr` — **36 benchmarks**; full
+  table baselined under cyrius 6.0.1 at v1.9.5 (see
+  [`BENCHMARKS.md`](BENCHMARKS.md)). v1.10.0 re-ran the suite under
+  6.0.3: no regression — the column-list branch adds zero overhead to
+  positional INSERT (`parse_insert` 7 µs). Representative subset:
   - `btree_insert_1k` 4 µs · `btree_search_1k` 2 µs
   - `select_idx_eq_500` 520 µs · `select_scan_500` 473 µs
   - `select_idx_eq_unique_500` 239 µs
@@ -123,6 +129,7 @@ payload at `BY_DATA_MAX = 4072`.
 
 | Version | Date | Summary |
 |---------|------|---------|
+| 1.10.0 | 2026-05-27 | **Consumer-driven feature release (yeo-cy-test).** Column-list INSERT — `INSERT INTO t (a, b) VALUES (…)` binds values by name in any order; omitted columns take their zero/empty default; positional INSERT unchanged (MEDIUM blocker). sakshi transitive-dep packaging documented in README § Dependencies + `cyrius.cyml` (LOW blocker — cyrius doesn't resolve transitive deps, so consumers must replicate `[deps.sakshi]`). cyrius pin 6.0.1 → 6.0.3 (also heals the 6.0.1 0-byte-lockfile regression). Gates: 652 tests, 6 fuzz (+20 column-list invariants), 36 benchmarks (no regression), libro 15/15, vidya 19/19. `dist/patra.cyr` regenerated at 4894 lines. Deferred: bind parameters (HIGH), TEXT/VARLEN (MEDIUM), rowid (LOW). |
 | 1.9.5 | 2026-05-21 | **Cyrius 6.0 toolchain bump (pin-only patch).** `cyrius` pin 5.11.4 → 6.0.1 — patra's first major-version cyrius bump. Cyrius 6.0 renames the named compiler (`cc5` → `cycc`, `cc5_aarch64` → `cycc_aarch64`); patra's CI invokes the `cyrius` CLI wrapper, so no workflow surgery was required (pattern-matched against agnosys commits `4588938` + `b1e9eca`, which had to migrate `cc5 --version` + `cc5_aarch64` call sites). All gates green: lint 0, 620 tests, 6 fuzz, 35 benchmarks (no regression), libro 15/15, vidya 19/19, `src/lib.cyr` aarch64 cross-build clean. `dist/patra.cyr` regenerated at 4785 lines. |
 | 1.9.4 | 2026-05-11 | **Stdlib `: i64` return-type annotation pass.** Every public fn in `src/*.cyr` carries a `: i64` return-type annotation. Mechanical parse-only pass tracking cyrius's v5.11.x annotation arc (REAL TYPE SYSTEM); zero runtime / codegen change. Pin 5.8.64 → 5.11.4. |
 | 1.9.3 | 2026-05-05 | **sakshi tag + path corrections; pin 5.7.48 → 5.8.64** ahead of cyrius's v5.8.65 stdlib foldin. sakshi dep tag 0.9.0 → 2.2.3 and `modules` path `"sakshi.cyr"` → `"dist/sakshi.cyr"` (canonical convention). 620 / 620 asserts pass against the new pin. |
@@ -142,17 +149,17 @@ Full history in [`../../CHANGELOG.md`](../../CHANGELOG.md). Pre-1.6 narrative in
 
 ## CI / verification hosts
 
-- **CI**: x86_64 Linux only — `cyrius build` + lint + 620 tests + 6 fuzz + 35 benchmarks + libro + vidya integration.
+- **CI**: x86_64 Linux only — `cyrius build` + lint + 652 tests + 6 fuzz + 36 benchmarks + libro + vidya integration.
 - **Release**: tag-driven on `[0-9]*`; verifies `VERSION == cyrius.cyml package.version == git tag`; ships source tarball + `dist/patra.cyr` bundle + DCE demo binary + SHA256SUMS.
 - **aarch64**: best-effort. Library (`src/lib.cyr`) cross-builds clean; the `programs/` test binaries do not (still on raw `SYS_UNLINK`) — they're host-only.
 
 ## Known footguns / latent issues
 
-- **`cyrius deps --lock` lock-emit regression (cyrius 6.0.1)** — `cyrius deps` writes a 0-byte `cyrius.lock` even though sakshi resolves correctly and the previously locked sha (`c495cb75…`) still matches the on-disk `lib/sakshi.cyr`. Patra CI does not run `cyrius deps --verify` so this is non-blocking, but worth flagging upstream — repos with stricter verify steps (e.g. agnosys) would break.
 - **`programs/` aarch64 cross-build** — `programs/demo.cyr`, `test_libro.cyr`, `test_vidya.cyr` still use raw `syscall(SYS_UNLINK, …)`. The library proper is aarch64-clean; the test harness isn't. Folding into the wrapper migration is queued behind the next consumer-driven release.
 
 ## Resolved (archived)
 
+- **`cyrius deps --lock` 0-byte lockfile (cyrius 6.0.1)** — **resolved in cyrius 6.0.3.** `cyrius deps` now serializes the full lock (`cyrius.lock` 81-byte stub → 6595 bytes / 81 deps) instead of the empty stub 6.0.1 emitted. Confirmed during the v1.10.0 pin bump; the regenerated lock ships with v1.10.0.
 - **`cyrfmt` / `cyrlint` 128 KB buffer cap** — **resolved upstream in cyrius 6.0.1.** Internal buffer raised 131,072 → 524,288 bytes (4× bump, verified by feeding a 6.6 MB input to `cyrfmt`: output now caps at 524,289 bytes, not 131,072). Patra's largest source file (`tests/tcyr/patra.tcyr`, 130,692 bytes) is now ~4× under the new cap. Issue moved to [`issues/archive/2026-04-30-cyrius-cyrfmt-cyrlint-buffer-truncation.md`](issues/archive/2026-04-30-cyrius-cyrfmt-cyrlint-buffer-truncation.md). The fixed-buffer shape still exists at the larger size; re-file if any patra test file ever crosses 512 KB.
 
 ## Refresh procedure

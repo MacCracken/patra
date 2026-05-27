@@ -136,6 +136,56 @@ sql_tokenize("INSERT INTO t VALUES (1, 'x')");
 if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 69); }
 if (load64(_sql_pr + PR_INSERT_IGNORE) != 0) { syscall(SYS_EXIT, 73); }
 
+# ── INSERT column list (1.10.0): malformed reject, valid accept ──
+
+# Empty list, unterminated list, trailing comma, duplicate, missing comma,
+# missing VALUES — all must reject.
+sql_tokenize("INSERT INTO t () VALUES (1)");
+if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 100); }
+sql_tokenize("INSERT INTO t (a");
+if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 101); }
+sql_tokenize("INSERT INTO t (a, ) VALUES (1)");
+if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 102); }
+sql_tokenize("INSERT INTO t (a, a) VALUES (1, 2)");
+if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 103); }
+sql_tokenize("INSERT INTO t (a b) VALUES (1, 2)");
+if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 104); }
+sql_tokenize("INSERT INTO t (a) (1)");
+if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 105); }
+
+# Valid named list: parses, records count, leaves positional flag at 0.
+sql_tokenize("INSERT INTO t (a, b) VALUES (1, 2)");
+if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 106); }
+if (load64(_sql_pr + PR_INS_NCOLS) != 2) { syscall(SYS_EXIT, 107); }
+# Positional INSERT must leave PR_INS_NCOLS at 0.
+sql_tokenize("INSERT INTO t VALUES (1, 2)");
+if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 108); }
+if (load64(_sql_pr + PR_INS_NCOLS) != 0) { syscall(SYS_EXIT, 109); }
+# OR IGNORE composes with a column list.
+sql_tokenize("INSERT OR IGNORE INTO t (b, a) VALUES (2, 1)");
+if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 110); }
+if (load64(_sql_pr + PR_INS_NCOLS) != 2) { syscall(SYS_EXIT, 111); }
+if (load64(_sql_pr + PR_INSERT_IGNORE) != 1) { syscall(SYS_EXIT, 112); }
+
+# Integration: reorder binds by name, omitted column defaults, error paths.
+var clpath = "/tmp/patra_fuzz_collist.patra";
+syscall(SYS_UNLINK, clpath);
+var cldb = patra_open(clpath);
+if (cldb == 0) { syscall(SYS_EXIT, 113); }
+patra_exec(cldb, "CREATE TABLE clt (id INT, name STR, age INT)");
+if (patra_exec(cldb, "INSERT INTO clt (name, age, id) VALUES ('alice', 30, 1)") != PATRA_OK) { syscall(SYS_EXIT, 114); }
+if (patra_exec(cldb, "INSERT INTO clt (id, name) VALUES (2, 'bob')") != PATRA_OK) { syscall(SYS_EXIT, 115); }
+if (patra_exec(cldb, "INSERT INTO clt (ghost) VALUES (1)") != PATRA_ERR_NOTFOUND) { syscall(SYS_EXIT, 116); }
+if (patra_exec(cldb, "INSERT INTO clt (id, name) VALUES (3)") != PATRA_ERR_COLCOUNT) { syscall(SYS_EXIT, 117); }
+var clrs = patra_query(cldb, "SELECT * FROM clt WHERE id = 1");
+if (patra_result_get_int(clrs, 0, 2) != 30) { syscall(SYS_EXIT, 118); }
+patra_result_free(clrs);
+var clrs2 = patra_query(cldb, "SELECT * FROM clt WHERE id = 2");
+if (patra_result_get_int(clrs2, 0, 2) != 0) { syscall(SYS_EXIT, 119); }
+patra_result_free(clrs2);
+patra_close(cldb);
+syscall(SYS_UNLINK, clpath);
+
 # ── STR-keyed index (1.7.1): CREATE INDEX on STR + dedup probe ──
 
 var stpath = "/tmp/patra_fuzz_str.patra";

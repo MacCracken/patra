@@ -61,6 +61,29 @@ patra_exec(db, "INSERT INTO events VALUES (1, 1712345678, 'daimon', 'start')", 6
 var result = patra_query(db, "SELECT * FROM events WHERE source = 'daimon'", 46);
 ```
 
+### Dependencies
+
+Patra's only external dependency is
+[sakshi](https://github.com/MacCracken/sakshi) — structured logging, called from
+`sakshi_error` / `sakshi_set_level`. Cyrius does not yet resolve **transitive**
+deps, so a consumer that declares `[deps.patra]` must also declare `[deps.sakshi]`
+at patra's pinned tag, or the link fails on the undefined `sakshi_*` symbols:
+
+```toml
+[deps.patra]
+git = "https://github.com/MacCracken/patra.git"
+tag = "1.10.0"
+
+# Required alongside patra — patra calls into it but cyrius won't pull it for you.
+[deps.sakshi]
+git = "https://github.com/MacCracken/sakshi.git"
+tag = "2.2.3"
+modules = ["dist/sakshi.cyr"]
+```
+
+The single-include bundle (`dist/patra.cyr`) carries the same requirement:
+include `dist/sakshi.cyr` next to it.
+
 ## Consumers
 
 | Project | Usage |
@@ -79,6 +102,7 @@ CREATE TABLE name (col1, col2, ...)
 DROP TABLE name
 CREATE INDEX ON name (col)
 INSERT INTO name VALUES (val1, val2, ...)
+INSERT INTO name (col1, col2) VALUES (val1, val2)
 INSERT OR IGNORE INTO name VALUES (val1, val2, ...)
 SELECT * FROM name
 SELECT col1, col2 FROM name
@@ -100,6 +124,8 @@ CREATE TABLE objects (hash STR, content BYTES)
 ```
 
 Column types are `INT` (i64), `STR` (256-byte fixed), and `BYTES` (variable-length binary, chain-page-backed; `BLOB` accepted as alias). No floating point. `BYTES` columns are write/read only — SQL `INSERT`/`UPDATE` and `WHERE` don't apply; use the `patra_insert_row` / `patra_result_read_bytes` programmatic API.
+
+An `INSERT` may name its columns — `INSERT INTO t (b, a) VALUES (...)` — to bind values by name in any order; columns left unnamed take their zero/empty default. Without a column list, values are positional in `CREATE TABLE` order.
 
 ## Build
 

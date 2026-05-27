@@ -99,6 +99,8 @@ enum PROff {
     PR_ITEMS = 72;
     PR_ORDERBY_COLS = 800;
     PR_WHERE = 1024;
+    PR_INS_NCOLS = 2816;
+    PR_INS_COLS = 2824;
 }
 
 # CREATE column item: 24 bytes
@@ -110,6 +112,10 @@ enum ObLim { OB_MAX = 8; }
 
 # INSERT value item: 32 bytes
 enum IROff { IR_TYPE = 0; IR_IVAL = 8; IR_SPTR = 16; IR_SLEN = 24; IR_SZ = 32; }
+
+# INSERT column-list name entry: 16 bytes (ptr, len). Stored at PR_INS_COLS
+# only when an INSERT names its columns; PR_INS_NCOLS = 0 means positional.
+enum InsColOff { INSCOL_PTR = 0; INSCOL_LEN = 8; INSCOL_SZ = 16; }
 
 # UPDATE SET pair: 48 bytes
 enum SetOff {
@@ -150,8 +156,10 @@ enum WhJoin { WH_AND = 0; WH_OR = 1; }
 
 # Hard cap on WHERE conditions per statement. `_sql_pr` is 4096 bytes;
 # PR_WHERE starts at 1024 and entries are 56 bytes, so 32 conditions fit
-# with headroom. Audit 2026-04-21 §2.10 — prevents heap corruption from
-# attacker-supplied `WHERE a=1 AND a=1 AND ...` storms.
+# with headroom (ending at 2816). Audit 2026-04-21 §2.10 — prevents heap
+# corruption from attacker-supplied `WHERE a=1 AND a=1 AND ...` storms.
+# The INSERT column-name list (PR_INS_COLS, 32 × 16B) lives in the free
+# tail at 2824 — INSERT never populates WHERE, so the regions never collide.
 enum WhLim { WH_MAX = 32; }
 
 # ── State ────────────────────
@@ -537,6 +545,41 @@ fn _parse_insert(): i64 {
     store64(_sql_pr + PR_TNAME, _tok_ptr(pos));
     store64(_sql_pr + PR_TNLEN, _tok_len(pos));
     pos = pos + 1;
+
+    # Optional column list: INSERT INTO t (a, b) VALUES (...). When present,
+    # each value binds to its named column at exec time and omitted columns
+    # take their zero/empty default; absent → positional (PR_INS_NCOLS stays
+    # 0 from the sql_parse memset, mirroring PR_INSERT_IGNORE).
+    if (_tok_type(pos) == TK_LPAREN) {
+        pos = pos + 1;
+        var ncidx = 0;
+        var cdone = 0;
+        while (cdone == 0) {
+            if (_tok_type(pos) != TK_IDENT) { return PATRA_ERR_SYNTAX; }
+            if (ncidx >= MAX_COLS) { return PATRA_ERR_COLCOUNT; }
+            # Reject a column named twice — names are unique per schema, so a
+            # repeated identifier can only be a malformed list.
+            var cptr = _tok_ptr(pos);
+            var clen = _tok_len(pos);
+            for (var ck = 0; ck < ncidx; ck = ck + 1) {
+                var prev = _sql_pr + PR_INS_COLS + ck * INSCOL_SZ;
+                if (load64(prev + INSCOL_LEN) == clen) {
+                    if (memeq(load64(prev + INSCOL_PTR), cptr, clen)) {
+                        return PATRA_ERR_SYNTAX;
+                    }
+                }
+            }
+            var citem = _sql_pr + PR_INS_COLS + ncidx * INSCOL_SZ;
+            store64(citem + INSCOL_PTR, cptr);
+            store64(citem + INSCOL_LEN, clen);
+            pos = pos + 1;
+            ncidx = ncidx + 1;
+            if (_tok_type(pos) == TK_COMMA) { pos = pos + 1; }
+            elif (_tok_type(pos) == TK_RPAREN) { pos = pos + 1; cdone = 1; }
+            else { return PATRA_ERR_SYNTAX; }
+        }
+        store64(_sql_pr + PR_INS_NCOLS, ncidx);
+    }
 
     if (_tok_type(pos) != TK_VALUES) { return PATRA_ERR_SYNTAX; }
     pos = pos + 1;

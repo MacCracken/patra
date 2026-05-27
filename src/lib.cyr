@@ -228,21 +228,49 @@ fn _exec_insert(db): i64 {
 
     var ncols = load64(schema + SCH_NCOLS);
     var nvals = load64(_sql_pr + PR_COUNT);
-    if (nvals != ncols) {
-        pg_free(schema);
-        patra_unlock(fd);
-        return PATRA_ERR_COLCOUNT;
+    var ins_nc = load64(_sql_pr + PR_INS_NCOLS);
+
+    # Positional INSERT supplies one value per schema column in declaration
+    # order; column-list INSERT (INSERT INTO t (a, b) VALUES ...) supplies one
+    # value per named column. Either form must balance value count against the
+    # column count it implies.
+    if (ins_nc == 0) {
+        if (nvals != ncols) {
+            pg_free(schema);
+            patra_unlock(fd);
+            return PATRA_ERR_COLCOUNT;
+        }
+    } else {
+        if (nvals != ins_nc) {
+            pg_free(schema);
+            patra_unlock(fd);
+            return PATRA_ERR_COLCOUNT;
+        }
     }
 
     var rsz = row_compute_size(schema, ncols);
     var row = fl_alloc(rsz);
     memset(row, 0, rsz);
 
-    for (var i = 0; i < ncols; i = i + 1) {
+    for (var i = 0; i < nvals; i = i + 1) {
         var item = _sql_pr + PR_ITEMS + i * IR_SZ;
         var vtype = load64(item + IR_TYPE);
-        var ctype = load64(schema + SCH_START + i * SCH_ENTRY_SZ + SCH_CTYPE);
-        var off = row_field_offset(schema, ncols, i);
+        # Target column: positional binds value i to column i; column-list binds
+        # value i to its i-th named column. Columns left unnamed keep the
+        # zero/empty default from the memset above.
+        var ci = i;
+        if (ins_nc != 0) {
+            var citem = _sql_pr + PR_INS_COLS + i * INSCOL_SZ;
+            ci = _wh_resolve_col(schema, ncols, load64(citem + INSCOL_PTR), load64(citem + INSCOL_LEN));
+            if (ci < 0) {
+                fl_free(row);
+                pg_free(schema);
+                patra_unlock(fd);
+                return PATRA_ERR_NOTFOUND;
+            }
+        }
+        var ctype = load64(schema + SCH_START + ci * SCH_ENTRY_SZ + SCH_CTYPE);
+        var off = row_field_offset(schema, ncols, ci);
 
         if (vtype == COL_INT) {
             if (ctype != COL_INT) {
