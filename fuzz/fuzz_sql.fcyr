@@ -260,6 +260,49 @@ if (patra_exec(txdb, "CREATE INDEX ON tx (body)") != PATRA_ERR_TYPE) { syscall(S
 patra_close(txdb);
 syscall(SYS_UNLINK, txpath);
 
+# ── Bind parameters (1.10.3): parse, direct-exec rejection, safe bind ──
+
+# Placeholders parse and count; plain statements report zero.
+sql_tokenize("INSERT INTO t VALUES (?, ?)");
+if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 160); }
+if (load64(_sql_pr + PR_NPARAMS) != 2) { syscall(SYS_EXIT, 161); }
+sql_tokenize("UPDATE t SET a = ? WHERE b = ?");
+if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 162); }
+if (load64(_sql_pr + PR_NPARAMS) != 2) { syscall(SYS_EXIT, 163); }
+sql_tokenize("INSERT INTO t VALUES (1, 'x')");
+if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 164); }
+if (load64(_sql_pr + PR_NPARAMS) != 0) { syscall(SYS_EXIT, 165); }
+
+var bppath = "/tmp/patra_fuzz_bind.patra";
+syscall(SYS_UNLINK, bppath);
+var bpdb = patra_open(bppath);
+if (bpdb == 0) { syscall(SYS_EXIT, 166); }
+patra_exec(bpdb, "CREATE TABLE bp (id INT, name STR)");
+# Direct exec of a parameterized statement must be refused.
+if (patra_exec(bpdb, "INSERT INTO bp VALUES (?, ?)") != PATRA_ERR_PARAM) { syscall(SYS_EXIT, 167); }
+# Prepare + bind: a value with a quote + SQL must store verbatim (injection).
+var bpins = patra_prepare(bpdb, "INSERT INTO bp VALUES (?, ?)");
+if (bpins == 0) { syscall(SYS_EXIT, 168); }
+if (patra_bind_int(bpins, 2, 0) != PATRA_ERR_PARAM) { syscall(SYS_EXIT, 169); }
+patra_bind_int(bpins, 0, 7);
+var bpevil = "x'); DROP TABLE bp--";
+patra_bind_text(bpins, 1, bpevil, strlen(bpevil));
+if (patra_exec_prepared(bpdb, bpins) != PATRA_OK) { syscall(SYS_EXIT, 170); }
+patra_finalize(bpins);
+var bprs = patra_query(bpdb, "SELECT * FROM bp");
+if (patra_result_count(bprs) != 1) { syscall(SYS_EXIT, 171); }
+if (streq(patra_result_get_str(bprs, 0, 1), bpevil) != 1) { syscall(SYS_EXIT, 172); }
+patra_result_free(bprs);
+# Bound WHERE lookup returns the row.
+var bpsel = patra_prepare(bpdb, "SELECT * FROM bp WHERE id = ?");
+patra_bind_int(bpsel, 0, 7);
+var bpsrs = patra_query_prepared(bpdb, bpsel);
+if (patra_result_count(bpsrs) != 1) { syscall(SYS_EXIT, 173); }
+patra_result_free(bpsrs);
+patra_finalize(bpsel);
+patra_close(bpdb);
+syscall(SYS_UNLINK, bppath);
+
 # ── STR-keyed index (1.7.1): CREATE INDEX on STR + dedup probe ──
 
 var stpath = "/tmp/patra_fuzz_str.patra";

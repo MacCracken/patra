@@ -13,8 +13,12 @@ enum PageType  { PAGE_FREE = 0; PAGE_DATA = 1; PAGE_SCHEMA = 2; PAGE_BTREE = 3; 
 # differ only at the SQL surface — TEXT accepts INSERT/UPDATE string literals
 # and SELECT returns its content; BYTES stays binary / programmatic-only. Both
 # forbid WHERE and indexing (variable-length isn't comparable/hashable).
+# COL_PARAM is a parse-time marker for a `?` bind placeholder — never stored on
+# disk. The parser stamps it on the INSERT/WHERE/UPDATE value slot and records
+# the bind index; _apply_binds rewrites it to the bound value's real type
+# (COL_INT / COL_STR) before exec, so the storage paths never see COL_PARAM.
 enum ColType {
-    COL_INT = 0; COL_STR = 1; COL_BYTES = 2; COL_TEXT = 3;
+    COL_INT = 0; COL_STR = 1; COL_BYTES = 2; COL_TEXT = 3; COL_PARAM = 4;
     COL_INT_SZ = 8; COL_STR_SZ = 256; COL_BYTES_SZ = 16;
 }
 
@@ -46,6 +50,7 @@ enum PatraErr {
     PATRA_ERR_ROWSZ = 8;
     PATRA_ERR_TYPE = 9;
     PATRA_ERR_COLCOUNT = 10;
+    PATRA_ERR_PARAM = 11;
 }
 
 # Header layout (4096 bytes total — page 0)

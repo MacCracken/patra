@@ -5,6 +5,68 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.3] - 2026-05-27
+
+**Bind parameters (yeo-cy-test HIGH) — closes the 1.10.x arc.** The final
+and highest-impact yeo-cy-test blocker: `?` placeholders +
+`patra_bind_int` / `patra_bind_text` close the SQL string-escaping hole.
+All 5 yeo-cy-test blockers are now shipped; patra returns to a
+no-queued-backlog state.
+
+### Added
+
+- **`?` placeholders + `patra_bind_int(stmt, idx, val)` /
+  `patra_bind_text(stmt, idx, ptr, len)`** (sqlite3_bind_* shape). A `?`
+  in an INSERT value, WHERE value, or UPDATE SET value is parsed to a
+  bind slot; `patra_prepare` records the placeholder count, the
+  `patra_bind_*` calls fill a per-statement bind area, and `_apply_binds`
+  substitutes the concrete value into the restored parse result before
+  exec — so every downstream path sees ordinary `COL_INT` / `COL_STR`
+  values and needs no change. Bind buffers must stay valid until
+  `patra_exec_prepared` / `patra_query_prepared` runs; binds can be
+  re-set and the statement re-executed. Out-of-range bind index returns
+  the new `PATRA_ERR_PARAM`.
+- A bound text value flows into a `TEXT` column the same as into `STR`,
+  so `INSERT INTO notes (body) VALUES (?)` + `patra_bind_text` stores
+  arbitrary-size free text safely — **retiring the base64 stopgap** the
+  SecureYeoman port was using.
+
+### Security
+
+- **SQL string-injection / escaping hole closed.** Previously the only
+  way to store free text via `patra_exec` was to inline it as a `'…'`
+  literal, and the tokenizer closes a literal at the first `'` with no
+  `''` doubling or escapes — so a value containing a quote either
+  truncated (`PATRA_ERR_SYNTAX`) or, crafted, injected SQL. Bound values
+  are written to the row / compared as bytes and are never reparsed as
+  SQL, so quotes and other metacharacters cannot escape the value.
+  Regression-tested (`test_bind_text_quotes`, fuzz 170–172):
+  `O'Brien'; DROP TABLE t--` bound as text stores verbatim, table intact.
+- `patra_exec` / `patra_query` now reject a statement containing `?`
+  (`PATRA_ERR_PARAM` / `0`) — placeholders require prepare + bind, so an
+  unbound `COL_PARAM` can never reach a storage path.
+
+### Changed
+
+- `patra_bind_blob` (binary into BYTES via `?`) is intentionally **not**
+  included — BYTES stays write/read-only via `patra_insert_row`. Deferred
+  until a consumer needs SQL-driven binary writes.
+- `dist/patra.cyr` regenerated via `cyrius distlib` (4986 → 5130 lines).
+
+### Verified (cyrius 6.0.3, x86_64)
+
+- `cyrius test tests/tcyr/patra.tcyr`: **743 / 743** pass (+32 over
+  v1.10.2 — 8 bind-parameter groups incl. INSERT/WHERE/UPDATE binds,
+  rebind+reuse, the injection regression, text-into-TEXT, and error
+  paths).
+- 6 / 6 fuzz harnesses clean; `fuzz_sql` gains 14 bind invariants (exit
+  codes 160–173) incl. a quote-injection case.
+- `cyrius bench tests/bcyr/patra.bcyr`: 36 benchmarks, no regression
+  (`insert_1k` 19 µs, `insert_1k_prepared` 14 µs — `_apply_binds`
+  no-ops for unparameterized statements).
+- Integration: libro 15 / 15, vidya 19 / 19. Lint clean.
+- DCE demo binary: 231,432 bytes (+3,504 over v1.10.2).
+
 ## [1.10.2] - 2026-05-27
 
 **TEXT column type (yeo-cy-test MEDIUM).** Second patch of the 1.10.x

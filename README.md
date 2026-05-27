@@ -131,6 +131,17 @@ An `INSERT` may name its columns — `INSERT INTO t (b, a) VALUES (...)` — to 
 
 An INT column may be declared `AUTOINCREMENT` (one per table). When an `INSERT` omits that column or supplies `0`, patra assigns the next id (current `max + 1`, starting at `1`); an explicit non-zero value is honored. Deleting the highest row lets its id be reused.
 
+**Bind parameters** — to store values that may contain quotes (free text) or to avoid building SQL strings, use `?` placeholders with `patra_prepare` + `patra_bind_int` / `patra_bind_text`:
+
+```cyrius
+var st = patra_prepare(db, "INSERT INTO notes (body) VALUES (?)");
+patra_bind_text(st, 0, body_ptr, body_len);   # 0-based, in ? order
+patra_exec_prepared(db, st);
+patra_finalize(st);
+```
+
+`?` works in `INSERT` values, `WHERE` values, and `UPDATE … SET` values. Bound values are written/compared as bytes and never reparsed as SQL, so quotes and other metacharacters can't escape — this is the safe way to store arbitrary free text (a string literal would truncate or inject at the first `'`). Bind buffers must stay valid until the prepared statement runs; a statement containing `?` can't be passed to `patra_exec` / `patra_query` directly (it returns `PATRA_ERR_PARAM`).
+
 ## Build
 
 ```

@@ -9,7 +9,7 @@
 
 ## Current
 
-- **Version**: 1.10.2 (read `VERSION` for the authoritative number)
+- **Version**: 1.10.3 (read `VERSION` for the authoritative number)
 - **Cyrius toolchain**: 6.0.3 (pinned in `cyrius.cyml [package].cyrius`).
   Patch bump within the 6.0.x line first adopted at v1.9.5. 6.0.3 also
   heals the 6.0.1 `cyrius deps --lock` regression — `cyrius.lock` now
@@ -20,16 +20,16 @@
   downstream consumers must replicate `[deps.sakshi]` alongside
   `[deps.patra]` (cyrius does not resolve transitive deps) — documented
   in README § Dependencies as of v1.10.0.
-- **Binary**: ~228 KB DCE demo (`programs/demo.cyr`, x86_64; 227,928
+- **Binary**: ~231 KB DCE demo (`programs/demo.cyr`, x86_64; 231,432
   bytes). aarch64 cross-build of `src/lib.cyr` produces a valid ARM ELF —
   1.9.1's aarch64 portability holds under cyrius 6.0.3.
-- **Status**: **1.10.x arc — patches 1–2 of 3 shipped.** The 1.10.x line
-  works the remaining yeo-cy-test blockers as patches (quick-wins-first).
-  1.10.1 added `AUTOINCREMENT` (LOW); 1.10.2 added the `TEXT` column type
-  (MEDIUM) — variable-length, SQL-writable, chain-page-backed, lifting the
-  256-byte STR cap. All gates green; `dist/patra.cyr` at 4986 lines.
-  Last in the arc: bind parameters / SQL escaping (HIGH, 1.10.3) — see
-  [`roadmap.md`](roadmap.md).
+- **Status**: **1.10.x arc COMPLETE — all 5 yeo-cy-test blockers shipped.**
+  1.10.0 column-list INSERT + sakshi-dep doc (cyrius → 6.0.3); 1.10.1
+  `AUTOINCREMENT`; 1.10.2 `TEXT` column type; 1.10.3 bind parameters (`?` +
+  `patra_bind_int`/`patra_bind_text`) — closing the SQL-injection/escaping
+  hole and retiring the consumer's base64 stopgap. Back to no-queued-backlog;
+  next work lands when a consumer hits a concrete limit (see
+  [`roadmap.md`](roadmap.md)).
 - **Primary target**: Linux x86_64. aarch64 cross-build best-effort
   (`src/lib.cyr` cross-builds clean under cyrius 6.0.3; the test
   programs in `programs/` still use raw `syscall(SYS_UNLINK, …)` and
@@ -37,16 +37,16 @@
 
 ## Source layout
 
-11 modules, ~5,005 lines total in `src/`.
+11 modules, ~5,149 lines total in `src/`.
 
 | File | Lines | Responsibility |
 |------|------:|----------------|
-| `src/lib.cyr` | 1775 | public API + includes (entry point); `patra_insert_row` / `result_read_bytes`; prepared statements (`patra_prepare` / `_exec_prepared` / `_query_prepared` / `_finalize`); column-list INSERT bind (v1.10.0); AUTOINCREMENT auto-assign + `_max_int_col` (v1.10.1); TEXT insert/update/read (v1.10.2) |
-| `src/sql.cyr` | 979 | tokenizer + recursive-descent parser — CREATE / INSERT / SELECT / UPDATE / DELETE / CREATE INDEX / ALTER / VACUUM; INSERT OR IGNORE; column-list INSERT (v1.10.0); AUTOINCREMENT (v1.10.1); TEXT type (v1.10.2); aggregates; column-list projection; BYTES / BLOB keyword |
+| `src/lib.cyr` | 1894 | public API + includes (entry point); `patra_insert_row` / `result_read_bytes`; prepared statements (`patra_prepare` / `_exec_prepared` / `_query_prepared` / `_finalize`); column-list INSERT bind (v1.10.0); AUTOINCREMENT + `_max_int_col` (v1.10.1); TEXT insert/update/read (v1.10.2); bind params `patra_bind_int`/`patra_bind_text` + `_apply_binds` (v1.10.3) |
+| `src/sql.cyr` | 999 | tokenizer + recursive-descent parser — CREATE / INSERT / SELECT / UPDATE / DELETE / CREATE INDEX / ALTER / VACUUM; INSERT OR IGNORE; column-list INSERT (v1.10.0); AUTOINCREMENT (v1.10.1); TEXT type (v1.10.2); `?` bind placeholders (v1.10.3); aggregates; column-list projection; BYTES / BLOB keyword |
 | `src/btree.cyr` | 505 | B+ tree order-64; insert / split / search / range / lazy delete / compaction / whole-tree free; schema index + autoinc markers (`SCH_IDX_*`, `SCH_AUTOINC_COL`) |
 | `src/table.cyr` | 431 | table create / insert / scan / update / delete + index maintenance + BYTES/TEXT chain cleanup (`_col_is_chain`); TEXT UPDATE rewrite |
 | `src/jsonl.cyr` | 371 | JSON Lines I/O, JSON builder, field extraction, escaping; `patra_json_build` (renamed from `json_build` in v1.9.0) |
-| `src/file.cyr` | 244 | `.patra` format, header, flock, fdatasync, constants (incl. COL_BYTES, COL_TEXT, PAGE_BYTES, BY_*); 4 KB page-slab allocator (`pg_alloc` / `pg_free`, v1.8.2) |
+| `src/file.cyr` | 249 | `.patra` format, header, flock, fdatasync, constants (incl. COL_BYTES, COL_TEXT, COL_PARAM, PAGE_BYTES, BY_*); 4 KB page-slab allocator (`pg_alloc` / `pg_free`, v1.8.2) |
 | `src/wal.cyr` | 229 | write-ahead logging — page before-images, crash recovery, salted records |
 | `src/where.cyr` | 166 | WHERE evaluation — 7 operators (incl LIKE), AND / OR; BYTES/TEXT columns never match |
 | `src/row.cyr` | 124 | row encoding: i64, 256-byte strings, 16-byte (page, len) chain refs; `_col_is_chain` (BYTES/TEXT); word-at-a-time `_memeq256` for INSERT OR IGNORE STR (v1.8.2) |
@@ -57,18 +57,20 @@
 
 ## Tests / Fuzz / Bench
 
-- **Unit**: `tests/tcyr/patra.tcyr` — **711 / 711** assertions pass under
-  cyrius 6.0.3 (+31 over v1.10.1: 9 TEXT groups).
+- **Unit**: `tests/tcyr/patra.tcyr` — **743 / 743** assertions pass under
+  cyrius 6.0.3 (+32 over v1.10.2: 8 bind-parameter groups).
 - **Fuzz**: 6 harnesses in `fuzz/` — `fuzz_btree`, `fuzz_bytes`,
   `fuzz_file`, `fuzz_jsonl`, `fuzz_sql`, `fuzz_wal`. All clean under the
   10 s CI timeout. `fuzz_sql` carries 20 column-list INSERT invariants
-  (100–119, v1.10.0) + 13 AUTOINCREMENT invariants (120–132, v1.10.1) +
-  10 TEXT invariants (140–149, v1.10.2).
+  (100–119, v1.10.0) + 13 AUTOINCREMENT (120–132, v1.10.1) + 10 TEXT
+  (140–149, v1.10.2) + 14 bind-parameter (160–173, v1.10.3, incl. a
+  quote-injection case).
 - **Benchmarks**: `tests/bcyr/patra.bcyr` — **36 benchmarks**; full
   table baselined under cyrius 6.0.1 at v1.9.5 (see
-  [`BENCHMARKS.md`](BENCHMARKS.md)). v1.10.2 re-ran under 6.0.3: no
-  regression — `insert_1k` 20 µs, `bytes_insert_2kb` 26 µs unchanged
-  (TEXT reuses the BYTES chain path). Representative subset:
+  [`BENCHMARKS.md`](BENCHMARKS.md)). v1.10.3 re-ran under 6.0.3: no
+  regression — `insert_1k` 19 µs, `insert_1k_prepared` 14 µs unchanged
+  (`_apply_binds` no-ops for unparameterized statements). Representative
+  subset:
   - `btree_insert_1k` 4 µs · `btree_search_1k` 2 µs
   - `select_idx_eq_500` 520 µs · `select_scan_500` 473 µs
   - `select_idx_eq_unique_500` 239 µs
@@ -129,6 +131,7 @@ payload at `BY_DATA_MAX = 4072`.
 
 | Version | Date | Summary |
 |---------|------|---------|
+| 1.10.3 | 2026-05-27 | **Bind parameters (yeo-cy-test HIGH) — closes the 1.10.x arc (5/5).** `?` placeholders + `patra_bind_int` / `patra_bind_text` (sqlite3_bind_* shape); parser marks a `COL_PARAM` slot, `_apply_binds` substitutes the bound value into the restored parse result before exec (downstream sees plain COL_INT/COL_STR). **Closes the SQL string-injection / escaping hole** — bound values are written/compared as bytes, never reparsed as SQL (regression-tested with a quote+`DROP TABLE` payload). `patra_exec`/`patra_query` reject `?` directly (`PATRA_ERR_PARAM`). `patra_bind_blob` deferred (BYTES stays `patra_insert_row`-only). Gates: 743 tests, 6 fuzz (+14 bind invariants), 36 benchmarks (no regression), libro 15/15, vidya 19/19, lint clean. `dist/patra.cyr` at 5130 lines. |
 | 1.10.2 | 2026-05-27 | **TEXT column type (yeo-cy-test MEDIUM) — 1.10.x arc patch 2 of 3.** `CREATE TABLE t (body TEXT)` / `ALTER … ADD COLUMN body TEXT`: variable-length, SQL-writable text (string literals in INSERT/UPDATE), stored in the BYTES chain-page infra (16-byte ref), read via `patra_result_get_text_len` / `patra_result_read_text`. Lifts the 256-byte STR cap. WHERE + CREATE INDEX on TEXT rejected (variable-length); BYTES stays binary/programmatic — TEXT/BYTES mirrors SQLite TEXT/BLOB. Chain cleanup via `_col_is_chain`. Gates: 711 tests, 6 fuzz (+10 TEXT invariants), 36 benchmarks (no regression), libro 15/15, vidya 19/19, lint clean. `dist/patra.cyr` at 4986 lines. |
 | 1.10.1 | 2026-05-27 | **AUTOINCREMENT / rowid (yeo-cy-test LOW) — 1.10.x arc patch 1 of 3.** `CREATE TABLE t (id INT AUTOINCREMENT, …)`; INSERT omitting the column (column-list) or supplying `0` (positional) gets the next id = `max + 1`, explicit non-zero honored. INT-only, one per table, composes with `OR IGNORE`. Additive backward-compatible `SCH_AUTOINC_COL` schema marker (no format break). Feature shipped as a patch to keep the yeo-cy-test batch in the 1.10 line (precedent: 1.6.1, 1.7.1). Gates: 680 tests, 6 fuzz (+13 autoinc invariants), 36 benchmarks (no regression), libro 15/15, vidya 19/19. `dist/patra.cyr` at 4912 lines. |
 | 1.10.0 | 2026-05-27 | **Consumer-driven feature release (yeo-cy-test).** Column-list INSERT — `INSERT INTO t (a, b) VALUES (…)` binds values by name in any order; omitted columns take their zero/empty default; positional INSERT unchanged (MEDIUM blocker). sakshi transitive-dep packaging documented in README § Dependencies + `cyrius.cyml` (LOW blocker — cyrius doesn't resolve transitive deps, so consumers must replicate `[deps.sakshi]`). cyrius pin 6.0.1 → 6.0.3 (also heals the 6.0.1 0-byte-lockfile regression). Gates: 652 tests, 6 fuzz (+20 column-list invariants), 36 benchmarks (no regression), libro 15/15, vidya 19/19. `dist/patra.cyr` regenerated at 4894 lines. Deferred: bind parameters (HIGH), TEXT/VARLEN (MEDIUM), rowid (LOW). |
@@ -151,7 +154,7 @@ Full history in [`../../CHANGELOG.md`](../../CHANGELOG.md). Pre-1.6 narrative in
 
 ## CI / verification hosts
 
-- **CI**: x86_64 Linux only — `cyrius build` + lint (**hard gate** as of v1.10.1 — any `warn` fails) + 711 tests + 6 fuzz + 36 benchmarks + libro + vidya integration. Toolchain installed via the upstream `install.sh` (v1.10.1, patterned on sigil), version sourced from the `cyrius.cyml` pin; deps resolved via `cyrius deps`.
+- **CI**: x86_64 Linux only — `cyrius build` + lint (**hard gate** as of v1.10.1 — any `warn` fails) + 743 tests + 6 fuzz + 36 benchmarks + libro + vidya integration. Toolchain installed via the upstream `install.sh` (v1.10.1, patterned on sigil), version sourced from the `cyrius.cyml` pin; deps resolved via `cyrius deps`.
 - **Release**: tag-driven on `[0-9]*`; verifies `VERSION == cyrius.cyml package.version == git tag`; ships source tarball + `dist/patra.cyr` bundle + DCE demo binary + SHA256SUMS. Same `install.sh` toolchain step as CI.
 - **aarch64**: best-effort. Library (`src/lib.cyr`) cross-builds clean; the `programs/` test binaries do not (still on raw `SYS_UNLINK`) — they're host-only.
 

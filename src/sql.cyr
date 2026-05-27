@@ -57,6 +57,7 @@ enum TokType {
     TK_IGNORE = 51;
     TK_KW_AUTOINC = 52;
     TK_KW_TEXT = 53;
+    TK_PARAM = 54;
 }
 
 enum StmtType {
@@ -104,6 +105,7 @@ enum PROff {
     PR_INS_NCOLS = 2816;
     PR_INS_COLS = 2824;
     PR_AUTOINC = 3336;
+    PR_NPARAMS = 3344;
 }
 
 # CREATE column item: 24 bytes
@@ -383,6 +385,7 @@ fn sql_tokenize(input): i64 {
         elif (c == 44) { _tok_set(n, TK_COMMA, input + pos, 1); }
         elif (c == 42) { _tok_set(n, TK_STAR, input + pos, 1); }
         elif (c == 59) { _tok_set(n, TK_SEMI, input + pos, 1); }
+        elif (c == 63) { _tok_set(n, TK_PARAM, input + pos, 1); }
         else { _tok_set(n, TK_ERR, input + pos, 1); }
         n = n + 1;
         pos = pos + 1;
@@ -455,6 +458,13 @@ fn _parse_where(pos): i64 {
             store64(cond + WH_VAL_TYPE, COL_STR);
             store64(cond + WH_STR_PTR, _tok_ptr(pos));
             store64(cond + WH_STR_LEN, _tok_len(pos));
+        } elif (tt == TK_PARAM) {
+            # `?` placeholder: record the bind slot index now; _apply_binds
+            # patches in the real type/value before exec. PR_NPARAMS counts.
+            var wpslot = load64(_sql_pr + PR_NPARAMS);
+            store64(cond + WH_VAL_TYPE, COL_PARAM);
+            store64(cond + WH_INT_VAL, wpslot);
+            store64(_sql_pr + PR_NPARAMS, wpslot + 1);
         } else {
             return 0 - 1;
         }
@@ -619,6 +629,11 @@ fn _parse_insert(): i64 {
             store64(item + IR_TYPE, COL_STR);
             store64(item + IR_SPTR, _tok_ptr(pos));
             store64(item + IR_SLEN, _tok_len(pos));
+        } elif (tt == TK_PARAM) {
+            var ipslot = load64(_sql_pr + PR_NPARAMS);
+            store64(item + IR_TYPE, COL_PARAM);
+            store64(item + IR_IVAL, ipslot);
+            store64(_sql_pr + PR_NPARAMS, ipslot + 1);
         } else {
             return PATRA_ERR_SYNTAX;
         }
@@ -792,6 +807,11 @@ fn _parse_update(): i64 {
         if (stt == TK_INT_LIT) {
             store64(item + SET_VTYPE, COL_INT);
             store64(item + SET_IVAL, _pt_atoi(_tok_ptr(pos), _tok_len(pos)));
+        } elif (stt == TK_PARAM) {
+            var spslot = load64(_sql_pr + PR_NPARAMS);
+            store64(item + SET_VTYPE, COL_PARAM);
+            store64(item + SET_IVAL, spslot);
+            store64(_sql_pr + PR_NPARAMS, spslot + 1);
         } elif (stt == TK_STR_LIT) {
             store64(item + SET_VTYPE, COL_STR);
             store64(item + SET_SPTR, _tok_ptr(pos));

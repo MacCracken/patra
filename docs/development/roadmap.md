@@ -1,10 +1,10 @@
 # Patra Development Roadmap
 
-> **Last refreshed**: 2026-05-27 (v1.10.2 cut — 4 of 5 yeo-cy-test blockers shipped; was v1.10.1 at 3/5)
+> **Last refreshed**: 2026-05-27 (v1.10.3 cut — 1.10.x arc COMPLETE, 5 of 5 yeo-cy-test blockers shipped; was v1.10.2 at 4/5)
 >
 > Forward-looking only. Shipped work lives in [`../../CHANGELOG.md`](../../CHANGELOG.md); rejected design directions and phase-level summaries live in [`completed-phases.md`](completed-phases.md). Live state (version, sizes, test counts, consumers) lives in [`state.md`](state.md).
 
-> **Current**: v1.10.2 — 1.10.x arc working the remaining yeo-cy-test blockers as a quick-wins-first patch series. Shipped: 1.10.0 column-list INSERT + sakshi-dep doc (cyrius pin → 6.0.3); 1.10.1 AUTOINCREMENT / rowid; 1.10.2 TEXT column type. Last: bind parameters / SQL escaping (1.10.3). Patra serves libro, vidya, daimon, agnoshi, mela, hoosh, and sit.
+> **Current**: v1.10.3 — **1.10.x arc complete.** All 5 yeo-cy-test blockers shipped: 1.10.0 column-list INSERT + sakshi-dep doc (cyrius pin → 6.0.3); 1.10.1 AUTOINCREMENT / rowid; 1.10.2 TEXT column type; 1.10.3 bind parameters (closes the SQL-injection / escaping hole). Back to no-queued-backlog — next work lands when a consumer hits a concrete limit. Patra serves libro, vidya, daimon, agnoshi, mela, hoosh, and sit.
 
 ## Driven by consumer needs
 
@@ -30,7 +30,7 @@ port. patra **worked** — open, CREATE TABLE, positional INSERT, SELECT/ORDER B
 blockers below are ordered by impact for the SY port (lots of stored free text).
 Full write-up: [`secureyeoman/yeo-cy-test/FINDINGS.md`](../../../secureyeoman/yeo-cy-test/FINDINGS.md).
 
-**Shipped** (4 of 5):
+**Shipped** (5 of 5 — arc complete):
 
 - ✅ **INSERT column list (was MEDIUM, v1.10.0).** `INSERT INTO t (a, b) VALUES
   (…)` binds values to named columns in any order; omitted columns take their
@@ -55,22 +55,19 @@ Full write-up: [`secureyeoman/yeo-cy-test/FINDINGS.md`](../../../secureyeoman/ye
   CREATE INDEX on TEXT rejected; BYTES stays binary/programmatic (TEXT/BYTES
   mirrors SQLite TEXT/BLOB). `base64 + TEXT` already stores arbitrary text;
   1.10.3 retires the base64 stopgap.
+- ✅ **No SQL string escaping / no bind parameters (was HIGH, v1.10.3).** `?`
+  placeholders + `patra_bind_int` / `patra_bind_text` (sqlite3_bind_* shape):
+  the parser marks a `COL_PARAM` slot, `_apply_binds` substitutes the bound
+  value into the restored parse result before exec, so storage paths see plain
+  COL_INT/COL_STR. Bound values are written/compared as bytes, never reparsed as
+  SQL — **closing the injection / escaping hole** (regression-tested with a
+  quote+`DROP TABLE` payload). `patra_exec`/`patra_query` reject `?` directly
+  (`PATRA_ERR_PARAM`). A bound text value flows into a TEXT column, retiring the
+  base64 stopgap. `patra_bind_blob` deferred (BYTES stays `patra_insert_row`-only)
+  until a consumer needs SQL-driven binary writes.
 
-**Still open** (1 of 5):
-
-- **No SQL string escaping / no bind parameters (HIGH).** `sql_tokenize`
-  (`src/…` tokenizer) opens on `'` and closes at the *first* following `'` — no
-  `''` doubling, no backslash escapes — and `patra_prepare` bakes literals in at
-  prepare time with no `?` placeholders or `patra_bind_*`. So arbitrary user
-  text containing a quote either truncates the literal (`PATRA_ERR_SYNTAX`) or,
-  crafted, injects SQL. There is no safe way to store free text via
-  `patra_exec` today. **yeo-cy-test stopgap:** base64-encode the note body
-  before INSERT, decode on read (base64's alphabet has no quotes). The clean
-  fix is `patra_bind_text/int/blob` (sqlite3_bind_* shape), which removes both
-  the escaping hole and the prepare-time-literal limitation at once.
-  **Planned: 1.10.3** (closes the arc). With TEXT (1.10.2) already in, a bound
-  text value routes straight into a TEXT chain — fully retiring the base64
-  stopgap.
+**Still open**: none — the yeo-cy-test queue is cleared. Patra is back to
+no-queued-backlog; new items land here when a consumer names a concrete limit.
 
 ### Pre-existing (toolchain, not consumer-filed)
 

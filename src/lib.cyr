@@ -1022,6 +1022,8 @@ fn patra_exec(db, sql): i64 {
     sql_tokenize(sql);
     var r = sql_parse();
     if (r != PATRA_OK) { return r; }
+    # `?` placeholders require prepare + bind — they can't be executed directly.
+    if (load64(_sql_pr + PR_NPARAMS) > 0) { return PATRA_ERR_PARAM; }
 
     var stmt = load64(_sql_pr + PR_STMT);
     if (stmt == STMT_CREATE) { return _exec_create(db); }
@@ -1116,6 +1118,8 @@ fn patra_query(db, sql): i64 {
     sql_tokenize(sql);
     var r = sql_parse();
     if (r != PATRA_OK) { return 0; }
+    # `?` placeholders require prepare + bind — reject direct parameterized query.
+    if (load64(_sql_pr + PR_NPARAMS) > 0) { return 0; }
     if (load64(_sql_pr + PR_STMT) != STMT_SELECT) { return 0; }
     return _patra_query_exec(db);
 }
@@ -1488,7 +1492,18 @@ enum StmtOff {
     STMT_SQL = 0;
     STMT_SQL_LEN = 8;
     STMT_PR_BUF = 16;
-    STMT_TOTAL_SZ = 4112;
+    STMT_NPARAMS = 4112;
+    STMT_BINDS = 4120;
+    STMT_TOTAL_SZ = 5144;
+}
+
+# Bind-value slot in a prepared stmt: 32 bytes (type, ival, ptr, len). Up to
+# BIND_MAX `?` placeholders; patra_bind_* fill these and _apply_binds reads
+# them into the restored parse result. The 1024-byte bind area follows the
+# 4096-byte parse snapshot, so a stmt is STMT_BINDS + BIND_MAX*BIND_SZ bytes.
+enum BindOff {
+    BIND_TYPE = 0; BIND_IVAL = 8; BIND_PTR = 16; BIND_LEN = 24;
+    BIND_SZ = 32; BIND_MAX = 32;
 }
 
 # Parse `sql` once and return an opaque stmt handle, or 0 on parse error.
@@ -1513,6 +1528,10 @@ fn patra_prepare(db, sql): i64 {
         return 0;
     }
     memcpy(stmt + STMT_PR_BUF, _sql_pr, 4096);
+    # Record the `?` count and zero the bind area. Unbound slots default to
+    # INT 0; patra_bind_* fill the rest before exec.
+    store64(stmt + STMT_NPARAMS, load64(_sql_pr + PR_NPARAMS));
+    memset(stmt + STMT_BINDS, 0, BIND_MAX * BIND_SZ);
     return stmt;
 }
 
@@ -1540,11 +1559,82 @@ fn _stmt_restore(stmt): i64 {
     return 0;
 }
 
+# Patch `?` placeholders in the WHERE conditions of the restored parse result
+# with the stmt's bound values. INT binds rewrite WH_INT_VAL; text binds rewrite
+# WH_STR_PTR/LEN. After this the conditions hold concrete COL_INT / COL_STR
+# values, so where_eval and the index fast-path work unchanged.
+fn _apply_binds_where(binds): i64 {
+    var wn = load64(_sql_pr + PR_WHERE_N);
+    for (var i = 0; i < wn; i = i + 1) {
+        var cond = _sql_pr + PR_WHERE + i * WH_ENTRY_SZ;
+        if (load64(cond + WH_VAL_TYPE) == COL_PARAM) {
+            var sl = binds + load64(cond + WH_INT_VAL) * BIND_SZ;
+            var bt = load64(sl + BIND_TYPE);
+            store64(cond + WH_VAL_TYPE, bt);
+            if (bt == COL_INT) {
+                store64(cond + WH_INT_VAL, load64(sl + BIND_IVAL));
+            } else {
+                store64(cond + WH_STR_PTR, load64(sl + BIND_PTR));
+                store64(cond + WH_STR_LEN, load64(sl + BIND_LEN));
+            }
+        }
+    }
+    return 0;
+}
+
+# Substitute every `?` placeholder in the restored parse result with the bound
+# value from the stmt's bind area. Runs after _stmt_restore and before any
+# _exec_* / _patra_query_exec — downstream code only ever sees concrete
+# COL_INT / COL_STR values, never COL_PARAM. No-op for an unparameterized stmt.
+fn _apply_binds(stmt): i64 {
+    if (load64(stmt + STMT_NPARAMS) <= 0) { return 0; }
+    var binds = stmt + STMT_BINDS;
+    var st = load64(_sql_pr + PR_STMT);
+    if (st == STMT_INSERT) {
+        var n = load64(_sql_pr + PR_COUNT);
+        for (var i = 0; i < n; i = i + 1) {
+            var item = _sql_pr + PR_ITEMS + i * IR_SZ;
+            if (load64(item + IR_TYPE) == COL_PARAM) {
+                var sl = binds + load64(item + IR_IVAL) * BIND_SZ;
+                var bt = load64(sl + BIND_TYPE);
+                store64(item + IR_TYPE, bt);
+                if (bt == COL_INT) {
+                    store64(item + IR_IVAL, load64(sl + BIND_IVAL));
+                } else {
+                    store64(item + IR_SPTR, load64(sl + BIND_PTR));
+                    store64(item + IR_SLEN, load64(sl + BIND_LEN));
+                }
+            }
+        }
+    } elif (st == STMT_UPDATE) {
+        var ns = load64(_sql_pr + PR_COUNT);
+        for (var s = 0; s < ns; s = s + 1) {
+            var setp = _sql_pr + PR_ITEMS + s * SET_SZ;
+            if (load64(setp + SET_VTYPE) == COL_PARAM) {
+                var ssl = binds + load64(setp + SET_IVAL) * BIND_SZ;
+                var sbt = load64(ssl + BIND_TYPE);
+                store64(setp + SET_VTYPE, sbt);
+                if (sbt == COL_INT) {
+                    store64(setp + SET_IVAL, load64(ssl + BIND_IVAL));
+                } else {
+                    store64(setp + SET_SPTR, load64(ssl + BIND_PTR));
+                    store64(setp + SET_SLEN, load64(ssl + BIND_LEN));
+                }
+            }
+        }
+        _apply_binds_where(binds);
+    } else {
+        _apply_binds_where(binds);
+    }
+    return 0;
+}
+
 # Execute a prepared DDL/DML statement, skipping tokenize + parse.
 fn patra_exec_prepared(db, stmt): i64 {
     if (db == 0) { return PATRA_ERR_IO; }
     if (stmt == 0) { return PATRA_ERR_SYNTAX; }
     _stmt_restore(stmt);
+    _apply_binds(stmt);
     var st = load64(_sql_pr + PR_STMT);
     if (st == STMT_CREATE) { return _exec_create(db); }
     if (st == STMT_INSERT) { return _exec_insert(db); }
@@ -1565,8 +1655,37 @@ fn patra_query_prepared(db, stmt): i64 {
     if (db == 0) { return 0; }
     if (stmt == 0) { return 0; }
     _stmt_restore(stmt);
+    _apply_binds(stmt);
     if (load64(_sql_pr + PR_STMT) != STMT_SELECT) { return 0; }
     return _patra_query_exec(db);
+}
+
+# Bind an i64 to placeholder `idx` (0-based, in `?` order) of a prepared stmt.
+# Returns PATRA_ERR_PARAM if the stmt is null or idx is out of range.
+fn patra_bind_int(stmt, idx, val): i64 {
+    if (stmt == 0) { return PATRA_ERR_PARAM; }
+    if (idx < 0) { return PATRA_ERR_PARAM; }
+    if (idx >= load64(stmt + STMT_NPARAMS)) { return PATRA_ERR_PARAM; }
+    var slot = stmt + STMT_BINDS + idx * BIND_SZ;
+    store64(slot + BIND_TYPE, COL_INT);
+    store64(slot + BIND_IVAL, val);
+    return PATRA_OK;
+}
+
+# Bind a text value (ptr + len) to placeholder `idx`. The buffer must stay valid
+# until patra_exec_prepared / patra_query_prepared runs. The bytes are written
+# to the row / compared as-is — never reparsed as SQL — so embedded quotes and
+# other metacharacters cannot escape the value (this is the safe path for free
+# text that `patra_exec` string literals can't carry).
+fn patra_bind_text(stmt, idx, ptr, len): i64 {
+    if (stmt == 0) { return PATRA_ERR_PARAM; }
+    if (idx < 0) { return PATRA_ERR_PARAM; }
+    if (idx >= load64(stmt + STMT_NPARAMS)) { return PATRA_ERR_PARAM; }
+    var slot = stmt + STMT_BINDS + idx * BIND_SZ;
+    store64(slot + BIND_TYPE, COL_STR);
+    store64(slot + BIND_PTR, ptr);
+    store64(slot + BIND_LEN, len);
+    return PATRA_OK;
 }
 
 # ── Result set accessors ────────────────────

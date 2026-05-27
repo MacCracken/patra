@@ -3927,6 +3927,162 @@ fn test_text_alter_add() {
     patra_close(db);
 }
 
+# -- v1.10.3: bind parameters --------------------------------
+
+fn test_parse_bind() {
+    test_group("parse bind params");
+    sql_tokenize("INSERT INTO t VALUES (?, ?)");
+    assert_eq(sql_parse(), PATRA_OK, "insert ? parses");
+    assert_eq(load64(_sql_pr + PR_NPARAMS), 2, "2 params");
+    sql_tokenize("SELECT * FROM t WHERE id = ?");
+    assert_eq(sql_parse(), PATRA_OK, "select ? parses");
+    assert_eq(load64(_sql_pr + PR_NPARAMS), 1, "1 param");
+    sql_tokenize("UPDATE t SET name = ? WHERE id = ?");
+    assert_eq(sql_parse(), PATRA_OK, "update ? parses");
+    assert_eq(load64(_sql_pr + PR_NPARAMS), 2, "2 params (set+where)");
+    sql_tokenize("INSERT INTO t VALUES (1, 'x')");
+    assert_eq(sql_parse(), PATRA_OK, "no-param parses");
+    assert_eq(load64(_sql_pr + PR_NPARAMS), 0, "0 params");
+}
+
+fn test_bind_insert() {
+    test_group("bind insert");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (id INT, name STR)");
+    var ins = patra_prepare(db, "INSERT INTO t VALUES (?, ?)");
+    assert(ins != 0, "prepare");
+    assert_eq(patra_bind_int(ins, 0, 42), PATRA_OK, "bind id");
+    assert_eq(patra_bind_text(ins, 1, "alice", 5), PATRA_OK, "bind name");
+    assert_eq(patra_exec_prepared(db, ins), PATRA_OK, "exec");
+    patra_finalize(ins);
+    var rs = patra_query(db, "SELECT * FROM t");
+    assert_eq(patra_result_count(rs), 1, "1 row");
+    assert_eq(patra_result_get_int(rs, 0, 0), 42, "id 42");
+    assert_streq(patra_result_get_str(rs, 0, 1), "alice", "name alice");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_bind_text_quotes() {
+    test_group("bind text quotes (injection regression)");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (id INT, name STR)");
+    var ins = patra_prepare(db, "INSERT INTO t VALUES (?, ?)");
+    patra_bind_int(ins, 0, 1);
+    # A value with a quote + SQL would truncate/inject as a literal; bound, it
+    # stores verbatim and the table is untouched.
+    var evil = "O'Brien'; DROP TABLE t--";
+    patra_bind_text(ins, 1, evil, strlen(evil));
+    assert_eq(patra_exec_prepared(db, ins), PATRA_OK, "exec with quote");
+    patra_finalize(ins);
+    var rs = patra_query(db, "SELECT * FROM t");
+    assert_eq(patra_result_count(rs), 1, "table intact, 1 row");
+    assert_streq(patra_result_get_str(rs, 0, 1), evil, "stored verbatim");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_bind_where() {
+    test_group("bind where");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (id INT, name STR)");
+    patra_exec(db, "INSERT INTO t VALUES (1, 'alice')");
+    patra_exec(db, "INSERT INTO t VALUES (2, 'bob')");
+    var sel = patra_prepare(db, "SELECT * FROM t WHERE id = ?");
+    patra_bind_int(sel, 0, 2);
+    var rs = patra_query_prepared(db, sel);
+    assert_eq(patra_result_count(rs), 1, "1 match (indexed)");
+    assert_streq(patra_result_get_str(rs, 0, 1), "bob", "bob");
+    patra_result_free(rs);
+    patra_finalize(sel);
+    var sel2 = patra_prepare(db, "SELECT * FROM t WHERE name = ?");
+    patra_bind_text(sel2, 0, "alice", 5);
+    var rs2 = patra_query_prepared(db, sel2);
+    assert_eq(patra_result_count(rs2), 1, "name match (scan)");
+    assert_eq(patra_result_get_int(rs2, 0, 0), 1, "id 1");
+    patra_result_free(rs2);
+    patra_finalize(sel2);
+    patra_close(db);
+}
+
+fn test_bind_update() {
+    test_group("bind update");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (id INT, name STR)");
+    patra_exec(db, "INSERT INTO t VALUES (1, 'alice')");
+    var up = patra_prepare(db, "UPDATE t SET name = ? WHERE id = ?");
+    patra_bind_text(up, 0, "ALICE", 5);
+    patra_bind_int(up, 1, 1);
+    assert_eq(patra_exec_prepared(db, up), PATRA_OK, "update exec");
+    patra_finalize(up);
+    var rs = patra_query(db, "SELECT * FROM t WHERE id = 1");
+    assert_streq(patra_result_get_str(rs, 0, 1), "ALICE", "updated via bind");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_bind_rebind() {
+    test_group("bind rebind + reuse");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (id INT, name STR)");
+    var ins = patra_prepare(db, "INSERT INTO t VALUES (?, ?)");
+    patra_bind_int(ins, 0, 1);
+    patra_bind_text(ins, 1, "one", 3);
+    patra_exec_prepared(db, ins);
+    patra_bind_int(ins, 0, 2);
+    patra_bind_text(ins, 1, "two", 3);
+    patra_exec_prepared(db, ins);
+    patra_finalize(ins);
+    var rs = patra_query(db, "SELECT * FROM t");
+    assert_eq(patra_result_count(rs), 2, "2 rows from rebind");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_bind_errors() {
+    test_group("bind errors");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (id INT, name STR)");
+    # Direct exec/query of a parameterized statement is rejected.
+    assert_eq(patra_exec(db, "INSERT INTO t VALUES (?, ?)"), PATRA_ERR_PARAM, "direct exec ? rejected");
+    assert_eq(patra_query(db, "SELECT * FROM t WHERE id = ?"), 0, "direct query ? rejected");
+    # Out-of-range bind index.
+    var ins = patra_prepare(db, "INSERT INTO t VALUES (?, ?)");
+    assert_eq(patra_bind_int(ins, 2, 9), PATRA_ERR_PARAM, "idx 2 out of range");
+    assert_eq(patra_bind_int(ins, 0, 9), PATRA_OK, "idx 0 ok");
+    patra_finalize(ins);
+    patra_close(db);
+}
+
+fn test_bind_text_into_text_col() {
+    test_group("bind text into TEXT column");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (id INT AUTOINCREMENT, body TEXT)");
+    var ins = patra_prepare(db, "INSERT INTO t (body) VALUES (?)");
+    # Free text with a quote, bound into a variable-length TEXT column — the
+    # full free-text story (no escaping, no 256-byte cap).
+    var note = "It's a note; with, commas and 'quotes' inside.";
+    patra_bind_text(ins, 0, note, strlen(note));
+    assert_eq(patra_exec_prepared(db, ins), PATRA_OK, "exec text bind");
+    patra_finalize(ins);
+    var rs = patra_query(db, "SELECT * FROM t");
+    assert_eq(patra_result_get_text_len(rs, 0, 1), strlen(note), "text len matches");
+    var out = fl_alloc(64);
+    memset(out, 0, 64);
+    patra_result_read_text(db, rs, 0, 1, out);
+    assert_streq(out, note, "text stored verbatim");
+    fl_free(out);
+    patra_result_free(rs);
+    patra_close(db);
+}
+
 fn main() {
     alloc_init();
     fl_init();
@@ -4165,6 +4321,16 @@ fn main() {
     test_text_delete_frees();
     test_text_where_and_index_rejected();
     test_text_alter_add();
+
+    # v1.10.3 bind parameters
+    test_parse_bind();
+    test_bind_insert();
+    test_bind_text_quotes();
+    test_bind_where();
+    test_bind_update();
+    test_bind_rebind();
+    test_bind_errors();
+    test_bind_text_into_text_col();
 
     cleanup();
     return assert_summary();
