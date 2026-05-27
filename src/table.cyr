@@ -57,7 +57,7 @@ fn tbl_find(hdr, name, nlen): i64 {
 # col_names: array of (ptr, len) pairs — 16 bytes each
 # col_types: array of i64 — 8 bytes each
 # Create table with schema and data pages
-fn tbl_create(fd, hdr, name, nlen, col_names, col_types, ncols): i64 {
+fn tbl_create(fd, hdr, name, nlen, col_names, col_types, ncols, autoinc): i64 {
     if (load64(hdr + HDR_TBLCOUNT) >= MAX_TABLES) { return PATRA_ERR_FULL; }
     if (ncols > MAX_COLS) { return PATRA_ERR_COLCOUNT; }
     if (tbl_find(hdr, name, nlen) >= 0) { return PATRA_ERR_EXISTS; }
@@ -77,6 +77,9 @@ fn tbl_create(fd, hdr, name, nlen, col_names, col_types, ncols): i64 {
         store8(sbuf + soff + SCH_CNAME + cn, 0);
         store64(sbuf + soff + SCH_CTYPE, load64(col_types + i * 8));
     }
+    # AUTOINCREMENT column marker: col_idx+1, 0 = none (memset already zeroed
+    # it, so old DBs read 0 = none — backward-compatible additive field).
+    store64(sbuf + SCH_AUTOINC_COL, autoinc);
     # Auto-index on first INT column
     store64(sbuf + SCH_IDX_COL, 0 - 1);
     if (ncols > 0) {

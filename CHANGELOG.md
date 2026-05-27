@@ -5,6 +5,49 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.1] - 2026-05-27
+
+**AUTOINCREMENT / rowid (yeo-cy-test LOW).** First patch of the 1.10.x arc
+working the remaining yeo-cy-test blockers. Shipped as a patch (not a
+minor) to keep the whole consumer-feedback batch in the 1.10 line —
+consistent with patra precedent (1.6.1, 1.7.1 shipped features as
+patches). Removes the hand-rolled id counter consumers seeded from
+`SELECT id … ORDER BY id` at boot.
+
+### Added
+
+- **`AUTOINCREMENT` column modifier** — `CREATE TABLE t (id INT
+  AUTOINCREMENT, …)`. When an INSERT omits the column (column-list form)
+  or supplies `0` (positional), patra assigns the next id = current
+  `max + 1` (`1` for an empty table); an explicit non-zero value is
+  honored. INT-only, at most one per table (both rejected at parse with
+  `PATRA_ERR_SYNTAX`). Composes with `OR IGNORE` (the auto id is computed
+  before the dedup probe, so an auto id — always unique — never dedups;
+  only explicit ids do). Deleting the highest row lets its id be reused
+  (derive-from-MAX semantics, matching the consumer's prior `MAX(id)`
+  pattern).
+
+### Changed
+
+- Schema page gains an additive `SCH_AUTOINC_COL` marker (offset 4072,
+  stored as `col_idx + 1` so `0` = none). Backward-compatible: a zeroed
+  old schema reads `0`, and an old patra opening a new autoinc DB just
+  sees a normal INT column — no format break.
+- `dist/patra.cyr` regenerated via `cyrius distlib` (4894 → 4912 lines).
+
+### Verified (cyrius 6.0.3, x86_64)
+
+- `cyrius test tests/tcyr/patra.tcyr`: **680 / 680** pass (+28 over
+  v1.10.0 — 5 new AUTOINCREMENT groups).
+- 6 / 6 fuzz harnesses clean; `fuzz_sql` gains 13 AUTOINCREMENT
+  invariants (exit codes 120–132) covering parse guards, sequential
+  auto-assign, explicit/zero handling.
+- `cyrius bench tests/bcyr/patra.bcyr`: 36 benchmarks, no regression —
+  `insert_1k` 20 µs unchanged (the auto-assign branch is one load + test
+  for non-autoinc tables).
+- Integration: libro 15 / 15, vidya 19 / 19.
+- DCE demo binary: 226,280 bytes (+1,216 over v1.10.0).
+
 ## [1.10.0] - 2026-05-27
 
 **Consumer-driven feature release (yeo-cy-test).** Clears two of the

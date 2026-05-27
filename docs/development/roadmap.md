@@ -1,10 +1,10 @@
 # Patra Development Roadmap
 
-> **Last refreshed**: 2026-05-27 (v1.10.0 cut — 2 of 5 yeo-cy-test blockers shipped; was 2026-05-27 at queue-intake)
+> **Last refreshed**: 2026-05-27 (v1.10.1 cut — 3 of 5 yeo-cy-test blockers shipped; was v1.10.0 at 2/5)
 >
 > Forward-looking only. Shipped work lives in [`../../CHANGELOG.md`](../../CHANGELOG.md); rejected design directions and phase-level summaries live in [`completed-phases.md`](completed-phases.md). Live state (version, sizes, test counts, consumers) lives in [`state.md`](state.md).
 
-> **Current**: v1.10.0 — consumer-driven feature release (yeo-cy-test): column-list INSERT + sakshi transitive-dep doc; cyrius pin 6.0.1 → 6.0.3. 1.9.x line recap: 1.9.0 BREAKING `json_build` rename → 1.9.1 aarch64 portability → 1.9.2 lint/fmt clean surface → 1.9.3 sakshi tag + path correction → 1.9.4 stdlib `: i64` return-type annotation pass → 1.9.5 cyrius 6.0 bump. Patra serves libro, vidya, daimon, agnoshi, mela, hoosh, and sit.
+> **Current**: v1.10.1 — 1.10.x arc working the remaining yeo-cy-test blockers as a quick-wins-first patch series. Shipped: 1.10.0 column-list INSERT + sakshi-dep doc (cyrius pin → 6.0.3); 1.10.1 AUTOINCREMENT / rowid. Next: TEXT/VARLEN column type (1.10.2), then bind parameters (1.10.3). Patra serves libro, vidya, daimon, agnoshi, mela, hoosh, and sit.
 
 ## Driven by consumer needs
 
@@ -30,21 +30,26 @@ port. patra **worked** — open, CREATE TABLE, positional INSERT, SELECT/ORDER B
 blockers below are ordered by impact for the SY port (lots of stored free text).
 Full write-up: [`secureyeoman/yeo-cy-test/FINDINGS.md`](../../../secureyeoman/yeo-cy-test/FINDINGS.md).
 
-**Shipped in v1.10.0** (2 of 5):
+**Shipped** (3 of 5):
 
-- ✅ **INSERT column list (was MEDIUM).** `INSERT INTO t (a, b) VALUES (…)`
-  binds values to named columns in any order; omitted columns take their
+- ✅ **INSERT column list (was MEDIUM, v1.10.0).** `INSERT INTO t (a, b) VALUES
+  (…)` binds values to named columns in any order; omitted columns take their
   zero/empty default. Composes with `OR IGNORE` and prepared statements.
   Removes the positional-INSERT brittleness when porting SQLx/axum code.
-- ✅ **Undocumented transitive dep on sakshi (was LOW, packaging).**
+- ✅ **Undocumented transitive dep on sakshi (was LOW, packaging, v1.10.0).**
   Documented in README § Dependencies + a `cyrius.cyml` maintainer note:
   cyrius doesn't resolve transitive deps, so consumers must replicate
   `[deps.sakshi]` alongside `[deps.patra]`. (Inlining sakshi into the dist
   bundle was rejected for this cut — it risks duplicate-symbol clashes for
   consumers that also depend on sakshi directly; revisit via ADR if a
   truly-standalone bundle is ever needed.)
+- ✅ **AUTOINCREMENT / rowid (was LOW, v1.10.1).** `CREATE TABLE t (id INT
+  AUTOINCREMENT, …)`; INSERT omitting the column or supplying `0` gets the next
+  id (`max + 1`), explicit values honored. INT-only, one per table, composes
+  with `OR IGNORE`. Backward-compatible additive schema marker. Removes the
+  hand-rolled `SELECT MAX(id)` boot counter.
 
-**Still open** (3 of 5), ordered by impact:
+**Still open** (2 of 5), ordered by impact:
 
 - **No SQL string escaping / no bind parameters (HIGH).** `sql_tokenize`
   (`src/…` tokenizer) opens on `'` and closes at the *first* following `'` — no
@@ -56,14 +61,13 @@ Full write-up: [`secureyeoman/yeo-cy-test/FINDINGS.md`](../../../secureyeoman/ye
   before INSERT, decode on read (base64's alphabet has no quotes). The clean
   fix is `patra_bind_text/int/blob` (sqlite3_bind_* shape), which removes both
   the escaping hole and the prepare-time-literal limitation at once.
+  **Planned: 1.10.3.**
 - **STR columns fixed at 256 bytes (MEDIUM).** `COL_STR_SZ` (incl. NUL) truncates
   silently past that; with base64's 4/3 inflation the effective text cap drops
   to ~189 bytes. `COL_BYTES`/blob pages exist for larger payloads but no SQL
   syntax is surfaced to write them via `patra_exec`. A TEXT/VARLEN column type
   or a documented blob-insert path would unblock real document storage.
-- **No AUTOINCREMENT / rowid (LOW).** Consumers allocate ids by hand;
-  yeo-cy-test seeds its counter from `SELECT id … ORDER BY id` at boot. An auto
-  rowid or `INTEGER PRIMARY KEY`-style id would remove the boilerplate.
+  **Planned: 1.10.2** (new `TEXT` column type reusing the BYTES chain infra).
 
 ### Pre-existing (toolchain, not consumer-filed)
 

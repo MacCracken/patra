@@ -186,6 +186,41 @@ patra_result_free(clrs2);
 patra_close(cldb);
 syscall(SYS_UNLINK, clpath);
 
+# ── AUTOINCREMENT (1.10.1): parse guards + auto-assign ──
+
+# Valid on an INT column; records col_idx+1 in PR_AUTOINC.
+sql_tokenize("CREATE TABLE t (id INT AUTOINCREMENT, name STR)");
+if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 120); }
+if (load64(_sql_pr + PR_AUTOINC) != 1) { syscall(SYS_EXIT, 121); }
+# Rejected on a non-INT column and when declared twice.
+sql_tokenize("CREATE TABLE t (name STR AUTOINCREMENT)");
+if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 122); }
+sql_tokenize("CREATE TABLE t (a INT AUTOINCREMENT, b INT AUTOINCREMENT)");
+if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 123); }
+# Plain CREATE leaves PR_AUTOINC at 0.
+sql_tokenize("CREATE TABLE t (id INT, name STR)");
+if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 124); }
+if (load64(_sql_pr + PR_AUTOINC) != 0) { syscall(SYS_EXIT, 125); }
+
+# Integration: omit auto-assigns sequentially; explicit honored; 0 => auto.
+var aipath = "/tmp/patra_fuzz_autoinc.patra";
+syscall(SYS_UNLINK, aipath);
+var aidb = patra_open(aipath);
+if (aidb == 0) { syscall(SYS_EXIT, 126); }
+patra_exec(aidb, "CREATE TABLE ai (id INT AUTOINCREMENT, name STR)");
+if (patra_exec(aidb, "INSERT INTO ai (name) VALUES ('a')") != PATRA_OK) { syscall(SYS_EXIT, 127); }
+if (patra_exec(aidb, "INSERT INTO ai VALUES (0, 'b')") != PATRA_OK) { syscall(SYS_EXIT, 128); }
+if (patra_exec(aidb, "INSERT INTO ai VALUES (50, 'c')") != PATRA_OK) { syscall(SYS_EXIT, 129); }
+if (patra_exec(aidb, "INSERT INTO ai (name) VALUES ('d')") != PATRA_OK) { syscall(SYS_EXIT, 130); }
+var airs = patra_query(aidb, "SELECT * FROM ai WHERE id = 2");
+if (patra_result_count(airs) != 1) { syscall(SYS_EXIT, 131); }
+patra_result_free(airs);
+var airs2 = patra_query(aidb, "SELECT * FROM ai WHERE id = 51");
+if (patra_result_count(airs2) != 1) { syscall(SYS_EXIT, 132); }
+patra_result_free(airs2);
+patra_close(aidb);
+syscall(SYS_UNLINK, aipath);
+
 # ── STR-keyed index (1.7.1): CREATE INDEX on STR + dedup probe ──
 
 var stpath = "/tmp/patra_fuzz_str.patra";

@@ -9,7 +9,7 @@
 
 ## Current
 
-- **Version**: 1.10.0 (read `VERSION` for the authoritative number)
+- **Version**: 1.10.1 (read `VERSION` for the authoritative number)
 - **Cyrius toolchain**: 6.0.3 (pinned in `cyrius.cyml [package].cyrius`).
   Patch bump within the 6.0.x line first adopted at v1.9.5. 6.0.3 also
   heals the 6.0.1 `cyrius deps --lock` regression — `cyrius.lock` now
@@ -20,17 +20,15 @@
   downstream consumers must replicate `[deps.sakshi]` alongside
   `[deps.patra]` (cyrius does not resolve transitive deps) — documented
   in README § Dependencies as of v1.10.0.
-- **Binary**: ~225 KB DCE demo (`programs/demo.cyr`, x86_64; 225,064
-  bytes, 60,606 NOPed). aarch64 cross-build of `src/lib.cyr` produces a
+- **Binary**: ~226 KB DCE demo (`programs/demo.cyr`, x86_64; 226,280
+  bytes, 59,889 NOPed). aarch64 cross-build of `src/lib.cyr` produces a
   valid ARM ELF — 1.9.1's aarch64 portability holds under cyrius 6.0.3.
-- **Status**: **1.10.0 — consumer-driven feature release (yeo-cy-test).**
-  Two yeo-cy-test blockers cleared: column-list INSERT
-  (`INSERT INTO t (a, b) VALUES (…)`, MEDIUM) and the sakshi
-  transitive-dep packaging gap (LOW, documented). cyrius pin 6.0.1 →
-  6.0.3. All gates green; `dist/patra.cyr` regenerated at 4894 lines.
-  Deferred from the yeo-cy-test queue: bind parameters / SQL escaping
-  (HIGH), TEXT/VARLEN columns (MEDIUM), rowid/AUTOINCREMENT (LOW) — see
-  [`roadmap.md`](roadmap.md).
+- **Status**: **1.10.x arc — patch 1 of 3 (rowid) shipped.** The 1.10.x
+  line works the 3 remaining yeo-cy-test blockers as patches
+  (quick-wins-first). 1.10.1 added the `AUTOINCREMENT` column modifier
+  (LOW). All gates green; `dist/patra.cyr` regenerated at 4912 lines.
+  Next in the arc: TEXT/VARLEN column type (MEDIUM, 1.10.2), then bind
+  parameters / SQL escaping (HIGH, 1.10.3) — see [`roadmap.md`](roadmap.md).
 - **Primary target**: Linux x86_64. aarch64 cross-build best-effort
   (`src/lib.cyr` cross-builds clean under cyrius 6.0.3; the test
   programs in `programs/` still use raw `syscall(SYS_UNLINK, …)` and
@@ -38,14 +36,14 @@
 
 ## Source layout
 
-11 modules, ~4,875 lines total in `src/`.
+11 modules, ~4,931 lines total in `src/`.
 
 | File | Lines | Responsibility |
 |------|------:|----------------|
-| `src/lib.cyr` | 1697 | public API + includes (entry point); `patra_insert_row` / `result_read_bytes`; prepared statements (`patra_prepare` / `_exec_prepared` / `_query_prepared` / `_finalize`); column-list INSERT bind (v1.10.0) |
-| `src/sql.cyr` | 962 | tokenizer + recursive-descent parser — CREATE / INSERT / SELECT / UPDATE / DELETE / CREATE INDEX / ALTER / VACUUM; INSERT OR IGNORE; column-list INSERT (v1.10.0); aggregates; column-list projection; BYTES / BLOB keyword |
-| `src/btree.cyr` | 504 | B+ tree order-64; insert / split / search / range / lazy delete / compaction / whole-tree free |
-| `src/table.cyr` | 416 | table create / insert / scan / update / delete + index maintenance + bytes chain cleanup |
+| `src/lib.cyr` | 1736 | public API + includes (entry point); `patra_insert_row` / `result_read_bytes`; prepared statements (`patra_prepare` / `_exec_prepared` / `_query_prepared` / `_finalize`); column-list INSERT bind (v1.10.0); AUTOINCREMENT auto-assign + `_max_int_col` (v1.10.1) |
+| `src/sql.cyr` | 975 | tokenizer + recursive-descent parser — CREATE / INSERT / SELECT / UPDATE / DELETE / CREATE INDEX / ALTER / VACUUM; INSERT OR IGNORE; column-list INSERT (v1.10.0); AUTOINCREMENT (v1.10.1); aggregates; column-list projection; BYTES / BLOB keyword |
+| `src/btree.cyr` | 505 | B+ tree order-64; insert / split / search / range / lazy delete / compaction / whole-tree free; schema index + autoinc markers (`SCH_IDX_*`, `SCH_AUTOINC_COL`) |
+| `src/table.cyr` | 419 | table create / insert / scan / update / delete + index maintenance + bytes chain cleanup |
 | `src/jsonl.cyr` | 371 | JSON Lines I/O, JSON builder, field extraction, escaping; `patra_json_build` (renamed from `json_build` in v1.9.0) |
 | `src/file.cyr` | 236 | `.patra` format, header, flock, fdatasync, constants (incl. COL_BYTES, PAGE_BYTES, BY_*); 4 KB page-slab allocator (`pg_alloc` / `pg_free`, v1.8.2) |
 | `src/wal.cyr` | 229 | write-ahead logging — page before-images, crash recovery, salted records |
@@ -58,17 +56,18 @@
 
 ## Tests / Fuzz / Bench
 
-- **Unit**: `tests/tcyr/patra.tcyr` — **652 / 652** assertions pass under
-  cyrius 6.0.3 (+32 over v1.9.5: 6 column-list INSERT groups).
+- **Unit**: `tests/tcyr/patra.tcyr` — **680 / 680** assertions pass under
+  cyrius 6.0.3 (+28 over v1.10.0: 5 AUTOINCREMENT groups).
 - **Fuzz**: 6 harnesses in `fuzz/` — `fuzz_btree`, `fuzz_bytes`,
   `fuzz_file`, `fuzz_jsonl`, `fuzz_sql`, `fuzz_wal`. All clean under the
-  10 s CI timeout. `fuzz_sql` gains 20 column-list INSERT invariants
-  (exit codes 100–119) at v1.10.0.
+  10 s CI timeout. `fuzz_sql` carries 20 column-list INSERT invariants
+  (exit codes 100–119, v1.10.0) + 13 AUTOINCREMENT invariants
+  (120–132, v1.10.1).
 - **Benchmarks**: `tests/bcyr/patra.bcyr` — **36 benchmarks**; full
   table baselined under cyrius 6.0.1 at v1.9.5 (see
-  [`BENCHMARKS.md`](BENCHMARKS.md)). v1.10.0 re-ran the suite under
-  6.0.3: no regression — the column-list branch adds zero overhead to
-  positional INSERT (`parse_insert` 7 µs). Representative subset:
+  [`BENCHMARKS.md`](BENCHMARKS.md)). v1.10.1 re-ran under 6.0.3: no
+  regression — `insert_1k` 20 µs unchanged (AUTOINCREMENT adds one
+  load + branch for non-autoinc tables). Representative subset:
   - `btree_insert_1k` 4 µs · `btree_search_1k` 2 µs
   - `select_idx_eq_500` 520 µs · `select_scan_500` 473 µs
   - `select_idx_eq_unique_500` 239 µs
@@ -129,6 +128,7 @@ payload at `BY_DATA_MAX = 4072`.
 
 | Version | Date | Summary |
 |---------|------|---------|
+| 1.10.1 | 2026-05-27 | **AUTOINCREMENT / rowid (yeo-cy-test LOW) — 1.10.x arc patch 1 of 3.** `CREATE TABLE t (id INT AUTOINCREMENT, …)`; INSERT omitting the column (column-list) or supplying `0` (positional) gets the next id = `max + 1`, explicit non-zero honored. INT-only, one per table, composes with `OR IGNORE`. Additive backward-compatible `SCH_AUTOINC_COL` schema marker (no format break). Feature shipped as a patch to keep the yeo-cy-test batch in the 1.10 line (precedent: 1.6.1, 1.7.1). Gates: 680 tests, 6 fuzz (+13 autoinc invariants), 36 benchmarks (no regression), libro 15/15, vidya 19/19. `dist/patra.cyr` at 4912 lines. |
 | 1.10.0 | 2026-05-27 | **Consumer-driven feature release (yeo-cy-test).** Column-list INSERT — `INSERT INTO t (a, b) VALUES (…)` binds values by name in any order; omitted columns take their zero/empty default; positional INSERT unchanged (MEDIUM blocker). sakshi transitive-dep packaging documented in README § Dependencies + `cyrius.cyml` (LOW blocker — cyrius doesn't resolve transitive deps, so consumers must replicate `[deps.sakshi]`). cyrius pin 6.0.1 → 6.0.3 (also heals the 6.0.1 0-byte-lockfile regression). Gates: 652 tests, 6 fuzz (+20 column-list invariants), 36 benchmarks (no regression), libro 15/15, vidya 19/19. `dist/patra.cyr` regenerated at 4894 lines. Deferred: bind parameters (HIGH), TEXT/VARLEN (MEDIUM), rowid (LOW). |
 | 1.9.5 | 2026-05-21 | **Cyrius 6.0 toolchain bump (pin-only patch).** `cyrius` pin 5.11.4 → 6.0.1 — patra's first major-version cyrius bump. Cyrius 6.0 renames the named compiler (`cc5` → `cycc`, `cc5_aarch64` → `cycc_aarch64`); patra's CI invokes the `cyrius` CLI wrapper, so no workflow surgery was required (pattern-matched against agnosys commits `4588938` + `b1e9eca`, which had to migrate `cc5 --version` + `cc5_aarch64` call sites). All gates green: lint 0, 620 tests, 6 fuzz, 35 benchmarks (no regression), libro 15/15, vidya 19/19, `src/lib.cyr` aarch64 cross-build clean. `dist/patra.cyr` regenerated at 4785 lines. |
 | 1.9.4 | 2026-05-11 | **Stdlib `: i64` return-type annotation pass.** Every public fn in `src/*.cyr` carries a `: i64` return-type annotation. Mechanical parse-only pass tracking cyrius's v5.11.x annotation arc (REAL TYPE SYSTEM); zero runtime / codegen change. Pin 5.8.64 → 5.11.4. |
@@ -149,7 +149,7 @@ Full history in [`../../CHANGELOG.md`](../../CHANGELOG.md). Pre-1.6 narrative in
 
 ## CI / verification hosts
 
-- **CI**: x86_64 Linux only — `cyrius build` + lint + 652 tests + 6 fuzz + 36 benchmarks + libro + vidya integration.
+- **CI**: x86_64 Linux only — `cyrius build` + lint + 680 tests + 6 fuzz + 36 benchmarks + libro + vidya integration.
 - **Release**: tag-driven on `[0-9]*`; verifies `VERSION == cyrius.cyml package.version == git tag`; ships source tarball + `dist/patra.cyr` bundle + DCE demo binary + SHA256SUMS.
 - **aarch64**: best-effort. Library (`src/lib.cyr`) cross-builds clean; the `programs/` test binaries do not (still on raw `SYS_UNLINK`) — they're host-only.
 

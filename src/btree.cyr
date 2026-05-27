@@ -19,6 +19,7 @@ enum BtOff {
 
 # Schema page index info
 enum SchIdx {
+    SCH_AUTOINC_COL = 4072;
     SCH_IDX_COL = 4080;
     SCH_IDX_ROOT = 4088;
 }

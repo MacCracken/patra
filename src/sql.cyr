@@ -55,6 +55,7 @@ enum TokType {
     TK_TO = 49;
     TK_KW_BYTES = 50;
     TK_IGNORE = 51;
+    TK_KW_AUTOINC = 52;
 }
 
 enum StmtType {
@@ -101,6 +102,7 @@ enum PROff {
     PR_WHERE = 1024;
     PR_INS_NCOLS = 2816;
     PR_INS_COLS = 2824;
+    PR_AUTOINC = 3336;
 }
 
 # CREATE column item: 24 bytes
@@ -243,6 +245,7 @@ fn _classify_ident(ptr, len): i64 {
     # case-insensitive alias so habitual "BLOB" spellings still parse.
     if (_kw_eq(ptr, len, "BYTES"))  { return TK_KW_BYTES; }
     if (_kw_eq(ptr, len, "BLOB"))   { return TK_KW_BYTES; }
+    if (_kw_eq(ptr, len, "AUTOINCREMENT")) { return TK_KW_AUTOINC; }
     if (_kw_eq(ptr, len, "WHERE"))  { return TK_WHERE; }
     if (_kw_eq(ptr, len, "AND"))    { return TK_AND; }
     if (_kw_eq(ptr, len, "OR"))     { return TK_OR; }
@@ -516,6 +519,16 @@ fn _parse_create(): i64 {
         elif (tt == TK_KW_BYTES)    { store64(item + CR_TYPE, COL_BYTES); }
         else { return PATRA_ERR_SYNTAX; }
         pos = pos + 1;
+
+        # Optional AUTOINCREMENT after an INT column. Auto-assigns the next id
+        # (current max + 1) when INSERT omits the column or supplies 0. INT-only,
+        # at most one per table. Stored as col_idx+1 in PR_AUTOINC (0 = none).
+        if (_tok_type(pos) == TK_KW_AUTOINC) {
+            if (load64(item + CR_TYPE) != COL_INT)    { return PATRA_ERR_SYNTAX; }
+            if (load64(_sql_pr + PR_AUTOINC) != 0)    { return PATRA_ERR_SYNTAX; }
+            store64(_sql_pr + PR_AUTOINC, ncols + 1);
+            pos = pos + 1;
+        }
 
         if (_tok_type(pos) == TK_COMMA) { pos = pos + 1; }
         ncols = ncols + 1;

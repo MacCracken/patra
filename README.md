@@ -99,6 +99,7 @@ include `dist/sakshi.cyr` next to it.
 
 ```sql
 CREATE TABLE name (col1, col2, ...)
+CREATE TABLE name (id INT AUTOINCREMENT, col2, ...)
 DROP TABLE name
 CREATE INDEX ON name (col)
 INSERT INTO name VALUES (val1, val2, ...)
@@ -126,6 +127,8 @@ CREATE TABLE objects (hash STR, content BYTES)
 Column types are `INT` (i64), `STR` (256-byte fixed), and `BYTES` (variable-length binary, chain-page-backed; `BLOB` accepted as alias). No floating point. `BYTES` columns are write/read only — SQL `INSERT`/`UPDATE` and `WHERE` don't apply; use the `patra_insert_row` / `patra_result_read_bytes` programmatic API.
 
 An `INSERT` may name its columns — `INSERT INTO t (b, a) VALUES (...)` — to bind values by name in any order; columns left unnamed take their zero/empty default. Without a column list, values are positional in `CREATE TABLE` order.
+
+An INT column may be declared `AUTOINCREMENT` (one per table). When an `INSERT` omits that column or supplies `0`, patra assigns the next id (current `max + 1`, starting at `1`); an explicit non-zero value is honored. Deleting the highest row lets its id be reused.
 
 ## Build
 
