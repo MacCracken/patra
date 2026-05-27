@@ -152,8 +152,9 @@ fn where_eval(row, schema, ncols, pr): i64 {
                 load64(cond + WH_STR_PTR), load64(cond + WH_STR_LEN), cmp);
             }
         }
-        # COL_BYTES: WHERE never matches — variable-length binary isn't
-        # comparable via = / LIKE / ordered ops. Filter in application code.
+        # COL_BYTES / COL_TEXT: WHERE never matches — variable-length values
+        # aren't comparable via = / LIKE / ordered ops (the row holds only a
+        # chain ref, not the payload). Filter in application code.
 
         if (join == WH_AND) {
             if (hit == 0) { result = 0; }

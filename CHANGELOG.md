@@ -5,6 +5,57 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.2] - 2026-05-27
+
+**TEXT column type (yeo-cy-test MEDIUM).** Second patch of the 1.10.x
+arc. Surfaces variable-length text to SQL, lifting the 256-byte `STR`
+cap that blocked real document storage. Shipped as a patch to keep the
+yeo-cy-test batch in the 1.10 line (precedent: 1.6.1, 1.7.1). With this
+in, `base64 + TEXT` already stores arbitrary-size text via `patra_exec`;
+1.10.3 (bind parameters) will retire the base64 stopgap entirely.
+
+### Added
+
+- **`TEXT` column type** — `CREATE TABLE t (body TEXT)` (and `ALTER TABLE
+  … ADD COLUMN body TEXT`). A TEXT cell is written from a SQL string
+  literal in `INSERT` / `UPDATE` and stored in the same chain-page infra
+  as `COL_BYTES` (16-byte `(first_page, length)` row ref, payload spilled
+  across `PAGE_BYTES` pages), so the fixed-width row layout is preserved.
+  Read back with the new `patra_result_get_text_len(rs, row, col)` +
+  `patra_result_read_text(db, rs, row, col, out)` accessors. Unlike the
+  256-byte `STR` slot, TEXT has no length cap.
+- Composes with `AUTOINCREMENT` (1.10.1) and column-list / positional
+  INSERT, and with `INSERT OR IGNORE` (a TEXT chain written for a row
+  that's then skipped on a dedup hit is reclaimed, not orphaned).
+
+### Changed
+
+- TEXT chains are freed on `DELETE`, `DROP TABLE`, and `ALTER TABLE …
+  DROP COLUMN` — reusing the existing BYTES chain-cleanup paths via a new
+  `_col_is_chain` predicate that both BYTES and TEXT answer to (keeps the
+  size, cleanup, and guard switches in sync).
+- `UPDATE … SET text_col = '…'` rewrites the cell: the old chain is freed
+  and a new one written.
+- **Constraints:** `WHERE` on a TEXT column never matches and `CREATE
+  INDEX` on TEXT is rejected (`PATRA_ERR_TYPE`) — variable-length values
+  aren't comparable / hashable (same contract as BYTES). `BYTES` stays
+  binary and programmatic-only (`patra_insert_row`); the TEXT vs BYTES
+  split mirrors SQLite's TEXT vs BLOB.
+- `dist/patra.cyr` regenerated via `cyrius distlib` (4912 → 4986 lines).
+
+### Verified (cyrius 6.0.3, x86_64)
+
+- `cyrius test tests/tcyr/patra.tcyr`: **711 / 711** pass (+31 over
+  v1.10.1 — 9 new TEXT groups incl. >256-byte, multipage, update,
+  delete-frees-chain, WHERE/index rejection, ALTER ADD).
+- 6 / 6 fuzz harnesses clean; `fuzz_sql` gains 10 TEXT invariants (exit
+  codes 140–149).
+- `cyrius bench tests/bcyr/patra.bcyr`: 36 benchmarks, no regression
+  (`insert_1k` 20 µs, `bytes_insert_2kb` 26 µs unchanged).
+- Integration: libro 15 / 15, vidya 19 / 19. Lint clean (now a hard CI
+  gate — caught a 126-char `ColType` line during this cut, since split).
+- DCE demo binary: 227,928 bytes (+1,648 over v1.10.1).
+
 ## [1.10.1] - 2026-05-27
 
 **AUTOINCREMENT / rowid (yeo-cy-test LOW).** First patch of the 1.10.x arc

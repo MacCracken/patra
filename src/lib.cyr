@@ -304,13 +304,21 @@ fn _exec_insert(db): i64 {
             }
             row_write_int(row, off, load64(item + IR_IVAL));
         } else {
-            if (ctype != COL_STR) {
+            # String literal: COL_STR writes the fixed 256-byte slot; COL_TEXT
+            # spills the payload to a chain and stores its (page, len) ref. A
+            # COL_BYTES / COL_INT target is a type error.
+            if (ctype == COL_STR) {
+                row_write_str(row, off, load64(item + IR_SPTR), load64(item + IR_SLEN));
+            } elif (ctype == COL_TEXT) {
+                var tlen = load64(item + IR_SLEN);
+                var thead = _bytes_write_chain(fd, hdr, load64(item + IR_SPTR), tlen);
+                row_write_bytes_ref(row, off, thead, tlen);
+            } else {
                 fl_free(row);
                 pg_free(schema);
                 patra_unlock(fd);
                 return PATRA_ERR_TYPE;
             }
-            row_write_str(row, off, load64(item + IR_SPTR), load64(item + IR_SLEN));
         }
     }
 
@@ -372,6 +380,9 @@ fn _exec_insert(db): i64 {
                         fl_free(refs);
                     }
                     if (ihit != 0) {
+                        # Row is being skipped — reclaim any TEXT/BYTES chains
+                        # the bind loop already wrote so they don't orphan.
+                        _tbl_free_row_bytes(fd, hdr, row, schema, ncols);
                         fl_free(row);
                         pg_free(schema);
                         patra_unlock(fd);
@@ -783,7 +794,7 @@ fn _exec_alter_drop_col(db): i64 {
         var pn = load64(buf + DP_NROWS);
         for (var i = 0; i < pn; i = i + 1) {
             var src = buf + DP_DATA + i * rsz_old;
-            if (dctype == COL_BYTES) {
+            if (_col_is_chain(dctype)) {
                 var dr_pg = row_read_bytes_page(src, drop_off);
                 if (dr_pg != 0) { _bytes_free_chain(fd, hdr, dr_pg); }
             }
@@ -933,7 +944,7 @@ fn _exec_create_index(db): i64 {
     # 256-byte slot (collisions verified at lookup via where_eval / byte
     # compare). BYTES columns can't be indexed.
     var ct = load64(schema + SCH_START + ci * SCH_ENTRY_SZ + SCH_CTYPE);
-    if (ct == COL_BYTES) { pg_free(schema); patra_unlock(fd); return PATRA_ERR_TYPE; }
+    if (_col_is_chain(ct)) { pg_free(schema); patra_unlock(fd); return PATRA_ERR_TYPE; }
 
     # Create B-tree and populate with existing rows
     var bt = btree_create(fd, hdr);
@@ -1047,7 +1058,7 @@ fn _rs_field_off(rs, col): i64 {
     for (var i = 0; i < col; i = i + 1) {
         var t = load64(types + i * 8);
         if (t == COL_INT)       { off = off + COL_INT_SZ; }
-        elif (t == COL_BYTES)    { off = off + COL_BYTES_SZ; }
+        elif (_col_is_chain(t))  { off = off + COL_BYTES_SZ; }
         else                    { off = off + COL_STR_SZ; }
     }
     return off;
@@ -1635,6 +1646,34 @@ fn patra_result_read_bytes(db, rs, row, col, out): i64 {
     if (blen <= 0) { return PATRA_OK; }
     if (first_pg == 0) { return PATRA_ERR_PAGE; }
     return _bytes_read_chain(_db_fd(db), _db_hdr(db), first_pg, blen, out);
+}
+
+# Byte length of a TEXT value at (row, col), or -1 if the column isn't TEXT.
+# Mirrors patra_result_get_bytes_len; the caller sizes its `out` buffer from
+# this before patra_result_read_text (no NUL terminator is stored).
+fn patra_result_get_text_len(rs, row, col): i64 {
+    var types = load64(rs + RS_TYPES);
+    if (load64(types + col * 8) != COL_TEXT) { return 0 - 1; }
+    var data = load64(rs + RS_DATA);
+    var rsz = load64(rs + RS_ROWSZ);
+    return load64(data + row * rsz + _rs_field_off(rs, col) + BR_LEN);
+}
+
+# Read a TEXT column's payload into a caller-allocated `out` buffer (at least
+# patra_result_get_text_len bytes). Returns PATRA_OK, PATRA_ERR_TYPE for a
+# non-TEXT column, or PATRA_ERR_PAGE on a malformed chain. Empty TEXT (len 0)
+# returns PATRA_OK with nothing written.
+fn patra_result_read_text(db, rs, row, col, out): i64 {
+    var types = load64(rs + RS_TYPES);
+    if (load64(types + col * 8) != COL_TEXT) { return PATRA_ERR_TYPE; }
+    var data = load64(rs + RS_DATA);
+    var rsz = load64(rs + RS_ROWSZ);
+    var ref = data + row * rsz + _rs_field_off(rs, col);
+    var first_pg = load64(ref + BR_PAGE);
+    var tlen = load64(ref + BR_LEN);
+    if (tlen <= 0) { return PATRA_OK; }
+    if (first_pg == 0) { return PATRA_ERR_PAGE; }
+    return _bytes_read_chain(_db_fd(db), _db_hdr(db), first_pg, tlen, out);
 }
 
 # Free result set and all buffers

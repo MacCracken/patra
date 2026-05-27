@@ -122,9 +122,10 @@ ALTER TABLE name DROP COLUMN col
 ALTER TABLE name RENAME TO new_name
 ALTER TABLE name RENAME COLUMN old TO new
 CREATE TABLE objects (hash STR, content BYTES)
+CREATE TABLE notes (id INT AUTOINCREMENT, body TEXT)
 ```
 
-Column types are `INT` (i64), `STR` (256-byte fixed), and `BYTES` (variable-length binary, chain-page-backed; `BLOB` accepted as alias). No floating point. `BYTES` columns are write/read only — SQL `INSERT`/`UPDATE` and `WHERE` don't apply; use the `patra_insert_row` / `patra_result_read_bytes` programmatic API.
+Column types are `INT` (i64), `STR` (256-byte fixed), `TEXT` (variable-length text), and `BYTES` (variable-length binary; `BLOB` accepted as alias). No floating point. `TEXT` and `BYTES` share the same chain-page storage (the row holds a 16-byte ref; the payload spills across pages) and neither is comparable in `WHERE` or indexable. They differ at the SQL surface: `TEXT` is written from a string literal in `INSERT`/`UPDATE` and read via `patra_result_get_text_len` / `patra_result_read_text`; `BYTES` is binary and write/read only via the `patra_insert_row` / `patra_result_read_bytes` programmatic API. (Mirrors SQLite's TEXT vs BLOB.)
 
 An `INSERT` may name its columns — `INSERT INTO t (b, a) VALUES (...)` — to bind values by name in any order; columns left unnamed take their zero/empty default. Without a column list, values are positional in `CREATE TABLE` order.
 

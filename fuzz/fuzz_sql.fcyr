@@ -221,6 +221,45 @@ patra_result_free(airs2);
 patra_close(aidb);
 syscall(SYS_UNLINK, aipath);
 
+# ── TEXT column (1.10.2): parse + variable-length round-trip ──
+
+sql_tokenize("CREATE TABLE t (id INT, body TEXT)");
+if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 140); }
+sql_tokenize("ALTER TABLE t ADD COLUMN note TEXT");
+if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 141); }
+
+var txpath = "/tmp/patra_fuzz_text.patra";
+syscall(SYS_UNLINK, txpath);
+var txdb = patra_open(txpath);
+if (txdb == 0) { syscall(SYS_EXIT, 142); }
+patra_exec(txdb, "CREATE TABLE tx (id INT, body TEXT)");
+# Text past the 256-byte STR cap: build a 600-char literal at runtime.
+var tbuf = fl_alloc(700);
+var tpre = "INSERT INTO tx (id, body) VALUES (1, '";
+var tpl = strlen(tpre);
+memcpy(tbuf, tpre, tpl);
+for (var ti = 0; ti < 600; ti = ti + 1) { store8(tbuf + tpl + ti, 65); }
+store8(tbuf + tpl + 600, 39);
+store8(tbuf + tpl + 601, 41);
+store8(tbuf + tpl + 602, 0);
+if (patra_exec(txdb, tbuf) != PATRA_OK) { syscall(SYS_EXIT, 143); }
+fl_free(tbuf);
+var txrs = patra_query(txdb, "SELECT * FROM tx");
+if (patra_result_get_text_len(txrs, 0, 1) != 600) { syscall(SYS_EXIT, 144); }
+var txout = fl_alloc(600);
+if (patra_result_read_text(txdb, txrs, 0, 1, txout) != PATRA_OK) { syscall(SYS_EXIT, 145); }
+if (load8(txout) != 65) { syscall(SYS_EXIT, 146); }
+if (load8(txout + 599) != 65) { syscall(SYS_EXIT, 147); }
+fl_free(txout);
+patra_result_free(txrs);
+# WHERE on TEXT never matches; index on TEXT is rejected.
+var txw = patra_query(txdb, "SELECT * FROM tx WHERE body = 'x'");
+if (patra_result_count(txw) != 0) { syscall(SYS_EXIT, 148); }
+patra_result_free(txw);
+if (patra_exec(txdb, "CREATE INDEX ON tx (body)") != PATRA_ERR_TYPE) { syscall(SYS_EXIT, 149); }
+patra_close(txdb);
+syscall(SYS_UNLINK, txpath);
+
 # ── STR-keyed index (1.7.1): CREATE INDEX on STR + dedup probe ──
 
 var stpath = "/tmp/patra_fuzz_str.patra";

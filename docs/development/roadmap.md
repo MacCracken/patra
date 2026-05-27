@@ -1,10 +1,10 @@
 # Patra Development Roadmap
 
-> **Last refreshed**: 2026-05-27 (v1.10.1 cut — 3 of 5 yeo-cy-test blockers shipped; was v1.10.0 at 2/5)
+> **Last refreshed**: 2026-05-27 (v1.10.2 cut — 4 of 5 yeo-cy-test blockers shipped; was v1.10.1 at 3/5)
 >
 > Forward-looking only. Shipped work lives in [`../../CHANGELOG.md`](../../CHANGELOG.md); rejected design directions and phase-level summaries live in [`completed-phases.md`](completed-phases.md). Live state (version, sizes, test counts, consumers) lives in [`state.md`](state.md).
 
-> **Current**: v1.10.1 — 1.10.x arc working the remaining yeo-cy-test blockers as a quick-wins-first patch series. Shipped: 1.10.0 column-list INSERT + sakshi-dep doc (cyrius pin → 6.0.3); 1.10.1 AUTOINCREMENT / rowid. Next: TEXT/VARLEN column type (1.10.2), then bind parameters (1.10.3). Patra serves libro, vidya, daimon, agnoshi, mela, hoosh, and sit.
+> **Current**: v1.10.2 — 1.10.x arc working the remaining yeo-cy-test blockers as a quick-wins-first patch series. Shipped: 1.10.0 column-list INSERT + sakshi-dep doc (cyrius pin → 6.0.3); 1.10.1 AUTOINCREMENT / rowid; 1.10.2 TEXT column type. Last: bind parameters / SQL escaping (1.10.3). Patra serves libro, vidya, daimon, agnoshi, mela, hoosh, and sit.
 
 ## Driven by consumer needs
 
@@ -30,7 +30,7 @@ port. patra **worked** — open, CREATE TABLE, positional INSERT, SELECT/ORDER B
 blockers below are ordered by impact for the SY port (lots of stored free text).
 Full write-up: [`secureyeoman/yeo-cy-test/FINDINGS.md`](../../../secureyeoman/yeo-cy-test/FINDINGS.md).
 
-**Shipped** (3 of 5):
+**Shipped** (4 of 5):
 
 - ✅ **INSERT column list (was MEDIUM, v1.10.0).** `INSERT INTO t (a, b) VALUES
   (…)` binds values to named columns in any order; omitted columns take their
@@ -48,8 +48,15 @@ Full write-up: [`secureyeoman/yeo-cy-test/FINDINGS.md`](../../../secureyeoman/ye
   id (`max + 1`), explicit values honored. INT-only, one per table, composes
   with `OR IGNORE`. Backward-compatible additive schema marker. Removes the
   hand-rolled `SELECT MAX(id)` boot counter.
+- ✅ **STR 256-byte cap → TEXT column type (was MEDIUM, v1.10.2).** New `TEXT`
+  type: variable-length, SQL-writable text (string literals in INSERT/UPDATE),
+  stored in the BYTES chain-page infra (16-byte ref), read via
+  `patra_result_get_text_len` / `patra_result_read_text`. No length cap. WHERE +
+  CREATE INDEX on TEXT rejected; BYTES stays binary/programmatic (TEXT/BYTES
+  mirrors SQLite TEXT/BLOB). `base64 + TEXT` already stores arbitrary text;
+  1.10.3 retires the base64 stopgap.
 
-**Still open** (2 of 5), ordered by impact:
+**Still open** (1 of 5):
 
 - **No SQL string escaping / no bind parameters (HIGH).** `sql_tokenize`
   (`src/…` tokenizer) opens on `'` and closes at the *first* following `'` — no
@@ -61,13 +68,9 @@ Full write-up: [`secureyeoman/yeo-cy-test/FINDINGS.md`](../../../secureyeoman/ye
   before INSERT, decode on read (base64's alphabet has no quotes). The clean
   fix is `patra_bind_text/int/blob` (sqlite3_bind_* shape), which removes both
   the escaping hole and the prepare-time-literal limitation at once.
-  **Planned: 1.10.3.**
-- **STR columns fixed at 256 bytes (MEDIUM).** `COL_STR_SZ` (incl. NUL) truncates
-  silently past that; with base64's 4/3 inflation the effective text cap drops
-  to ~189 bytes. `COL_BYTES`/blob pages exist for larger payloads but no SQL
-  syntax is surfaced to write them via `patra_exec`. A TEXT/VARLEN column type
-  or a documented blob-insert path would unblock real document storage.
-  **Planned: 1.10.2** (new `TEXT` column type reusing the BYTES chain infra).
+  **Planned: 1.10.3** (closes the arc). With TEXT (1.10.2) already in, a bound
+  text value routes straight into a TEXT chain — fully retiring the base64
+  stopgap.
 
 ### Pre-existing (toolchain, not consumer-filed)
 

@@ -22,7 +22,7 @@ fn _tbl_name_eq(entry, name, nlen): i64 {
 fn _tbl_free_row_bytes(fd, hdr, row, schema, ncols): i64 {
     for (var i = 0; i < ncols; i = i + 1) {
         var ctype = load64(schema + SCH_START + i * SCH_ENTRY_SZ + SCH_CTYPE);
-        if (ctype == COL_BYTES) {
+        if (_col_is_chain(ctype)) {
             var off = row_field_offset(schema, ncols, i);
             var first_pg = row_read_bytes_page(row, off);
             if (first_pg != 0) {
@@ -38,7 +38,7 @@ fn _tbl_free_row_bytes(fd, hdr, row, schema, ncols): i64 {
 fn _tbl_has_bytes(schema, ncols): i64 {
     for (var i = 0; i < ncols; i = i + 1) {
         var ctype = load64(schema + SCH_START + i * SCH_ENTRY_SZ + SCH_CTYPE);
-        if (ctype == COL_BYTES) { return 1; }
+        if (_col_is_chain(ctype)) { return 1; }
     }
     return 0;
 }
@@ -329,7 +329,19 @@ fn tbl_update(fd, hdr, idx, row_sz, schema, ncols, pr): i64 {
                         return PATRA_ERR_TYPE;
                     }
                     var coff = row_field_offset(schema, ncols, cidx);
-                    if (load64(set + SET_VTYPE) == COL_INT) {
+                    if (ctype == COL_TEXT) {
+                        # Rewriting a TEXT cell: only a string value assigns. Free
+                        # the old chain, write the new payload, store the new ref.
+                        if (load64(set + SET_VTYPE) != COL_STR) {
+                            pg_free(buf);
+                            return PATRA_ERR_TYPE;
+                        }
+                        var old_tpg = row_read_bytes_page(rptr, coff);
+                        if (old_tpg != 0) { _bytes_free_chain(fd, hdr, old_tpg); }
+                        var utlen = load64(set + SET_SLEN);
+                        var uthead = _bytes_write_chain(fd, hdr, load64(set + SET_SPTR), utlen);
+                        row_write_bytes_ref(rptr, coff, uthead, utlen);
+                    } elif (load64(set + SET_VTYPE) == COL_INT) {
                         row_write_int(rptr, coff, load64(set + SET_IVAL));
                     } else {
                         row_write_str(rptr, coff, load64(set + SET_SPTR), load64(set + SET_SLEN));

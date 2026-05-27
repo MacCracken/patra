@@ -56,6 +56,7 @@ enum TokType {
     TK_KW_BYTES = 50;
     TK_IGNORE = 51;
     TK_KW_AUTOINC = 52;
+    TK_KW_TEXT = 53;
 }
 
 enum StmtType {
@@ -246,6 +247,7 @@ fn _classify_ident(ptr, len): i64 {
     if (_kw_eq(ptr, len, "BYTES"))  { return TK_KW_BYTES; }
     if (_kw_eq(ptr, len, "BLOB"))   { return TK_KW_BYTES; }
     if (_kw_eq(ptr, len, "AUTOINCREMENT")) { return TK_KW_AUTOINC; }
+    if (_kw_eq(ptr, len, "TEXT"))   { return TK_KW_TEXT; }
     if (_kw_eq(ptr, len, "WHERE"))  { return TK_WHERE; }
     if (_kw_eq(ptr, len, "AND"))    { return TK_AND; }
     if (_kw_eq(ptr, len, "OR"))     { return TK_OR; }
@@ -517,6 +519,7 @@ fn _parse_create(): i64 {
         if (tt == TK_KW_INT)       { store64(item + CR_TYPE, COL_INT); }
         elif (tt == TK_KW_STR)     { store64(item + CR_TYPE, COL_STR); }
         elif (tt == TK_KW_BYTES)    { store64(item + CR_TYPE, COL_BYTES); }
+        elif (tt == TK_KW_TEXT)     { store64(item + CR_TYPE, COL_TEXT); }
         else { return PATRA_ERR_SYNTAX; }
         pos = pos + 1;
 
@@ -896,6 +899,7 @@ fn _parse_alter(): i64 {
         if (tt == TK_KW_INT)    { store64(item + CR_TYPE, COL_INT); }
         elif (tt == TK_KW_STR)  { store64(item + CR_TYPE, COL_STR); }
         elif (tt == TK_KW_BYTES) { store64(item + CR_TYPE, COL_BYTES); }
+        elif (tt == TK_KW_TEXT)  { store64(item + CR_TYPE, COL_TEXT); }
         else { return PATRA_ERR_SYNTAX; }
         store64(_sql_pr + PR_STMT, STMT_ALTER_ADD);
         return PATRA_OK;

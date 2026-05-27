@@ -1,9 +1,19 @@
 # row.cyr — row encoding/decoding (i64 + fixed-length strings)
 
-# Size in bytes for a column type (INT=8, STR=256, BLOB=16)
+# True for the variable-length, chain-page-backed column types (BYTES, TEXT).
+# Both store a 16-byte (first_page, length) ref in the fixed-width row and
+# spill their payload to a chain of PAGE_BYTES pages. Centralizes the
+# "chain-backed?" test so size, cleanup, and index/WHERE guards stay in sync.
+fn _col_is_chain(ct): i64 {
+    if (ct == COL_BYTES) { return 1; }
+    if (ct == COL_TEXT)  { return 1; }
+    return 0;
+}
+
+# Size in bytes for a column type (INT=8, STR=256, BYTES/TEXT ref=16)
 fn row_col_size(ctype): i64 {
     if (ctype == COL_INT)  { return COL_INT_SZ; }
-    if (ctype == COL_BYTES) { return COL_BYTES_SZ; }
+    if (_col_is_chain(ctype)) { return COL_BYTES_SZ; }
     return COL_STR_SZ;
 }
 

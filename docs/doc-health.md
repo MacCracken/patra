@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — patra
 
-> **Last refresh**: 2026-05-27 (v1.10.1 cut — CHANGELOG / README / VERSION / state.md / roadmap.md touched for AUTOINCREMENT; the 1.10.x arc is shipping the remaining yeo-cy-test blockers as a patch series; was the v1.10.0 cut earlier same-day) | **Refresh cadence**: when docs are touched, update the affected row.
+> **Last refresh**: 2026-05-27 (v1.10.2 cut — CHANGELOG / README / VERSION / state.md / roadmap.md touched for the TEXT column type; 4 of 5 yeo-cy-test blockers shipped, bind params (1.10.3) closes the arc; was the v1.10.1 cut earlier same-day) | **Refresh cadence**: when docs are touched, update the affected row.
 > **Scope**: This repo only (`patra`) — root-level files (README, CHANGELOG, CLAUDE.md, etc.) plus the entire `docs/` tree. Cross-repo cyrius pin / version drift lives in [`development/state.md`](development/state.md), not here.
 
 This is a **ledger**, not a one-time audit. Rewrite-in-place as docs change. Patra's doc surface is small (~17 files) but every file is load-bearing — patra is the database underneath libro, vidya, daimon, agnoshi, mela, hoosh, and sit, and stale invariant docs propagate downstream.
@@ -52,14 +52,14 @@ Patra's cyrius pin jumped **5.11.4 → 6.0.1** in v1.9.5 (named compiler renamed
 
 | File | Last touched | Status | Notes |
 |---|---|---|---|
-| `README.md` | 2026-05-27 | 🟠 Read-through | v1.10.0 added the **Dependencies** section + column-list INSERT; v1.10.1 added the AUTOINCREMENT form + note in SQL Supported. Still missing: prepared statements (1.8.2), STR-keyed indexes (1.7.1), group-commit / batched-fsync mode (1.8.0); the Usage code block still shows stale 3-arg `patra_exec(db, sql, len)` calls. Refresh slot at next consumer-driven release. |
-| `CHANGELOG.md` | 2026-05-27 | ✅ Fresh | Source of truth for shipped work. Updated through 1.10.1; full per-version history. |
+| `README.md` | 2026-05-27 | 🟠 Read-through | v1.10.0 added **Dependencies** + column-list INSERT; v1.10.1 AUTOINCREMENT; v1.10.2 the `TEXT` column type (SQL Supported + types prose). Still missing: prepared statements (1.8.2), STR-keyed indexes (1.7.1), group-commit / batched-fsync mode (1.8.0); the Usage code block still shows stale 3-arg `patra_exec(db, sql, len)` calls. Refresh slot at next consumer-driven release. |
+| `CHANGELOG.md` | 2026-05-27 | ✅ Fresh | Source of truth for shipped work. Updated through 1.10.2; full per-version history. |
 | `CLAUDE.md` | 2026-05-21 | ✅ Fresh | Refactored at v1.9.5 to durable-only per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md#claudemd). Volatile state pointed at `docs/development/state.md`. |
 | `CONTRIBUTING.md` | 2026-05-21 | ✅ Fresh | `cc2` → `cyrius.cyml [package].cyrius` pointer; expanded with deps / fuzz / bench / process steps in v1.9.5. |
 | `SECURITY.md` | 2026-04-30 | 🟠 Read-through | References Patra 1.5.1 / 1.5.2 / 1.5.3 audit slate (closed). Still substantively correct (`jsonl_append_obj_lens`, NFS non-support, audit pointer), but supported-versions table should be re-anchored at the 1.9.x line. |
 | `CODE_OF_CONDUCT.md` | 2026-04-30 | 🔵 Evergreen | Standard. |
 | `LICENSE` | (initial) | 🔵 Evergreen | GPL-3.0-only. |
-| `VERSION` | 2026-05-27 | ✅ Fresh | `1.10.1` — matches `cyrius.cyml` (`${file:VERSION}`). |
+| `VERSION` | 2026-05-27 | ✅ Fresh | `1.10.2` — matches `cyrius.cyml` (`${file:VERSION}`). |
 
 ---
 
@@ -67,8 +67,8 @@ Patra's cyrius pin jumped **5.11.4 → 6.0.1** in v1.9.5 (named compiler renamed
 
 | File | Last touched | Status | Notes |
 |---|---|---|---|
-| `state.md` | 2026-05-27 | ✅ Fresh | Bumped at v1.10.1 — version 1.10.1, binary ~226 KB, 680 tests / 36 benchmarks, source line-counts, 1.10.1 release row; status reframed as the 1.10.x arc (patch 1 of 3 shipped). Refresh every release. |
-| `roadmap.md` | 2026-05-27 | ✅ Fresh | Updated at v1.10.1 — current block reframed as the 1.10.x quick-wins patch series; 3 of 5 yeo-cy-test blockers shipped (column-list INSERT, sakshi dep, AUTOINCREMENT); 2 remain (bind params HIGH → 1.10.3, TEXT/VARLEN MEDIUM → 1.10.2). |
+| `state.md` | 2026-05-27 | ✅ Fresh | Bumped at v1.10.2 — version 1.10.2, binary ~228 KB, 711 tests / 36 benchmarks, source line-counts, 1.10.2 release row; status = 1.10.x arc patches 1–2 of 3 shipped. Refresh every release. |
+| `roadmap.md` | 2026-05-27 | ✅ Fresh | Updated at v1.10.2 — 4 of 5 yeo-cy-test blockers shipped (column-list INSERT, sakshi dep, AUTOINCREMENT, TEXT); 1 remains (bind params HIGH → 1.10.3, closes the arc). |
 | `completed-phases.md` | 2026-05-21 | ✅ Fresh | Rewritten at v1.9.5 — phases extended through 1.9.x; audit slate carried forward; investigated/rejected table preserved. |
 | `BENCHMARKS.md` | 2026-05-21 | ✅ Fresh | Re-baselined under cyrius 6.0.1 / patra 1.9.5. Full 35-bench sweep, two runs, medians taken. Re-baseline notes section calls out tmpfs-bound speedups (compiler-side) vs disk-bound shifts (hardware-class) so consumers don't misread the absolute deltas. |
 | `issues/archive/2026-04-30-cyrius-cyrfmt-cyrlint-buffer-truncation.md` | 2026-05-21 (archived) | 📦 Frozen — RESOLVED | Filed against cyrius 5.7.48; resolved upstream in cyrius 6.0.1 (buffer 128 KB → 512 KB, verified by feeding a 6.6 MB input). Moved to `archive/` with an `ARCHIVED` header at the top preserving the original body verbatim. |
@@ -161,4 +161,4 @@ This file's refresh cadence is **opportunistic** (touched when other docs are to
 
 ---
 
-*Last refresh: 2026-05-27 (v1.10.1 cut — AUTOINCREMENT / rowid, 1.10.x arc patch 1 of 3). Refresh in place when docs are touched.*
+*Last refresh: 2026-05-27 (v1.10.2 cut — TEXT column type, 1.10.x arc patch 2 of 3). Refresh in place when docs are touched.*

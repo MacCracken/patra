@@ -3760,6 +3760,173 @@ fn test_autoinc_persistence() {
     patra_close(db);
 }
 
+# -- v1.10.2: TEXT column type -------------------------------
+
+# Build "INSERT INTO bigt (body) VALUES ('<n × ch>')" and exec it. `ch` must be
+# a quote-free, NUL-free byte so the SQL literal stays well-formed.
+fn _text_big_insert(db, ch, n) {
+    var buf = fl_alloc(n + 64);
+    var pre = "INSERT INTO bigt (body) VALUES ('";
+    var pl = strlen(pre);
+    memcpy(buf, pre, pl);
+    for (var i = 0; i < n; i = i + 1) { store8(buf + pl + i, ch); }
+    store8(buf + pl + n, 39);       # closing quote '
+    store8(buf + pl + n + 1, 41);   # )
+    store8(buf + pl + n + 2, 0);    # NUL
+    var r = patra_exec(db, buf);
+    fl_free(buf);
+    return r;
+}
+
+fn _all_byte(ptr, val, n) {
+    for (var i = 0; i < n; i = i + 1) {
+        if (load8(ptr + i) != val) { return 0; }
+    }
+    return 1;
+}
+
+fn test_parse_text() {
+    test_group("parse text");
+    sql_tokenize("CREATE TABLE t (id INT, body TEXT)");
+    assert_eq(sql_parse(), PATRA_OK, "text col parses");
+    sql_tokenize("ALTER TABLE t ADD COLUMN note TEXT");
+    assert_eq(sql_parse(), PATRA_OK, "alter add text parses");
+}
+
+fn test_text_insert_read() {
+    test_group("text insert read");
+    cleanup();
+    var db = patra_open(_tpath);
+    assert_eq(patra_exec(db, "CREATE TABLE t (id INT, body TEXT)"), PATRA_OK, "create");
+    assert_eq(patra_exec(db, "INSERT INTO t (id, body) VALUES (1, 'hello world')"), PATRA_OK, "insert");
+    var rs = patra_query(db, "SELECT * FROM t");
+    assert_eq(patra_result_count(rs), 1, "1 row");
+    assert_eq(patra_result_get_text_len(rs, 0, 1), 11, "len 11");
+    var out = fl_alloc(32);
+    memset(out, 0, 32);
+    assert_eq(patra_result_read_text(db, rs, 0, 1, out), PATRA_OK, "read ok");
+    assert_streq(out, "hello world", "content");
+    fl_free(out);
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_text_exceeds_str_cap() {
+    test_group("text exceeds 256");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE bigt (id INT AUTOINCREMENT, body TEXT)");
+    # 300 bytes — beyond the 256-byte STR cap, single chain page.
+    assert_eq(_text_big_insert(db, 65, 300), PATRA_OK, "insert 300B");
+    var rs = patra_query(db, "SELECT * FROM bigt");
+    assert_eq(patra_result_get_text_len(rs, 0, 1), 300, "len 300");
+    var out = fl_alloc(300);
+    assert_eq(patra_result_read_text(db, rs, 0, 1, out), PATRA_OK, "read 300");
+    assert_eq(_all_byte(out, 65, 300), 1, "300 bytes of 'A'");
+    fl_free(out);
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_text_multipage() {
+    test_group("text multipage");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE bigt (id INT AUTOINCREMENT, body TEXT)");
+    # 10000 bytes -> 3 chain pages (BY_DATA_MAX = 4072).
+    assert_eq(_text_big_insert(db, 90, 10000), PATRA_OK, "insert 10k");
+    var rs = patra_query(db, "SELECT * FROM bigt");
+    assert_eq(patra_result_get_text_len(rs, 0, 1), 10000, "len 10000");
+    var out = fl_alloc(10000);
+    assert_eq(patra_result_read_text(db, rs, 0, 1, out), PATRA_OK, "read 10k");
+    assert_eq(_all_byte(out, 90, 10000), 1, "10k bytes of 'Z'");
+    fl_free(out);
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_text_empty() {
+    test_group("text empty");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (id INT, body TEXT)");
+    assert_eq(patra_exec(db, "INSERT INTO t (id, body) VALUES (1, '')"), PATRA_OK, "insert empty");
+    var rs = patra_query(db, "SELECT * FROM t");
+    assert_eq(patra_result_get_text_len(rs, 0, 1), 0, "len 0");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_text_update() {
+    test_group("text update");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (id INT, body TEXT)");
+    patra_exec(db, "INSERT INTO t (id, body) VALUES (1, 'original')");
+    assert_eq(patra_exec(db, "UPDATE t SET body = 'updated text' WHERE id = 1"), PATRA_OK, "update");
+    var rs = patra_query(db, "SELECT * FROM t");
+    assert_eq(patra_result_get_text_len(rs, 0, 1), 12, "new len 12");
+    var out = fl_alloc(32);
+    memset(out, 0, 32);
+    patra_result_read_text(db, rs, 0, 1, out);
+    assert_streq(out, "updated text", "updated content");
+    fl_free(out);
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_text_delete_frees() {
+    test_group("text delete frees chain");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE bigt (id INT AUTOINCREMENT, body TEXT)");
+    _text_big_insert(db, 65, 9000);
+    _text_big_insert(db, 66, 9000);
+    var hdr = _db_hdr(db);
+    var pg_before = load64(hdr + HDR_PGCOUNT);
+    assert_eq(patra_exec(db, "DELETE FROM bigt WHERE id = 1"), PATRA_OK, "delete");
+    assert_eq(load64(hdr + HDR_PGCOUNT), pg_before, "pgcount unchanged");
+    assert_eq(load64(hdr + HDR_FREEHEAD) != 0, 1, "freehead set (chain freed)");
+    var rs = patra_query(db, "SELECT * FROM bigt");
+    assert_eq(patra_result_count(rs), 1, "1 row left");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
+fn test_text_where_and_index_rejected() {
+    test_group("text where + index rejected");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (id INT, body TEXT)");
+    patra_exec(db, "INSERT INTO t (id, body) VALUES (1, 'abc')");
+    # WHERE on TEXT never matches (variable-length isn't comparable).
+    var rs = patra_query(db, "SELECT * FROM t WHERE body = 'abc'");
+    assert_eq(patra_result_count(rs), 0, "where on text: no match");
+    patra_result_free(rs);
+    # CREATE INDEX on TEXT is rejected.
+    assert_eq(patra_exec(db, "CREATE INDEX ON t (body)"), PATRA_ERR_TYPE, "no index on text");
+    patra_close(db);
+}
+
+fn test_text_alter_add() {
+    test_group("text alter add");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (id INT, name STR)");
+    patra_exec(db, "INSERT INTO t VALUES (1, 'alice')");
+    assert_eq(patra_exec(db, "ALTER TABLE t ADD COLUMN bio TEXT"), PATRA_OK, "add text col");
+    # Existing row's new TEXT cell defaults to empty.
+    var rs = patra_query(db, "SELECT * FROM t");
+    assert_eq(patra_result_get_text_len(rs, 0, 2), 0, "existing row empty text");
+    patra_result_free(rs);
+    # New inserts can populate it.
+    assert_eq(patra_exec(db, "INSERT INTO t (id, name, bio) VALUES (2, 'bob', 'a bio')"), PATRA_OK, "insert with text");
+    var rs2 = patra_query(db, "SELECT * FROM t WHERE id = 2");
+    assert_eq(patra_result_get_text_len(rs2, 0, 2), 5, "bio len 5");
+    patra_result_free(rs2);
+    patra_close(db);
+}
+
 fn main() {
     alloc_init();
     fl_init();
@@ -3987,6 +4154,17 @@ fn main() {
     test_autoinc_explicit_and_zero();
     test_autoinc_reseed_after_delete();
     test_autoinc_persistence();
+
+    # v1.10.2 TEXT column type
+    test_parse_text();
+    test_text_insert_read();
+    test_text_exceeds_str_cap();
+    test_text_multipage();
+    test_text_empty();
+    test_text_update();
+    test_text_delete_frees();
+    test_text_where_and_index_rejected();
+    test_text_alter_add();
 
     cleanup();
     return assert_summary();
