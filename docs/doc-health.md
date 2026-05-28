@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — patra
 
-> **Last refresh**: 2026-05-27 (v1.10.3 cut — CHANGELOG / README / VERSION / state.md / roadmap.md touched for bind parameters; **1.10.x arc complete, 5 of 5 yeo-cy-test blockers shipped**, queue cleared; was the v1.10.2 cut earlier same-day) | **Refresh cadence**: when docs are touched, update the affected row.
+> **Last refresh**: 2026-05-27 (post-1.10.3 lint review — filed `issues/2026-05-27-cyrius-distlib-blank-lines.md` for the cyrius/language agent; roadmap + state.md footguns updated to reference it. Earlier same-day: the v1.10.3 cut closed the 1.10.x arc, **5 of 5 yeo-cy-test blockers shipped**, queue cleared) | **Refresh cadence**: when docs are touched, update the affected row.
 > **Scope**: This repo only (`patra`) — root-level files (README, CHANGELOG, CLAUDE.md, etc.) plus the entire `docs/` tree. Cross-repo cyrius pin / version drift lives in [`development/state.md`](development/state.md), not here.
 
 This is a **ledger**, not a one-time audit. Rewrite-in-place as docs change. Patra's doc surface is small (~17 files) but every file is load-bearing — patra is the database underneath libro, vidya, daimon, agnoshi, mela, hoosh, and sit, and stale invariant docs propagate downstream.
@@ -71,6 +71,7 @@ Patra's cyrius pin jumped **5.11.4 → 6.0.1** in v1.9.5 (named compiler renamed
 | `roadmap.md` | 2026-05-27 | ✅ Fresh | Updated at v1.10.3 — 1.10.x arc complete: all 5 yeo-cy-test blockers shipped (column-list INSERT, sakshi dep, AUTOINCREMENT, TEXT, bind params); queue cleared, back to consumer-driven cadence. |
 | `completed-phases.md` | 2026-05-21 | ✅ Fresh | Rewritten at v1.9.5 — phases extended through 1.9.x; audit slate carried forward; investigated/rejected table preserved. |
 | `BENCHMARKS.md` | 2026-05-21 | ✅ Fresh | Re-baselined under cyrius 6.0.1 / patra 1.9.5. Full 35-bench sweep, two runs, medians taken. Re-baseline notes section calls out tmpfs-bound speedups (compiler-side) vs disk-bound shifts (hardware-class) so consumers don't misread the absolute deltas. |
+| `issues/2026-05-27-cyrius-distlib-blank-lines.md` | 2026-05-27 | 🟠 Open — upstream | **New** at v1.10.3 lint review. `cyrius distlib` emits 3 cyrlint "consecutive blank lines" warnings in `dist/patra.cyr` (header separator + `include`-strip residue). Cosmetic, non-blocking (CI lints `src/`+`programs/`, not `dist/`). Filed for the cyrius/language agent; archive when the distlib blank-collapse fix lands and `cyrius lint dist/patra.cyr` reports 0. |
 | `issues/archive/2026-04-30-cyrius-cyrfmt-cyrlint-buffer-truncation.md` | 2026-05-21 (archived) | 📦 Frozen — RESOLVED | Filed against cyrius 5.7.48; resolved upstream in cyrius 6.0.1 (buffer 128 KB → 512 KB, verified by feeding a 6.6 MB input). Moved to `archive/` with an `ARCHIVED` header at the top preserving the original body verbatim. |
 | `issues/archive/README.md` | 2026-05-21 | ✅ Fresh | **New** — archive index. One row per resolved issue with filed-date / resolved-date / one-line hook. |
 
@@ -161,4 +162,4 @@ This file's refresh cadence is **opportunistic** (touched when other docs are to
 
 ---
 
-*Last refresh: 2026-05-27 (v1.10.3 cut — bind parameters; 1.10.x arc complete, 5/5 yeo-cy-test blockers shipped). Refresh in place when docs are touched.*
+*Last refresh: 2026-05-27 (post-1.10.3 lint review — cyrius distlib blank-line issue filed for upstream; 1.10.x arc complete, 5/5 yeo-cy-test blockers shipped). Refresh in place when docs are touched.*

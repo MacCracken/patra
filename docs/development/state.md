@@ -161,6 +161,7 @@ Full history in [`../../CHANGELOG.md`](../../CHANGELOG.md). Pre-1.6 narrative in
 ## Known footguns / latent issues
 
 - **`programs/` aarch64 cross-build** — `programs/demo.cyr`, `test_libro.cyr`, `test_vidya.cyr` still use raw `syscall(SYS_UNLINK, …)`. The library proper is aarch64-clean; the test harness isn't. Folding into the wrapper migration is queued behind the next consumer-driven release.
+- **`cyrius distlib` consecutive blank lines (upstream)** — the generated `dist/patra.cyr` carries 3 cyrlint "multiple consecutive blank lines" warnings (header separator + `include`-strip residue); src/programs lint clean. Non-blocking (CI lints `src/` + `programs/`, not `dist/`); visible to downstream consumers who lint the vendored bundle. Filed at [`issues/2026-05-27-cyrius-distlib-blank-lines.md`](issues/2026-05-27-cyrius-distlib-blank-lines.md) for the cyrius/language agent.
 
 ## Resolved (archived)
 
