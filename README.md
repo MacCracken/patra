@@ -84,6 +84,22 @@ modules = ["dist/sakshi.cyr"]
 The single-include bundle (`dist/patra.cyr`) carries the same requirement:
 include `dist/sakshi.cyr` next to it.
 
+As of **v1.11.0**, patra's internal thread-safety mutex uses the cyrius
+`atomic` stdlib module. Add `"atomic"` to your `[deps].stdlib` list
+(alongside whatever patra already needs) or the link fails on undefined
+`atomic_cas` / `atomic_store` / `atomic_fence`:
+
+```toml
+[deps]
+stdlib = ["syscalls", "string", "alloc", "freelist", "io", "fmt", "str", "vec", "atomic"]
+```
+
+**Thread-safety**: a patra db handle is safe to share across threads —
+auto-commit statement calls (`patra_exec` / `patra_query` / the prepared
+variants / `patra_insert_row`) are internally serialized. Explicit
+`patra_begin … patra_commit` spans are *not* internally serialized; keep
+transactions on a single thread (or guard the span yourself).
+
 ## Consumers
 
 | Project | Usage |

@@ -1,10 +1,10 @@
 # Patra Development Roadmap
 
-> **Last refreshed**: 2026-05-27 (v1.10.3 cut — 1.10.x arc COMPLETE, 5 of 5 yeo-cy-test blockers shipped; was v1.10.2 at 4/5)
+> **Last refreshed**: 2026-06-09 (v1.11.0 cut — thread-safety P1 shipped; cyrius pin 6.0.3 → 6.1.15)
 >
 > Forward-looking only. Shipped work lives in [`../../CHANGELOG.md`](../../CHANGELOG.md); rejected design directions and phase-level summaries live in [`completed-phases.md`](completed-phases.md). Live state (version, sizes, test counts, consumers) lives in [`state.md`](state.md).
 
-> **Current**: v1.10.3 — **1.10.x arc complete.** All 5 yeo-cy-test blockers shipped: 1.10.0 column-list INSERT + sakshi-dep doc (cyrius pin → 6.0.3); 1.10.1 AUTOINCREMENT / rowid; 1.10.2 TEXT column type; 1.10.3 bind parameters (closes the SQL-injection / escaping hole). Back to no-queued-backlog — next work lands when a consumer hits a concrete limit. Patra serves libro, vidya, daimon, agnoshi, mela, hoosh, and sit.
+> **Current**: v1.11.0 — **thread-safety P1 shipped.** A shared db handle is now safe across threads: a process-global futex mutex (`_patra_mtx`) serializes every auto-commit statement op (`patra_exec` / `patra_query` / prepared / `patra_insert_row`), so consumers can drop their external `g_db_lock`. cyrius pin 6.0.3 → 6.1.15. **Still open:** P2 — concurrent readers / per-DB reader-writer locking (lower priority; only worth it once profiling shows the single internal lock is the bottleneck). The 1.10.x arc (all 5 yeo-cy-test data-model/SQL blockers) remains complete. Patra serves libro, vidya, daimon, agnoshi, mela, hoosh, and sit.
 
 ## Driven by consumer needs
 
@@ -66,8 +66,48 @@ Full write-up: [`secureyeoman/yeo-cy-test/FINDINGS.md`](../../../secureyeoman/ye
   base64 stopgap. `patra_bind_blob` deferred (BYTES stays `patra_insert_row`-only)
   until a consumer needs SQL-driven binary writes.
 
-**Still open**: none — the yeo-cy-test queue is cleared. Patra is back to
-no-queued-backlog; new items land here when a consumer names a concrete limit.
+**Still open** (data-model/SQL): none — the original 5-blocker queue is cleared.
+A new concurrency finding from yeo-cy-test's later work is queued below.
+
+### From yeo-cy-test (concurrency milestone, 2026-06-09)
+
+yeo-cy-test grew a real HTTP server: the single-threaded accept loop was
+replaced with a **fixed worker-thread pool** (cyrius `thread.cyr`) so one slow
+client no longer stalls the others. This surfaced that **patra is not
+thread-safe**, which forces the consumer to serialize *all* database access.
+Both items below name that concrete limit. Full write-up:
+[`secureyeoman/yeo-cy-test/FINDINGS.md`](../../../secureyeoman/yeo-cy-test/FINDINGS.md)
+(§ HTTP / networking).
+
+- ✅ **P1 — patra is not thread-safe; concurrent access corrupts state (v1.11.0).**
+  Shipped fix option (a): a **process-global futex mutex** (`_patra_mtx`,
+  built on `atomic_cas` + `FUTEX_WAIT`/`WAKE`) wraps every self-contained
+  statement op — `patra_exec`, `patra_query`, `patra_prepare`,
+  `patra_exec_prepared`, `patra_query_prepared`, `patra_insert_row`. The lock
+  is process-global (not per-DB) on purpose: the racing scratch (`_sql_toks`,
+  `_sql_pr`) is itself process-global and shared across all handles, so a
+  per-DB lock would leave a two-handle data race. Stated guarantee:
+  **concurrent same-handle (and cross-handle) statement calls are memory-safe
+  and serializable** (the minimum bar). Consumers drop their external
+  `g_db_lock`. Caveat (documented in CHANGELOG + `lib.cyr`): per-call locking
+  does **not** make an explicit `patra_begin … patra_commit` span atomic
+  across threads — transaction control is intentionally left unlocked, so a
+  caller mixing explicit transactions with concurrent access must serialize
+  the span itself (or keep transactions on one thread). Verified by
+  `test_concurrency` (4 threads × 250 inserts on a shared handle: exact count,
+  zero torn rows; lock-disabled control corrupts the DB). Adds the `atomic`
+  stdlib dep. The deferred option (b) — thread-local scratch — folds into P2
+  if real read parallelism is ever needed.
+
+- **P2 — concurrent readers (throughput beyond one-op-at-a-time).** Even once
+  P1 makes a shared handle *safe*, a single internal lock still caps DB work at
+  one operation at a time, so a read-heavy server gets no DB parallelism across
+  cores. Wanted: concurrent `SELECT`s in flight (reads don't block reads),
+  writes exclusive — i.e. a reader/writer lock around the pager, or a
+  connection-per-thread model (multiple handles over one file with proper file
+  locking + a shared/refreshed page cache). Lower priority: only worth doing
+  after P1 lands and profiling shows the serialized handle is the bottleneck
+  (yeo-cy-test's DB ops are sub-millisecond, so the P1 mutex is fine for now).
 
 ### Pre-existing (toolchain, not consumer-filed)
 

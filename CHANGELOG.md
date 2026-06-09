@@ -5,6 +5,91 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.0] - 2026-06-09
+
+**Thread-safety: shared handles are now safe (yeo-cy-test P1).** A patra
+db handle can now be shared across threads — concurrent `patra_exec` /
+`patra_query` / prepared-statement / `patra_insert_row` calls are
+internally serialized and memory-safe. This removes the footgun that
+forced yeo-cy-test's worker pool to wrap **every** patra call in an
+external `g_db_lock`. Also bumps the cyrius toolchain pin 6.0.3 → 6.1.15.
+
+### Fixed
+
+- **P1 — concurrent same-handle access no longer corrupts state.** The
+  SQL parse/exec path uses process-global scratch (`_sql_toks`,
+  `_sql_pr` in `sql.cyr`) shared across **all** db handles in the
+  process, so two threads parsing at once clobbered each other's tokens
+  and parse result — even on different databases — silently corrupting
+  writes or crashing. v1.11.0 adds a process-global futex mutex
+  (`_patra_mtx`) that serializes every self-contained statement
+  operation. Because the racing scratch is process-global, the lock is
+  too: a per-DB lock would leave a two-handle data race. The guarantee:
+  **concurrent same-handle (and cross-handle) statement calls are
+  memory-safe and serializable** — the P1 minimum bar. Verified by a new
+  4-thread / 1000-insert stress test (`test_concurrency`): exact row
+  count, zero torn rows; with the lock disabled the same test corrupts
+  the DB so the count query returns nothing.
+
+### Added
+
+- **`atomic` stdlib dependency** (`cyrius.cyml [deps].stdlib`) and
+  `include "lib/atomic.cyr"` in `lib.cyr` — supplies `atomic_cas` /
+  `atomic_store` / `atomic_fence` for the futex mutex fast path
+  (`atomic_cas` 0→1 acquire, `FUTEX_WAIT`/`FUTEX_WAKE` under contention;
+  the stdlib `thread.cyr` 2-state scheme). **Consumers vendoring
+  `dist/patra.cyr` must add `"atomic"` to their own `[deps].stdlib`** —
+  cyrius does not resolve transitive deps (same constraint as the
+  `sakshi` block; see README § Dependencies).
+- `test_concurrency` unit test (+4 assertions, 743 → 747) — the unit
+  suite now includes `lib/thread.cyr` + `lib/mmap.cyr` to spawn real
+  worker threads against a shared handle.
+
+### Changed
+
+- **cyrius toolchain pin 6.0.3 → 6.1.15.** Build, full test suite, fuzz,
+  benchmarks, and the aarch64 cross-build of `src/lib.cyr` all clean on
+  the new pin with no source changes required for the bump itself.
+- `dist/patra.cyr` regenerated via `cyrius distlib` (5130 → 5215 lines;
+  now carries the `_patra_mtx` mutex + `atomic_*` call sites).
+
+### Thread-safety contract (documented)
+
+- Each **auto-commit statement** call (`patra_exec`, `patra_query`,
+  `patra_prepare`, `patra_exec_prepared`, `patra_query_prepared`,
+  `patra_insert_row`) is internally locked and safe to call concurrently
+  on a shared handle.
+- **Explicit `patra_begin` … `patra_commit` spans are NOT internally
+  serialized** — per-call locking cannot make a multi-call transaction
+  atomic across threads. A caller mixing explicit transactions with
+  concurrent access must serialize the transaction span itself (or keep
+  transactions on one thread). `patra_begin` / `patra_commit` /
+  `patra_rollback` are intentionally left unlocked.
+- Result-set accessors operate on caller-owned result sets (no shared
+  state) and need no lock.
+- Reader/writer parallelism (concurrent `SELECT`s, per-DB locking) is
+  **P2** — out of scope here; the single internal lock caps DB work at
+  one operation at a time, which is fine for sub-millisecond ops.
+
+### Verified (cyrius 6.1.15, x86_64)
+
+- `cyrius test tests/tcyr/patra.tcyr`: **747 / 747** pass (+4 over
+  v1.10.3 — the `test_concurrency` group: shared-handle open, count
+  survives concurrent writers, all rows present / none lost, no corrupt
+  rows).
+- 6 / 6 fuzz harnesses clean.
+- `cyrius bench tests/bcyr/patra.bcyr`: 36 benchmarks, **no regression**
+  — mutex overhead is within measurement noise (`insert_1k_exec` 20 µs,
+  `insert_1k_prepared` 14 µs; the uncontended `FUTEX_WAKE` on unlock is
+  <2 % of a 20 µs insert and the kernel no-ops it when there are no
+  waiters).
+- Integration: libro 15 / 15, vidya 19 / 19. Lint clean (0 warnings
+  across `src/` + `programs/`).
+- aarch64 cross-build of `src/lib.cyr` clean (futex mutex + `atomic.cyr`
+  carry aarch64 branches; `SYS_FUTEX` = 98 on arm64).
+- DCE demo binary: 237,128 bytes (+5,696 over v1.10.3 — `atomic.cyr` +
+  the mutex helpers and per-entry-point lock wrappers).
+
 ## [1.10.3] - 2026-05-27
 
 **Bind parameters (yeo-cy-test HIGH) — closes the 1.10.x arc.** The final

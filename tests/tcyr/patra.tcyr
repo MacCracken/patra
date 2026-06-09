@@ -2,6 +2,8 @@
 
 include "src/lib.cyr"
 include "lib/assert.cyr"
+include "lib/mmap.cyr"
+include "lib/thread.cyr"
 
 var _tpath = "/tmp/patra_test.patra";
 
@@ -4083,6 +4085,60 @@ fn test_bind_text_into_text_col() {
     patra_close(db);
 }
 
+# -- v1.11.0: thread-safety (yeo-cy-test P1) ------------------
+
+var _cpath = "/tmp/patra_test_conc.patra";
+enum ConcCfg { CONC_K = 4; CONC_M = 250; }
+
+# Worker: hammer the SHARED handle with auto-commit INSERTs. Each call is a
+# full tokenize+parse+exec over the process-global SQL scratch (_sql_pr /
+# _sql_toks). Without the internal mutex the parses clobber each other and
+# the DB corrupts; with it the run is serializable and the count is exact.
+fn _conc_worker(db): i64 {
+    var i = 0;
+    while (i < CONC_M) {
+        patra_exec(db, "INSERT INTO t VALUES (7, 9)");
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn test_concurrency() {
+    test_group("concurrency (P1 shared-handle)");
+    syscall(SYS_UNLINK, _cpath);
+    var db = patra_open(_cpath);
+    assert(db != 0, "open");
+    patra_exec(db, "CREATE TABLE t (id INT, v INT)");
+
+    var ts = fl_alloc(CONC_K * 8);
+    for (var k = 0; k < CONC_K; k = k + 1) {
+        store64(ts + k * 8, thread_create(&_conc_worker, db));
+    }
+    for (var j = 0; j < CONC_K; j = j + 1) {
+        thread_join(load64(ts + j * 8));
+    }
+    fl_free(ts);
+
+    var rs = patra_query(db, "SELECT COUNT(*) FROM t");
+    assert(rs != 0, "count query survives concurrent writers");
+    assert_eq(patra_result_get_int(rs, 0, 0), CONC_K * CONC_M, "all rows present, none lost");
+    patra_result_free(rs);
+
+    # Every row intact — no torn writes from a clobbered parse result.
+    var bad = 0;
+    var rs2 = patra_query(db, "SELECT id, v FROM t");
+    var rows = patra_result_count(rs2);
+    for (var r = 0; r < rows; r = r + 1) {
+        if (patra_result_get_int(rs2, r, 0) != 7) { bad = bad + 1; }
+        if (patra_result_get_int(rs2, r, 1) != 9) { bad = bad + 1; }
+    }
+    patra_result_free(rs2);
+    assert_eq(bad, 0, "no corrupt rows");
+
+    patra_close(db);
+    syscall(SYS_UNLINK, _cpath);
+}
+
 fn main() {
     alloc_init();
     fl_init();
@@ -4331,6 +4387,9 @@ fn main() {
     test_bind_rebind();
     test_bind_errors();
     test_bind_text_into_text_col();
+
+    # v1.11.0 thread-safety (P1)
+    test_concurrency();
 
     cleanup();
     return assert_summary();
