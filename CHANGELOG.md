@@ -5,6 +5,17 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.1] - 2026-06-12
+
+**cyrius pin `6.1.15` → `6.2.1` (ecosystem-wide stdlib pin sweep).**
+
+### Changed
+
+- **cyrius pin → 6.2.1.** No source changes — patra's `[deps] stdlib` carries no
+  carved-out modules, and its sole external dep (sakshi) is unaffected. Verified
+  green on 6.2.1: `cyrius deps` resolves cleanly, full `.tcyr` suite 747/747,
+  bench 1/1, `dist/patra.cyr` regenerated.
+
 ## [1.11.0] - 2026-06-09
 
 **Thread-safety: shared handles are now safe (yeo-cy-test P1).** A patra
