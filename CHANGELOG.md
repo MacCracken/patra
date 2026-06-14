@@ -5,6 +5,33 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.2] - 2026-06-14
+
+**SQL-tokenizer enum namespaced (`TK_*` → `SQLT_*`) to clear a symbol
+collision with co-linked tokenizers.** patra's internal SQL token enum
+in `src/sql.cyr` used unprefixed `TK_*` constants (`TK_IDENT = 2`,
+`TK_COUNT = 36`, …). When patra is co-linked into a binary that also
+pulls a separate tokenizer exporting its own `TK_*` token-kind constants
+(e.g. [vyakarana](https://github.com/MacCracken/vyakarana)'s
+`TK_IDENT = 0` / `TK_COUNT = 10` palette), cyrius's flat symbol namespace
+silently resolves both names to one definition — and unlike duplicate
+`fn`s, an enum-member-vs-`var` collision is **not** warned. The foreign
+values won, so inside patra's SQL parser `TK_IDENT` became `0`, aliasing
+patra's own `TK_EOF = 0`: every SQL identifier tokenized as EOF and
+`sql_parse()` failed on otherwise-valid queries (e.g.
+`SELECT content FROM objects WHERE hash = '…'`), surfacing as
+`patra_query` returning 0. Discovered downstream in owl 1.4.0
+(`sit` library swap, where owl co-links vyakarana + sit→patra).
+
+### Fixed
+
+- **`enum TokType` members renamed `TK_*` → `SQLT_*`** (247 refs, confined
+  to `src/sql.cyr` + the SQL test). Internal-only — no public API change
+  (these constants were never part of patra's exported surface; consumers
+  use `patra_query` / `patra_exec`, not the token enum). Any consumer
+  co-linking patra with another `TK_*`-exporting library is now collision-
+  free. Full `.tcyr` suite 747/747 green; `dist/patra.cyr` regenerated.
+
 ## [1.11.1] - 2026-06-12
 
 **cyrius pin `6.1.15` → `6.2.1` (ecosystem-wide stdlib pin sweep).**

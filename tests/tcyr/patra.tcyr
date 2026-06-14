@@ -112,39 +112,39 @@ fn test_row_encoding() {
 fn test_tokenize() {
     test_group("tokenize");
     sql_tokenize("CREATE TABLE users (id INT, name STR)");
-    assert_eq(_tok_type(0), TK_CREATE, "CREATE");
-    assert_eq(_tok_type(1), TK_TABLE, "TABLE");
-    assert_eq(_tok_type(2), TK_IDENT, "ident users");
-    assert_eq(_tok_type(3), TK_LPAREN, "(");
-    assert_eq(_tok_type(5), TK_KW_INT, "INT");
-    assert_eq(_tok_type(8), TK_KW_STR, "STR");
+    assert_eq(_tok_type(0), SQLT_CREATE, "CREATE");
+    assert_eq(_tok_type(1), SQLT_TABLE, "TABLE");
+    assert_eq(_tok_type(2), SQLT_IDENT, "ident users");
+    assert_eq(_tok_type(3), SQLT_LPAREN, "(");
+    assert_eq(_tok_type(5), SQLT_KW_INT, "INT");
+    assert_eq(_tok_type(8), SQLT_KW_STR, "STR");
     assert_eq(_sql_ntoks, 10, "10 tokens");
 }
 
 fn test_tokenize_v2() {
     test_group("tokenize v0.2");
     sql_tokenize("SELECT * FROM t WHERE id = 1 AND age > 25");
-    assert_eq(_tok_type(4), TK_WHERE, "WHERE");
-    assert_eq(_tok_type(6), TK_EQ, "=");
-    assert_eq(_tok_type(8), TK_AND, "AND");
-    assert_eq(_tok_type(10), TK_GT, ">");
+    assert_eq(_tok_type(4), SQLT_WHERE, "WHERE");
+    assert_eq(_tok_type(6), SQLT_EQ, "=");
+    assert_eq(_tok_type(8), SQLT_AND, "AND");
+    assert_eq(_tok_type(10), SQLT_GT, ">");
 
     sql_tokenize("x != 1 AND y <= 2 AND z >= 3");
-    assert_eq(_tok_type(1), TK_NEQ, "!=");
-    assert_eq(_tok_type(5), TK_LTE, "<=");
-    assert_eq(_tok_type(9), TK_GTE, ">=");
+    assert_eq(_tok_type(1), SQLT_NEQ, "!=");
+    assert_eq(_tok_type(5), SQLT_LTE, "<=");
+    assert_eq(_tok_type(9), SQLT_GTE, ">=");
 
     sql_tokenize("UPDATE t SET x = 1");
-    assert_eq(_tok_type(0), TK_UPDATE, "UPDATE");
-    assert_eq(_tok_type(2), TK_SET, "SET");
+    assert_eq(_tok_type(0), SQLT_UPDATE, "UPDATE");
+    assert_eq(_tok_type(2), SQLT_SET, "SET");
 
     sql_tokenize("DELETE FROM t");
-    assert_eq(_tok_type(0), TK_DELETE, "DELETE");
+    assert_eq(_tok_type(0), SQLT_DELETE, "DELETE");
 
     sql_tokenize("ORDER BY x LIMIT 10");
-    assert_eq(_tok_type(0), TK_ORDER, "ORDER");
-    assert_eq(_tok_type(1), TK_BY, "BY");
-    assert_eq(_tok_type(3), TK_LIMIT, "LIMIT");
+    assert_eq(_tok_type(0), SQLT_ORDER, "ORDER");
+    assert_eq(_tok_type(1), SQLT_BY, "BY");
+    assert_eq(_tok_type(3), SQLT_LIMIT, "LIMIT");
 }
 
 # -- v0.1: SQL parser ----------------------------------------
