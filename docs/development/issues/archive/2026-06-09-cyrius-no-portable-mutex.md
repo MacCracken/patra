@@ -1,7 +1,20 @@
 # cyrius stdlib — no portable cross-platform mutex primitive
 
+> **ARCHIVED 2026-06-17 — RESOLVED upstream in cyrius 6.2.x.** The stdlib now
+> ships `lib/sync.cyr` (+ `sync_macos.cyr` / `sync_windows.cyr`) — a portable
+> process-internal mutex (`mutex_new` / `mutex_lock` / `mutex_unlock`) selected
+> per-OS exactly like `alloc.cyr`, decoupled from the thread-spawn machinery,
+> with a documented memory-ordering contract — i.e. exactly the `lib/sync.cyr`
+> proposed below. `sync.cyr`'s own header cites this issue as its motivation.
+> **patra migrated onto `lib/sync.cyr` in v1.11.4** — `_patra_lock` /
+> `_patra_unlock` now call `mutex_lock` / `mutex_unlock` and `patra_init` uses
+> `mutex_new()`; the hand-rolled inline futex is gone (all gates green, behavior
+> identical on Linux). Filed against 6.1.15 during the v1.11.0 P1 work; P1 was
+> later consumed downstream by yeo-cy-test in v1.11.3.
+
 **Filed:** 2026-06-09 (during patra v1.11.0 thread-safety P1 work)
 **Cyrius version observed:** 6.1.15
+**Cyrius version resolved:** 6.2.x (`lib/sync.cyr` portable mutex)
 **Tool at fault:** stdlib — `lib/thread.cyr` (mutex), `lib/atomic.cyr`, the
 per-platform `syscalls_*` futex constants
 **Severity:** LOW for patra (Linux x86_64 primary + aarch64 best-effort; both

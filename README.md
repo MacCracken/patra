@@ -7,7 +7,11 @@
 - **SQL subset** — CREATE TABLE, CREATE INDEX, ALTER TABLE (ADD / DROP COLUMN + RENAMEs), DROP TABLE, INSERT (with `OR IGNORE`), SELECT (*, column list, aggregates), WHERE (including LIKE), UPDATE, DELETE, ORDER BY, LIMIT, VACUUM
 - **Aggregates** — COUNT(*), SUM, MIN, MAX with WHERE support
 - **B-tree storage** — pages in a single `.patra` file, crash-safe with WAL + flock
+- **Indexes** — B-tree indexes on INT *and* STR columns (STR keys via djb2-64 hash + verify-on-hit)
 - **Transactions** — BEGIN/COMMIT/ROLLBACK with write-ahead logging
+- **Durability modes** — per-write fsync (default) or opt-in group-commit / batched fsync (`patra_set_sync_mode`)
+- **Prepared statements + bind params** — `?` placeholders with `patra_prepare` / `patra_bind_*`; parse-once, dispatch-many
+- **Thread-safe handles** — one db handle is safe to share across threads (auto-commit statement ops are internally serialized; since 1.11.0)
 - **Zero dependencies** — pure Cyrius, no libsqlite3, no FFI
 - **File locking** — `flock` for concurrent process access
 - **JSON Lines mode** — append-only log with structured queries (libro integration)
@@ -31,8 +35,9 @@ patra/
     btree.cyr     — B-tree index (insert, search, delete, iterate)
     page.cyr      — 4KB page layout, read/write, free list
     file.cyr      — .patra file format, header, flock locking
-    where.cyr     — WHERE clause evaluation (=, !=, <, >, <=, >=, AND, OR)
-    row.cyr       — row encoding/decoding (fixed-width fields)
+    where.cyr     — WHERE clause evaluation (=, !=, <, >, <=, >=, LIKE, AND, OR)
+    row.cyr       — row encoding/decoding (fixed-width fields + chain refs)
+    bytes.cyr     — variable-length chain storage (TEXT + BYTES) across overflow pages
     wal.cyr       — write-ahead logging, crash recovery
     jsonl.cyr     — JSON Lines append-only mode (libro compatibility)
 ```
@@ -51,14 +56,18 @@ patra/
 ```cyrius
 include "patra/src/lib.cyr"
 
-# Create
-patra_exec(db, "CREATE TABLE events (id, ts, source, action)", 52);
+patra_init();                              # once, before use (and before threads)
+var db = patra_open("events.patra");
 
-# Insert
-patra_exec(db, "INSERT INTO events VALUES (1, 1712345678, 'daimon', 'start')", 60);
+# Create + insert
+patra_exec(db, "CREATE TABLE events (id INT, ts INT, source STR, action STR)");
+patra_exec(db, "INSERT INTO events VALUES (1, 1712345678, 'daimon', 'start')");
 
-# Query
-var result = patra_query(db, "SELECT * FROM events WHERE source = 'daimon'", 46);
+# Query — returns a result set; read with the patra_result_* accessors, then free
+var result = patra_query(db, "SELECT * FROM events WHERE source = 'daimon'");
+patra_result_free(result);
+
+patra_close(db);
 ```
 
 ### Dependencies
@@ -72,7 +81,7 @@ at patra's pinned tag, or the link fails on the undefined `sakshi_*` symbols:
 ```toml
 [deps.patra]
 git = "https://github.com/MacCracken/patra.git"
-tag = "1.10.0"
+tag = "1.11.3"
 
 # Required alongside patra — patra calls into it but cyrius won't pull it for you.
 [deps.sakshi]
@@ -110,6 +119,7 @@ transactions on a single thread (or guard the span yourself).
 | **agnoshi** | Command history, preferences |
 | **mela** | Marketplace listings |
 | **hoosh** | Model registry, token budgets |
+| **sit** | git-format object store (`hash STR` + `content BYTES`) |
 
 ## SQL Supported
 

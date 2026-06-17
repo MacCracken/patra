@@ -9,7 +9,7 @@
 
 ## Current
 
-- **Version**: 1.11.3 (read `VERSION` for the authoritative number)
+- **Version**: 1.11.4 (read `VERSION` for the authoritative number)
 - **Cyrius toolchain**: 6.2.19 (pinned in `cyrius.cyml [package].cyrius`).
   Progression on the 6.2.x line: 6.1.15 (v1.11.0) → 6.2.1 (v1.11.1, stdlib
   pin sweep) → 6.2.19 (v1.11.3, clears the build-time pin-drift warning
@@ -21,22 +21,24 @@
   downstream consumers must replicate `[deps.sakshi]` alongside
   `[deps.patra]` (cyrius does not resolve transitive deps) — documented
   in README § Dependencies as of v1.10.0.
-- **Binary**: ~237 KB DCE demo (`programs/demo.cyr`, x86_64; 237,128
-  bytes; +5,696 over v1.10.3 — `atomic.cyr` + the futex mutex helpers and
-  per-entry-point lock wrappers). aarch64 cross-build of `src/lib.cyr`
-  produces a valid ARM ELF — the futex mutex + `atomic.cyr` carry aarch64
-  branches (`SYS_FUTEX` = 98 on arm64), so portability holds under 6.1.15.
-- **Status**: **v1.11.3 — write-readback API shipped.**
-  `patra_last_insert_id(db)` (AUTOINCREMENT id of the last successful
-  INSERT, à la `sqlite3_last_insert_rowid`) and `patra_rows_affected(db)`
-  (rows matched by the last INSERT/UPDATE/DELETE, à la `sqlite3_changes`)
-  close the two LOW yeo-cy-test gaps that blocked adopting `AUTOINCREMENT`
-  for insert-then-echo REST handlers. Captured at the
-  `_exec_insert`/`_exec_update`/`_exec_delete` choke points (covers
-  `patra_exec`, prepared, and `patra_insert_row`); DB handle 48 → 64 bytes
-  (`DB_LAST_ID`/`DB_ROWS_AFFECTED`). cyrius pin 6.2.1 → 6.2.19. P1
-  thread-safety (v1.11.0) re-verified by the consumer in a real concurrent
-  workload (250 concurrent POSTs, no external lock). The 1.10.x
+- **Binary**: ~239 KB demo (`programs/demo.cyr`, x86_64; 239,520 bytes at
+  v1.11.4; +240 over v1.11.3 — net wash from the `lib/sync.cyr` swap). Note:
+  `CYRIUS_DCE=1` and non-DCE builds are **byte-identical** under cyrius 6.2.19 —
+  DCE NOP-fills the unreachable fns in place but does not strip them, so the
+  figure is the same either way (see
+  [`../adr/0001-cyrius-5-5-dce-toolchain-limitation.md`](../adr/0001-cyrius-5-5-dce-toolchain-limitation.md),
+  re-verified 2026-06-17). aarch64 cross-build of `src/lib.cyr` produces a valid
+  ARM ELF — `lib/sync.cyr` + `atomic.cyr` carry aarch64 branches
+  (`SYS_FUTEX` = 98 on arm64), so portability holds.
+- **Status**: **v1.11.4 — thread-safety mutex migrated to stdlib `lib/sync.cyr`.**
+  `_patra_lock`/`_patra_unlock` now call the stdlib `mutex_lock`/`mutex_unlock`
+  (`patra_init` allocates via `mutex_new()`), dropping patra's hand-rolled
+  inline futex; behavior identical on Linux, portable backends (Windows
+  `SRWLOCK`, macOS spinlock) for free. Closes the loop on the v1.11.0 P1
+  workaround — patra filed the missing-portable-mutex gap, cyrius 6.2.x shipped
+  `lib/sync.cyr` (its header cites patra's issue), v1.11.4 adopts it. v1.11.3
+  shipped the write-readback API (`patra_last_insert_id` / `patra_rows_affected`,
+  DB handle 48 → 64 B) closing the two LOW yeo-cy-test gaps. The 1.10.x
   data-model/SQL arc (5/5 yeo-cy-test blockers) stays complete. **Open:**
   P2 — concurrent readers / per-DB reader-writer locking (lower priority;
   see [`roadmap.md`](roadmap.md)).
@@ -57,7 +59,7 @@
 
 | File | Lines | Responsibility |
 |------|------:|----------------|
-| `src/lib.cyr` | 2032 | public API + includes (entry point); `patra_insert_row` / `result_read_bytes`; prepared statements (`patra_prepare` / `_exec_prepared` / `_query_prepared` / `_finalize`); column-list INSERT bind (v1.10.0); AUTOINCREMENT + `_max_int_col` (v1.10.1); TEXT insert/update/read (v1.10.2); bind params `patra_bind_int`/`patra_bind_text` + `_apply_binds` (v1.10.3); process-global futex mutex `_patra_mtx` + `_patra_lock`/`_patra_unlock` wrapping the statement entry points (v1.11.0, P1 thread-safety); write-readback `patra_last_insert_id` / `patra_rows_affected` + `_db_record_insert` (v1.11.3, DB handle 48 → 64 B) |
+| `src/lib.cyr` | 2032 | public API + includes (entry point); `patra_insert_row` / `result_read_bytes`; prepared statements (`patra_prepare` / `_exec_prepared` / `_query_prepared` / `_finalize`); column-list INSERT bind (v1.10.0); AUTOINCREMENT + `_max_int_col` (v1.10.1); TEXT insert/update/read (v1.10.2); bind params `patra_bind_int`/`patra_bind_text` + `_apply_binds` (v1.10.3); process-global mutex `_patra_mtx` + `_patra_lock`/`_patra_unlock` wrapping the statement entry points (v1.11.0, P1 thread-safety; migrated to stdlib `lib/sync.cyr` `mutex_*` in v1.11.4); write-readback `patra_last_insert_id` / `patra_rows_affected` + `_db_record_insert` (v1.11.3, DB handle 48 → 64 B) |
 | `src/sql.cyr` | 999 | tokenizer + recursive-descent parser — CREATE / INSERT / SELECT / UPDATE / DELETE / CREATE INDEX / ALTER / VACUUM; INSERT OR IGNORE; column-list INSERT (v1.10.0); AUTOINCREMENT (v1.10.1); TEXT type (v1.10.2); `?` bind placeholders (v1.10.3); aggregates; column-list projection; BYTES / BLOB keyword |
 | `src/btree.cyr` | 505 | B+ tree order-64; insert / split / search / range / lazy delete / compaction / whole-tree free; schema index + autoinc markers (`SCH_IDX_*`, `SCH_AUTOINC_COL`) |
 | `src/table.cyr` | 440 | table create / insert / scan / update / delete + index maintenance + BYTES/TEXT chain cleanup (`_col_is_chain`); TEXT UPDATE rewrite; `_tbl_rows_affected` matched-count handshake (v1.11.3) |
@@ -114,12 +116,14 @@ All git-tag pinned in `cyrius.cyml`. No FFI, no C, no libsqlite3.
 
 **Cyrius stdlib declared explicitly** in `cyrius.cyml [deps].stdlib`:
 `syscalls`, `string`, `alloc`, `freelist`, `io`, `fmt`, `str`, `vec`,
-`atomic`. `atomic` added in v1.11.0 for the futex mutex (`atomic_cas` /
-`atomic_store` / `atomic_fence`). **Consumers vendoring `dist/patra.cyr`
-must replicate `"atomic"` in their own `[deps].stdlib`** (cyrius doesn't
-resolve transitive deps — same constraint as `sakshi`). The unit test
-also pulls `thread` + `mmap`, but those are test-only (not a runtime dep
-of the library).
+`atomic`, `sync`. `atomic` added in v1.11.0 for the thread-safety mutex;
+`sync` added in v1.11.4 when the mutex moved to the stdlib's portable
+`lib/sync.cyr` (`mutex_new` / `mutex_lock` / `mutex_unlock`; `sync` depends
+on `atomic` + `alloc`, both already present). **Consumers vendoring
+`dist/patra.cyr` must replicate `"atomic"` and `"sync"` in their own
+`[deps].stdlib`** (cyrius doesn't resolve transitive deps — same constraint
+as `sakshi`). The unit test also pulls `thread` + `mmap`, but those are
+test-only (not a runtime dep of the library).
 
 ## Storage layout (`.patra` files on disk)
 
@@ -157,6 +161,7 @@ payload at `BY_DATA_MAX = 4072`.
 
 | Version | Date | Summary |
 |---------|------|---------|
+| 1.11.4 | 2026-06-17 | **Thread-safety mutex migrated to stdlib `lib/sync.cyr`.** `_patra_lock`/`_patra_unlock` now call the stdlib portable mutex (`mutex_lock`/`mutex_unlock`; `patra_init` → `mutex_new()`) instead of patra's hand-rolled inline futex — behavior identical on Linux (the stdlib Linux backend is the same `atomic_cas` + `FUTEX_WAIT`/`WAKE` 2-state scheme), with Windows `SRWLOCK` / macOS spinlock backends for free. Closes the v1.11.0 P1 workaround loop (patra filed the missing-portable-mutex gap; cyrius 6.2.x shipped `lib/sync.cyr`, header cites patra's issue). Adds `"sync"` to `[deps].stdlib`. Gates: **772 tests** (incl. `test_concurrency` 4×250 shared-handle stress), 6 fuzz, 36 benchmarks (no regression — `insert_1k` ~21 µs, `insert_1k_prepared` ~14.6 µs), libro 15/15, vidya 19/19, lint clean. `dist/patra.cyr` regenerated. Binary 239,520 bytes. |
 | 1.11.3 | 2026-06-17 | **Write-readback API (yeo-cy-test) + cyrius 6.2.1 → 6.2.19.** `patra_last_insert_id(db)` (AUTOINCREMENT id of the last successful INSERT — auto or explicit — à la `sqlite3_last_insert_rowid`; 0 for none / no autoinc col / ignored OR IGNORE; unmoved by UPDATE/DELETE) and `patra_rows_affected(db)` (rows matched by the last INSERT/UPDATE/DELETE, à la `sqlite3_changes`; 1 on insert, 0 on ignored OR IGNORE, WHERE-count on UPDATE/DELETE) close the two LOW yeo-cy-test gaps that blocked using `AUTOINCREMENT` for insert-then-echo REST handlers. Captured at the `_exec_insert`/`_exec_update`/`_exec_delete` choke points (covers `patra_exec`, prepared, `patra_insert_row`); DB handle 48 → 64 B (`DB_LAST_ID`/`DB_ROWS_AFFECTED`); UPDATE/DELETE counts via `_tbl_rows_affected`. cyrius pin clears the build-time drift warning. Gates: **772 tests** (+25), 6 fuzz, 36 benchmarks (no regression — readback `store64`s within noise; `insert_1k` ~22 µs, `insert_1k_prepared` ~14.7 µs), libro 15/15, vidya 19/19, lint clean. `dist/patra.cyr` at 5311 lines. |
 | 1.11.2 | 2026-06-14 | **SQL-tokenizer enum namespaced `TK_*` → `SQLT_*`.** patra's internal SQL token enum collided with co-linked tokenizers exporting their own `TK_*` (e.g. vyakarana) under cyrius's flat symbol namespace — an enum-member-vs-`var` collision cyrius does **not** warn — so `TK_IDENT` aliased patra's `TK_EOF = 0` and every SQL identifier tokenized as EOF (discovered downstream in owl 1.4.0). Renamed 247 refs, confined to `src/sql.cyr` + the SQL test; internal-only, no public API change. 747/747 green; `dist/patra.cyr` regenerated. |
 | 1.11.1 | 2026-06-12 | **cyrius pin `6.1.15` → `6.2.1` (ecosystem-wide stdlib pin sweep).** No source changes — patra carves out no stdlib modules and its sole external dep (sakshi) is unaffected. Verified green on 6.2.1: `cyrius deps` clean, 747/747, `dist/patra.cyr` regenerated. |

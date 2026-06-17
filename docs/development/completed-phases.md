@@ -1,6 +1,6 @@
 # Patra Completed Phases
 
-> **Last refreshed**: 2026-05-21 (at v1.9.5 cut)
+> **Last refreshed**: 2026-06-17 (at v1.11.3 cut)
 >
 > Narrative summary of shipped milestones and rejected design directions. For the authoritative per-version diff, see [`../../CHANGELOG.md`](../../CHANGELOG.md). Live state lives in [`state.md`](state.md); forward-looking items in [`roadmap.md`](roadmap.md).
 
@@ -17,6 +17,8 @@
 - **v1.7.0 – v1.7.1**: SQL `INSERT OR IGNORE INTO …` (~18× faster than SELECT-then-INSERT on dedup hit). STR-keyed B+ tree indexes (djb2-64 hash + verify-on-hit; unblocks sit's `hash STR` / `path STR` columns).
 - **v1.8.0 – v1.8.3**: Group commit / batched fsync (`PATRA_SYNC_BATCH`, ~64× faster real-disk inserts). Page-slab allocator + word-at-a-time `_memeq256` + prepared statements (1.8.2; ~36% faster repeated INSERT). 1.8.1 toolchain bump to 5.6.39; 1.8.3 release-prep clean.
 - **v1.9.0 – v1.9.5**: 1.9.0 BREAKING `json_build` → `patra_json_build` rename (closes a silent collision with `lib/json.cyr::json_build/1`) + `scripts/version-bump.sh` for lockstep version refs. 1.9.1 aarch64 portability via stdlib `sys_open` / `sys_unlink` wrappers (unblocks yukti / vidya / sit / libro cross-builds). 1.9.2 lint / fmt clean surface (banner-comment unicode → ASCII; 27 more sites onto `sys_close/read/write` wrappers). 1.9.3 sakshi tag 0.9.0 → 2.2.3 and modules-path correction. 1.9.4 stdlib `: i64` return-type annotation pass (cyrius v5.11.x REAL TYPE SYSTEM). 1.9.5 cyrius 6.0.1 pin bump (first major-version cyrius bump; `cc5` → `cycc` rename inherited transparently via the CLI wrapper).
+- **v1.10.0 – v1.10.3**: yeo-cy-test data-model / SQL arc — all 5 SecureYeoman-probe blockers shipped. 1.10.0 column-list INSERT (`INSERT INTO t (a, b) VALUES …`, bind-by-name) + sakshi transitive-dep packaging documented + cyrius 6.0.1 → 6.0.3 (heals the 0-byte-lockfile regression). 1.10.1 AUTOINCREMENT / rowid (`id INT AUTOINCREMENT`, additive `SCH_AUTOINC_COL` marker). 1.10.2 TEXT column type (variable-length SQL-writable text on the BYTES chain infra; lifts the 256-byte STR cap). 1.10.3 bind parameters (`?` + `patra_bind_int` / `patra_bind_text`) — closes the SQL string-injection / escaping hole (bound values written/compared as bytes, never reparsed).
+- **v1.11.0 – v1.11.3**: thread-safety + write-readback. 1.11.0 thread-safety P1 — process-global futex mutex (`_patra_mtx`) serializes every auto-commit statement op so a shared db handle is safe across threads (consumers drop their external `g_db_lock`); adds the `atomic` stdlib dep; cyrius 6.0.3 → 6.1.15. 1.11.1 cyrius pin 6.1.15 → 6.2.1 (ecosystem stdlib pin sweep, no source change). 1.11.2 SQL-tokenizer enum `TK_*` → `SQLT_*` rename (247 refs, internal-only) — clears a flat-namespace symbol collision with co-linked tokenizers (surfaced in owl 1.4.0 via vyakarana). 1.11.3 write-readback `patra_last_insert_id` / `patra_rows_affected` (à la `sqlite3_last_insert_rowid` / `sqlite3_changes`) — closes the two LOW yeo-cy-test gaps blocking `AUTOINCREMENT` for insert-then-echo REST handlers; cyrius 6.2.1 → 6.2.19.
 
 ## Audit slate — closed
 

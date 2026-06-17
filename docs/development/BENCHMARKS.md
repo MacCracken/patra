@@ -11,6 +11,16 @@ Benches under `/tmp` (tmpfs, fdatasync is a no-op) are noted explicitly.
 The group-commit comparison uses a real-disk path (`./bench_groupcommit.patra`,
 btrfs/NVMe under the repo) to avoid hiding the win.
 
+> **Currency note (2026-06-17).** This table is the v1.9.5 / cyrius 6.0.1
+> baseline. Patra is now at **v1.11.3** (cyrius pin **6.2.19**) and the suite
+> has grown to **36 benchmarks** (this table reflects the 35-bench v1.9.5
+> sweep). The 1.10.x / 1.11.x arcs added SQL/data-model surface (column-list
+> INSERT, AUTOINCREMENT, TEXT, bind params, write-readback) and a thread-safety
+> mutex, but no hot-path rewrite since the v1.8.2 perf work — spot re-runs at
+> each release stay within noise of these numbers (e.g. v1.11.3: `insert_1k`
+> ~22 µs, `insert_1k_prepared` ~14.7 µs). A full re-baseline is deferred to the
+> next perf-driven cut; until then read these as the standing reference.
+
 ## SQL parsing
 
 | Bench           | Avg    | Notes |

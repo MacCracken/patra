@@ -13,7 +13,7 @@ Patra is an embedded, single-process database engine. A realistic attacker
 is assumed able to:
 
 - submit arbitrary SQL through the hosting application (libro, vidya,
-  daimon, agnoshi, mela, hoosh),
+  daimon, agnoshi, mela, hoosh, sit),
 - hand-craft a `.patra` file or `.wal` file placed at the path Patra will
   open, and/or
 - race Patra on the local filesystem (planting symlinks, swapping files).

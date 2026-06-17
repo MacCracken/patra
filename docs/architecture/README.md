@@ -26,4 +26,4 @@ Architecture documents capture invariants, constraints, and quirks a reader **ca
 
 | # | Title | Affects | Hook |
 |---|---|---|---|
-| — | [overview.md](overview.md) | All of `src/` | System-level: `.patra` file format header, page layouts (B-tree leaf / internal / JSONL / BYTES chain), BYTES column read/write/free lifecycle, B-tree shape, SQL pipeline, flock concurrency. |
+| — | [overview.md](overview.md) | All of `src/` | System-level: `.patra` file format header, page layouts (B-tree leaf / internal / JSONL / BYTES chain) + page-slab allocator, TEXT/BYTES chain storage, AUTOINCREMENT, B-tree shape + STR-keyed hashing, SQL pipeline + prepared/bind dispatch, concurrency (flock + in-process futex mutex), durability sync modes, write-readback. |

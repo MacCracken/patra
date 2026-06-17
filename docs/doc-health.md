@@ -6,45 +6,44 @@ type: state
 
 # Documentation Health — patra
 
-> **Last refresh**: 2026-05-27 (post-1.10.3 lint review — filed `issues/2026-05-27-cyrius-distlib-blank-lines.md` for the cyrius/language agent; roadmap + state.md footguns updated to reference it. Earlier same-day: the v1.10.3 cut closed the 1.10.x arc, **5 of 5 yeo-cy-test blockers shipped**, queue cleared) | **Refresh cadence**: when docs are touched, update the affected row.
+> **Last refresh**: 2026-06-17 (post-1.11.4 — the full doc sweep reconciled the tree to the 1.11.x line: README de-staled, architecture/overview.md content pass, ADR 0001 re-verified under 6.2.19, no-portable-mutex issue archived, completed-phases extended; then v1.11.4 migrated the mutex to stdlib `lib/sync.cyr` and **restructured the roadmap into a thin backlog index, introducing `requests/`** for one-file-each consumer requests) | **Refresh cadence**: when docs are touched, update the affected row.
 > **Scope**: This repo only (`patra`) — root-level files (README, CHANGELOG, CLAUDE.md, etc.) plus the entire `docs/` tree. Cross-repo cyrius pin / version drift lives in [`development/state.md`](development/state.md), not here.
 
-This is a **ledger**, not a one-time audit. Rewrite-in-place as docs change. Patra's doc surface is small (~17 files) but every file is load-bearing — patra is the database underneath libro, vidya, daimon, agnoshi, mela, hoosh, and sit, and stale invariant docs propagate downstream.
+This is a **ledger**, not a one-time audit. Rewrite-in-place as docs change. Patra's doc surface is small (~21 files) but every file is load-bearing — patra is the database underneath libro, vidya, daimon, agnoshi, mela, hoosh, and sit, and stale invariant docs propagate downstream.
 
 Pattern lifted from [`agnostik/docs/doc-health.md`](https://github.com/MacCracken/agnostik/blob/main/docs/doc-health.md) (same buckets, smaller scale). Convention location is `docs/doc-health.md` — **not** under `development/` — because the ledger sweeps the whole `docs/` tree plus root files; its scope warrants the higher placement (per [first-party-documentation § Development docs](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md#development-docs-docsdevelopment)).
 
 ---
 
-## At a glance — 2026-05-21 inventory
+## At a glance — 2026-06-17 inventory
 
-**~17 markdown files** total (root + `docs/`). Bucket counts after the v1.9.5 conformance pass:
+**~21 markdown files** total (root + `docs/`). Bucket counts after the post-1.11.4 sweep + roadmap restructure:
 
 | Bucket | Count | What it means |
 |---|---|---|
-| ✅ **Fresh / refreshed in this audit** | ~13 | Touched 2026-05-21 in the v1.9.5 cut: CHANGELOG, CLAUDE.md (refactored to durable-only), CONTRIBUTING (cc2 → toolchain-pin), state.md (new), roadmap.md (rewritten through 1.9.5), completed-phases.md (rewritten through 1.9.x), this file, ADR README + template, architecture README, BENCHMARKS.md (re-baselined under cyrius 6.0.1; full 35-bench refresh), issues archive index (new), the archived buffer issue (now carries `ARCHIVED` header pointing at cyrius 6.0.1's 4× cap raise). |
-| 🟡 **Stale — refresh in place** | 0 | None blocking after the v1.9.5 sweep. |
-| 🟠 **Read-through outstanding** | ~3 | `README.md` (no post-1.6 feature mentions — prepared statements, STR-keyed indexes, group-commit mode); `SECURITY.md` (filed at 1.5.3; verify still current under 1.9.x); `docs/architecture/overview.md` (missing 1.7.x / 1.8.x architecture additions — STR-keyed btree hash strategy, group-commit pipeline, page-slab allocator, prepared-statement dispatch). |
+| ✅ **Fresh / refreshed in this sweep** | ~18 | Touched 2026-06-17: CHANGELOG (1.11.3 + 1.11.4 entries), state.md (version/pin/tests/binary/`sync` dep), roadmap.md (restructured into a thin backlog index), the new `requests/` folder (README + the P2 request file + `requests/archive/README`), completed-phases.md (1.10.x + 1.11.x arcs appended), README (3-arg API fix + feature/consumer additions), SECURITY (sit), architecture/overview.md (post-1.6 content pass + 1.11.4 mutex note), architecture/README.md (index hook), ADR 0001 (6.2.19 re-verification), adr/README.md (index row), the archived mutex issue + its archive index, CLAUDE.md (no-narrative pass + version line removed + requests/ pointer), this file. |
+| 🟡 **Stale — refresh in place** | 0 | None outstanding after the sweep. |
+| 🟠 **Read-through outstanding** | 0 | The three prior read-through items (README, SECURITY, architecture/overview.md) all closed in this sweep. |
 | 🔵 **Probably evergreen** | ~2 | `CODE_OF_CONDUCT.md`, `LICENSE`. Re-read pass annually. |
-| 📦 **Archive / frozen by design** | ~3 | `docs/adr/0001-cyrius-5-5-dce-toolchain-limitation.md` (dated ADR; workaround still in place); `docs/audit/2026-04-21/security-review.md` (dated audit, frozen by convention); `docs/development/issues/archive/2026-04-30-cyrius-cyrfmt-cyrlint-buffer-truncation.md` (resolved upstream in cyrius 6.0.1 — buffer 128 KB → 512 KB; carries `ARCHIVED` header). |
-| ❓ **Open strategic question** | 1 | Should `docs/development/BENCHMARKS.md` move to `docs/benchmarks.md` per [first-party-documentation § Benchmarks](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md#benchmarks-and-performance-docs)? See [Open questions](#open-strategic-questions). |
+| 📦 **Archive / frozen by design** | ~4 | `docs/adr/0001-...` (dated ADR; workaround still in place, re-verified under 6.2.19); `docs/audit/2026-04-21/security-review.md` (dated audit, frozen); two resolved-upstream issues under `issues/archive/` (cyrfmt buffer truncation; no-portable-mutex). |
+| ❓ **Open strategic question** | 2 | BENCHMARKS.md placement; `docs/guides/` + `docs/examples/` scaffolding. See [Open questions](#open-strategic-questions). |
 
 ---
 
 ## Cyrius language usage across `docs/`
 
-Patra's cyrius pin jumped **5.11.4 → 6.0.1** in v1.9.5 (named compiler renamed `cc5` → `cycc`, `cc5_aarch64` → `cycc_aarch64`), then **6.0.1 → 6.0.3** in v1.10.0 (patch bump within 6.0.x — no rename; healed the 6.0.1 0-byte-lockfile regression). This invalidates any doc that pins a specific Cyrius version or compiler name. Inventory below — drift surface, not "stale" yet.
+Patra's cyrius pin has advanced **5.11.4 → 6.0.1 (v1.9.5) → 6.0.3 (v1.10.0) → 6.1.15 (v1.11.0) → 6.2.1 (v1.11.1) → 6.2.19 (v1.11.3)**. Any doc that pins a specific cyrius version or compiler name drifts against this. Inventory below.
 
-| Location | Cyrius ref | Status under 6.0.1 | Action |
+| Location | Cyrius ref | Status under 6.2.19 | Action |
 |---|---|---|---|
-| `CONTRIBUTING.md` | ~~`cc2`~~ (pre-cc5 era) | **Fixed** in v1.9.5 — replaced with `cyrius.cyml [package].cyrius` pointer | ✅ |
-| `CLAUDE.md` | `cyrius.cyml [package].cyrius` (no inlined number) | Durable; pointer-only | ✅ |
-| `docs/adr/0001-cyrius-5-5-dce-toolchain-limitation.md` | Cyrius 4.10.3, 5.5.18, 5.5.22 | Frozen by design (dated ADR). If 6.0.1 wires the elimination pass, an `Update: superseded by NNNN` line should land — verify against `CYRIUS_DCE=1` build output | 🟠 Verify DCE behavior under 6.0.1 next cut |
-| `docs/development/BENCHMARKS.md` | Re-baselined 2026-05-21 against cyrius 6.0.1 / patra 1.9.5 | ✅ Fresh under 6.0.1. Two-run full-suite sweep; medians taken. Delta table at the bottom of the file calls out the ~22% `select_where_1k` improvement (compiler-side) and the hardware-class shift on disk-bound benches (faster NVMe → ~6× `insert_500_sync_full` drop) | ✅ |
-| `docs/development/issues/archive/2026-04-30-cyrius-cyrfmt-cyrlint-buffer-truncation.md` | Cyrius 5.7.48 observed, resolved in 6.0.1 | ✅ **Archived 2026-05-21.** Buffer raised 128 KB → 512 KB in cyrius 6.0.1 (verified by feeding 6.6 MB to `cyrfmt`: output now caps at 524,289 bytes, not 131,072). Patra's largest file (130,692 bytes) is well under the new cap. Fixed-buffer shape still exists at 4× the size — re-file if any test crosses 512 KB | ✅ |
-| `scripts/version-bump.sh` | `cc5 --version` (historical context comment) | Historical reference describing pre-5.6.39 cyrius drift. Not actionable; leave as is | ✅ Frozen comment |
+| `CONTRIBUTING.md` | `cyrius.cyml [package].cyrius` pointer | Durable; pointer-only, no inlined number | ✅ |
+| `CLAUDE.md` | `cyrius.cyml [package].cyrius` (no inlined number; version line removed 2026-06-17) | Durable; pointer-only | ✅ |
+| `docs/adr/0001-cyrius-5-5-dce-toolchain-limitation.md` | Cyrius 5.5.18 / 5.5.22 (filing time) | **Re-verified 2026-06-17 under 6.2.19**: DCE NOP-fills unreachable fns but does not strip (DCE-on/off byte-identical), so the size-regression conclusion stands. Present-tense "currently-installed" claim corrected to past tense | ✅ Re-verified, not superseded |
+| `docs/development/BENCHMARKS.md` | Baselined 2026-05-21 against cyrius 6.0.1 / patra 1.9.5 | Numbers are a valid historical baseline; carries a **currency note (2026-06-17)** flagging patra is now 1.11.3 / 6.2.19 and the suite is now 36 benches. No hot-path rewrite since 1.8.2 — spot re-runs stay within noise | ✅ Note added; full re-baseline deferred to next perf cut |
+| `docs/development/issues/archive/2026-04-30-...buffer-truncation.md` | 5.7.48 → resolved 6.0.1 | Archived | ✅ |
+| `docs/development/issues/archive/2026-06-09-...no-portable-mutex.md` | 6.1.15 → resolved 6.2.x (`lib/sync.cyr`) | **Archived 2026-06-17.** cyrius now ships a portable mutex (`lib/sync.cyr` + per-OS variants); `sync.cyr`'s header cites this issue. **Patra migrated onto it in v1.11.4** (hand-rolled inline futex removed) | ✅ |
+| `scripts/version-bump.sh` | `cc5 --version` (historical header comment) | Historical reference; header comments are exempt from the no-narrative rule. Leave | ✅ Frozen comment |
 | Architecture / READMEs | None | No version refs — durable shape | ✅ |
-
-**Net**: no breakages introduced by the 6.0.1 bump; three legacy refs (ADR 0001, BENCHMARKS, the cyrfmt issue) carry context from older toolchains and need re-verification before they decay into actually-wrong territory.
 
 ---
 
@@ -52,14 +51,14 @@ Patra's cyrius pin jumped **5.11.4 → 6.0.1** in v1.9.5 (named compiler renamed
 
 | File | Last touched | Status | Notes |
 |---|---|---|---|
-| `README.md` | 2026-05-27 | 🟠 Read-through | v1.10.0 **Dependencies** + column-list INSERT; v1.10.1 AUTOINCREMENT; v1.10.2 `TEXT` type; v1.10.3 bind-parameters note (`?` + `patra_bind_*`). Still missing: prepared statements (1.8.2), STR-keyed indexes (1.7.1), group-commit / batched-fsync mode (1.8.0); the Usage code block still shows stale 3-arg `patra_exec(db, sql, len)` calls. Refresh slot at next consumer-driven release. |
-| `CHANGELOG.md` | 2026-05-27 | ✅ Fresh | Source of truth for shipped work. Updated through 1.10.3 (incl. a Security section for the bind-param injection fix); full per-version history. |
-| `CLAUDE.md` | 2026-05-21 | ✅ Fresh | Refactored at v1.9.5 to durable-only per [first-party-documentation § CLAUDE.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md#claudemd). Volatile state pointed at `docs/development/state.md`. |
-| `CONTRIBUTING.md` | 2026-05-21 | ✅ Fresh | `cc2` → `cyrius.cyml [package].cyrius` pointer; expanded with deps / fuzz / bench / process steps in v1.9.5. |
-| `SECURITY.md` | 2026-04-30 | 🟠 Read-through | References Patra 1.5.1 / 1.5.2 / 1.5.3 audit slate (closed). Still substantively correct (`jsonl_append_obj_lens`, NFS non-support, audit pointer), but supported-versions table should be re-anchored at the 1.9.x line. |
+| `README.md` | 2026-06-17 | ✅ Fresh | Sweep fixed the load-bearing defect (Usage block had 3-arg `patra_exec(db, sql, len)` + a typeless `CREATE TABLE` — both invalid; now a correct init→open→exec→query→close snippet). Added the missing shipped features to "What It Does" (STR-keyed indexes, durability/group-commit modes, prepared statements + bind params, thread-safe handles), `bytes.cyr` to the module map, `sit` to consumers, and bumped the `[deps.patra]` example tag to 1.11.3. |
+| `CHANGELOG.md` | 2026-06-17 | ✅ Fresh | Source of truth for shipped work. Updated through 1.11.3 (write-readback API + pin 6.2.19). |
+| `CLAUDE.md` | 2026-06-17 | ✅ Fresh | Durable rules only. 2026-06-17: removed the inlined Version line (VERSION file is the source), applied the no-narrative rule (stripped the Scaffolding history), and de-referenced the removed line from the version-bump-script description. |
+| `CONTRIBUTING.md` | 2026-05-21 | ✅ Fresh | `cyrius.cyml [package].cyrius` pointer; deps / fuzz / bench / process steps. No version numbers to rot. |
+| `SECURITY.md` | 2026-06-17 | ✅ Fresh | Substantively current (threat model, WAL-v2 salts, `O_NOFOLLOW`, deployment-support matrix all match source). Sweep added `sit` to the attacker-surface consumer list. The audit-history block is correctly dated 2026-04-21 / 1.5.x and does not claim to be the latest. |
 | `CODE_OF_CONDUCT.md` | 2026-04-30 | 🔵 Evergreen | Standard. |
 | `LICENSE` | (initial) | 🔵 Evergreen | GPL-3.0-only. |
-| `VERSION` | 2026-05-27 | ✅ Fresh | `1.10.3` — matches `cyrius.cyml` (`${file:VERSION}`). |
+| `VERSION` | 2026-06-17 | ✅ Fresh | `1.11.3` — matches `cyrius.cyml` (`${file:VERSION}`). |
 
 ---
 
@@ -67,13 +66,17 @@ Patra's cyrius pin jumped **5.11.4 → 6.0.1** in v1.9.5 (named compiler renamed
 
 | File | Last touched | Status | Notes |
 |---|---|---|---|
-| `state.md` | 2026-05-27 | ✅ Fresh | Bumped at v1.10.3 — version 1.10.3, binary ~231 KB, 743 tests / 36 benchmarks, source line-counts, 1.10.3 release row; status = 1.10.x arc COMPLETE (5/5), back to no-queued-backlog. Refresh every release. |
-| `roadmap.md` | 2026-05-27 | ✅ Fresh | Updated at v1.10.3 — 1.10.x arc complete: all 5 yeo-cy-test blockers shipped (column-list INSERT, sakshi dep, AUTOINCREMENT, TEXT, bind params); queue cleared, back to consumer-driven cadence. |
-| `completed-phases.md` | 2026-05-21 | ✅ Fresh | Rewritten at v1.9.5 — phases extended through 1.9.x; audit slate carried forward; investigated/rejected table preserved. |
-| `BENCHMARKS.md` | 2026-05-21 | ✅ Fresh | Re-baselined under cyrius 6.0.1 / patra 1.9.5. Full 35-bench sweep, two runs, medians taken. Re-baseline notes section calls out tmpfs-bound speedups (compiler-side) vs disk-bound shifts (hardware-class) so consumers don't misread the absolute deltas. |
-| `issues/2026-05-27-cyrius-distlib-blank-lines.md` | 2026-05-27 | 🟠 Open — upstream | **New** at v1.10.3 lint review. `cyrius distlib` emits 3 cyrlint "consecutive blank lines" warnings in `dist/patra.cyr` (header separator + `include`-strip residue). Cosmetic, non-blocking (CI lints `src/`+`programs/`, not `dist/`). Filed for the cyrius/language agent; archive when the distlib blank-collapse fix lands and `cyrius lint dist/patra.cyr` reports 0. |
-| `issues/archive/2026-04-30-cyrius-cyrfmt-cyrlint-buffer-truncation.md` | 2026-05-21 (archived) | 📦 Frozen — RESOLVED | Filed against cyrius 5.7.48; resolved upstream in cyrius 6.0.1 (buffer 128 KB → 512 KB, verified by feeding a 6.6 MB input). Moved to `archive/` with an `ARCHIVED` header at the top preserving the original body verbatim. |
-| `issues/archive/README.md` | 2026-05-21 | ✅ Fresh | **New** — archive index. One row per resolved issue with filed-date / resolved-date / one-line hook. |
+| `state.md` | 2026-06-17 | ✅ Fresh | Bumped at v1.11.4 — version 1.11.4, pin 6.2.19, 772 tests / 6 fuzz / 36 benchmarks, source line-counts, binary 239,520 bytes (with the DCE NOP-not-strip clarification), 1.11.1–1.11.4 release rows, `"sync"` stdlib dep, status = stdlib-mutex migration. Refresh every release. |
+| `roadmap.md` | 2026-06-17 | ✅ Fresh | **Restructured at v1.11.4 into a thin backlog index** — Current bumped to 1.11.4, closed P1 + the shipped sit/yeo-cy-test arcs removed (they live in completed-phases + CHANGELOG), open consumer requests moved to `requests/` (one file each), points into `requests/` + `issues/`. Keeps the consumer-driven philosophy + the internal aarch64 backlog item. |
+| `requests/README.md` | 2026-06-17 | ✅ Fresh | **New at v1.11.4.** Consumer-request folder index + lifecycle (open here → `archive/` on ship) + naming convention; open-requests table. |
+| `requests/2026-06-09-yeo-cy-test-concurrent-readers.md` | 2026-06-17 | 🔵 Open request | **New** — the P2 concurrent-readers request (detail moved out of roadmap). Lower priority; revisit when profiling shows the serialized handle is the bottleneck. |
+| `requests/archive/README.md` | 2026-06-17 | ✅ Fresh | **New at v1.11.4.** Archived-requests index; notes that pre-folder shipped arcs (sit, yeo-cy-test) live in completed-phases (not back-filled — no duplication). Empty index until a request filed into the folder ships. |
+| `completed-phases.md` | 2026-06-17 | ✅ Fresh | Extended through 1.11.3 — appended the v1.10.0–v1.10.3 (yeo-cy-test data-model/SQL arc) and v1.11.0–v1.11.3 (thread-safety + tokenizer-enum rename + write-readback) rows; header re-dated. (v1.11.4 stdlib-mutex migration is a CHANGELOG-level patch; fold into the 1.11.x row at the next phase rewrite.) Append-only/historical. |
+| `BENCHMARKS.md` | 2026-06-17 | ✅ Fresh (baseline + currency note) | Numbers remain the v1.9.5 / cyrius 6.0.1 baseline (still representative — no hot-path rewrite since 1.8.2). Sweep added a currency note (now 1.11.3 / 6.2.19, suite grown 35 → 36). Full re-baseline deferred to the next perf-driven cut. |
+| `issues/2026-05-27-cyrius-distlib-blank-lines.md` | 2026-05-27 | 🟠 Open — upstream | `cyrius distlib` emits 3 cyrlint "consecutive blank lines" warnings in `dist/patra.cyr`. Cosmetic, non-blocking (CI lints `src/`+`programs/`, not `dist/`). Filed for the cyrius/language agent; archive when the distlib blank-collapse fix lands and `cyrius lint dist/patra.cyr` reports 0. Confirmed still open in this sweep. |
+| `issues/archive/2026-06-09-cyrius-no-portable-mutex.md` | 2026-06-17 (archived) | 📦 Frozen — RESOLVED | Filed against cyrius 6.1.15 during the v1.11.0 P1 work (patra hand-rolled an inline futex mutex because the only stdlib lock was bundled in the un-Win32-parseable `thread.cyr`). Resolved upstream: cyrius 6.2.x ships `lib/sync.cyr` (+ `sync_macos`/`sync_windows`) — the lock alone, per-OS, with a stated ordering contract; its header cites this issue. Patra migrated onto `lib/sync.cyr` in v1.11.4 (`_patra_lock`/`_patra_unlock` → `mutex_*`, `patra_init` → `mutex_new()`; inline futex removed). |
+| `issues/archive/2026-04-30-cyrius-cyrfmt-cyrlint-buffer-truncation.md` | 2026-05-21 (archived) | 📦 Frozen — RESOLVED | Filed against cyrius 5.7.48; resolved upstream in cyrius 6.0.1 (buffer 128 KB → 512 KB). |
+| `issues/archive/README.md` | 2026-06-17 | ✅ Fresh | Archive index — added the no-portable-mutex row. |
 
 ---
 
@@ -81,8 +84,8 @@ Patra's cyrius pin jumped **5.11.4 → 6.0.1** in v1.9.5 (named compiler renamed
 
 | File | Last touched | Status | Notes |
 |---|---|---|---|
-| `README.md` | 2026-05-21 | ✅ Fresh | **New** at v1.9.5 — index + conventions for architecture notes. |
-| `overview.md` | 2026-04-30 | 🟠 Read-through | System-level overview: file format, page layouts (incl. BYTES chain), B-tree shape, SQL pipeline, flock concurrency. Missing post-1.6 architecture: STR-keyed btree hash strategy (djb2-64 + verify-on-hit, v1.7.1), group-commit / batched-fsync pipeline (v1.8.0), page-slab allocator + word-at-a-time `_memeq256` (v1.8.2), prepared-statement dispatch (v1.8.2). Schedule a content pass — these are durable architectural invariants, not release-trivia. |
+| `README.md` | 2026-06-17 | ✅ Fresh | Index + conventions. Sweep refreshed the overview hook to reflect the broadened content. |
+| `overview.md` | 2026-06-17 | ✅ Fresh | **Content pass complete** (closes doc-policy commitment #2). Folded in every post-1.6 durable addition: STR-keyed B-tree hashing (djb2-64 + verify-on-hit), TEXT column type, AUTOINCREMENT, page-slab allocator + `_memeq256`, prepared-statement + bind-param dispatch, in-process thread-safety futex mutex (`_patra_mtx`), durability/sync modes, and write-readback. Rounded out the SQL-pipeline branch list. No factually-wrong claims were present beforehand — the gap was incompleteness. |
 
 ---
 
@@ -90,9 +93,9 @@ Patra's cyrius pin jumped **5.11.4 → 6.0.1** in v1.9.5 (named compiler renamed
 
 | File | Last touched | Status | Notes |
 |---|---|---|---|
-| `README.md` | 2026-05-21 | ✅ Fresh | **New** at v1.9.5 — ADR index + conventions + when-to-write guidance. |
-| `template.md` | 2026-05-21 | ✅ Fresh | **New** at v1.9.5 — copyable starting point (Context / Decision / Consequences / Alternatives / References). |
-| `0001-cyrius-5-5-dce-toolchain-limitation.md` | 2026-04-30 | 📦 Frozen — verify next cut | Dated ADR filed at Patra 1.5.0 / Cyrius 5.5.18. Workaround (keep `CYRIUS_DCE=1` for forward-compat) still in place. If cyrius 6.0.1 wires the elimination pass, file a successor ADR marking this `Superseded by NNNN`. |
+| `README.md` | 2026-06-17 | ✅ Fresh | ADR index. Sweep updated the 0001 status/hook to "Accepted — re-verified under 6.2.19" with the NOP-not-strip finding. |
+| `template.md` | 2026-05-21 | ✅ Fresh | Version-agnostic copyable template. |
+| `0001-cyrius-5-5-dce-toolchain-limitation.md` | 2026-06-17 | 📦 Frozen — re-verified | Dated ADR (filed Patra 1.5.0 / cyrius 5.5.18). Re-verified under 6.2.19 per its own Decision §3: DCE now NOP-fills unreachable fns but does **not** strip them (DCE-on/off builds byte-identical at 239,280 bytes), so the size-regression conclusion holds — **not** superseded. Fixed the present-tense "(pinned and currently-installed)" 5.5.x reference. Re-check only if a future cyrius actually shrinks output. |
 
 **ADR posture**: small surface, low decision-velocity. Only architecturally significant calls earn an ADR — minor decisions ride CHANGELOG. Re-evaluate when the ADR series crosses 5 entries.
 
@@ -112,17 +115,14 @@ Date-stamped, frozen by design. Each minor cut runs an audit pass per CLAUDE.md 
 
 ## Open strategic questions
 
-1. **`docs/development/BENCHMARKS.md` placement.** First-party-documentation prescribes `docs/benchmarks.md` (or `BENCHMARKS.md` at root) for native crate perf history; patra has the file at `docs/development/BENCHMARKS.md`. Three options: (a) move to `docs/benchmarks.md` to match the convention, (b) move to `BENCHMARKS.md` at root for release-artifact visibility, (c) leave under `development/` and document the deviation. **Decision deferred** to the next BENCHMARKS refresh (when the table is re-baselined under cyrius 6.0.1).
+1. **`docs/development/BENCHMARKS.md` placement.** First-party-documentation prescribes `docs/benchmarks.md` (or `BENCHMARKS.md` at root) for native crate perf history; patra has the file at `docs/development/BENCHMARKS.md`. Three options: (a) move to `docs/benchmarks.md` to match the convention, (b) move to `BENCHMARKS.md` at root for release-artifact visibility, (c) leave under `development/` and document the deviation. **Decision deferred** to the next BENCHMARKS re-baseline (next perf-driven cut).
 2. **`docs/guides/` and `docs/examples/` scaffolding.** First-party-documentation lists both under the minimum `docs/` tree. Patra's `programs/` directory (`demo.cyr`, `test_libro.cyr`, `test_vidya.cyr`) functionally serves the examples role; the standard explicitly allows `programs/` OR `docs/examples/`. Guides are not yet earned (patra is a single-include library; consumers just `include "dist/patra.cyr"`). **Hold** — earn `docs/guides/` if a consumer asks for an integration walkthrough; otherwise the README's Usage block is the canonical entry point.
 
 ---
 
 ## In-flight (blocked, not stale)
 
-None. Both 2026-05-21-prior in-flight items closed in this same-day refresh:
-
-- ~~**`docs/development/issues/2026-04-30-cyrius-cyrfmt-cyrlint-buffer-truncation.md`**~~ — **archived 2026-05-21.** Resolved upstream in cyrius 6.0.1; buffer raised 128 KB → 512 KB. Moved to [`issues/archive/`](development/issues/archive/).
-- ~~**`docs/development/BENCHMARKS.md`** re-baseline~~ — **completed 2026-05-21.** Full 35-bench sweep run under cyrius 6.0.1 / patra 1.9.5; re-baseline notes section captures the delta vs the 2026-04-24 / 1.8.1 / 5.6.39 table.
+None.
 
 ---
 
@@ -130,9 +130,9 @@ None. Both 2026-05-21-prior in-flight items closed in this same-day refresh:
 
 | # | Commitment | Trigger | Source | Notes |
 |---|---|---|---|---|
-| 1 | **State.md release sync** — bump `docs/development/state.md` every release. Current version, binary size, latest release row, dependency pins, footgun list. | Every release | This file | Release post-hook should automate. If it doesn't, fix the hook. |
-| 2 | **Architecture-overview refresh** — fold 1.7.x / 1.8.x architecture additions (STR-keyed hash + verify-on-hit, group-commit pipeline, page-slab allocator, prepared-statement dispatch) into `docs/architecture/overview.md` next time it's touched. | Next architecture-touching release, or at v2.0 cut | This file | These are durable invariants; they belong in overview.md, not in CHANGELOG narrative. |
-| 3 | **ADR 0001 supersession check** — verify cyrius 6.0.1's `CYRIUS_DCE=1` behavior at the next CI-touching release. If elimination is now wired, file a successor ADR marking 0001 `Superseded by NNNN`. | Next cyrius pin bump | This file | Today the ADR's diagnostic mentioned `: 322 unreachable fns (59889 bytes NOPed)` is shown in the build output — needs side-by-side byte-count check (DCE-on vs DCE-off build) to confirm whether elimination actually runs in 6.0.1. |
+| 1 | **State.md release sync** — bump `docs/development/state.md` every release. Current version, binary size, latest release row, dependency pins, footgun list. | Every release | This file | Release post-hook should automate. **It drifted two patches behind (1.10.3 → live at 1.11.2) before the 1.11.3 cut** — fix the hook so it actually fires, don't hand-maintain. |
+| 2 | ~~**Architecture-overview refresh**~~ | — | This file | ✅ **DONE 2026-06-17.** All 1.7.x–1.11.x durable additions folded into `overview.md` during the doc sweep. |
+| 3 | **ADR 0001 supersession check** — re-verify cyrius DCE behavior at cyrius pin bumps. | Next cyrius pin bump | This file | ✅ Re-verified 2026-06-17 under 6.2.19: DCE NOP-fills but does not strip (byte-identical builds) — conclusion stands, not superseded. Re-check again only if a future cyrius shrinks output. |
 
 ---
 
@@ -149,7 +149,7 @@ When docs are touched:
 
 When the bucket counts at the top drift by more than ~3 in any cell, refresh the at-a-glance table.
 
-This file's refresh cadence is **opportunistic** (touched when other docs are touched), not periodic. The v1.9.5 conformance pass established the baseline; each minor cut's doc-sync step (CLAUDE.md Closeout Pass §8) updates this file alongside CHANGELOG + roadmap + state.md.
+This file's refresh cadence is **opportunistic** (touched when other docs are touched), not periodic. Each minor cut's doc-sync step (CLAUDE.md Closeout Pass §8) updates this file alongside CHANGELOG + roadmap + state.md.
 
 ---
 
@@ -162,4 +162,4 @@ This file's refresh cadence is **opportunistic** (touched when other docs are to
 
 ---
 
-*Last refresh: 2026-05-27 (post-1.10.3 lint review — cyrius distlib blank-line issue filed for upstream; 1.10.x arc complete, 5/5 yeo-cy-test blockers shipped). Refresh in place when docs are touched.*
+*Last refresh: 2026-06-17 (post-1.11.4 — doc sweep reconciled the tree to the 1.11.x line; v1.11.4 migrated the mutex to stdlib `lib/sync.cyr` and restructured the roadmap into a thin backlog index over the new `requests/` folder). Refresh in place when docs are touched.*

@@ -202,7 +202,8 @@ src/
 - [`docs/adr/`](docs/adr/) — architecture decision records. *Why did we choose X over Y?*
 - [`docs/architecture/`](docs/architecture/) — non-obvious constraints and quirks. *What can't I derive from the code alone?*
 - [`docs/audit/`](docs/audit/) — dated security-audit reports
-- [`docs/development/roadmap.md`](docs/development/roadmap.md) — consumer-driven backlog
+- [`docs/development/roadmap.md`](docs/development/roadmap.md) — thin backlog index (points into `requests/` + `issues/`)
+- [`docs/development/requests/`](docs/development/requests/) — consumer requests, one file each (open here; `archive/` on ship). *What did a consumer ask for and why?*
 - [`docs/development/state.md`](docs/development/state.md) — **live state snapshot, refreshed every release**
 - [`docs/development/completed-phases.md`](docs/development/completed-phases.md) — chronological shipped phases + rejected design directions
 - [`docs/development/BENCHMARKS.md`](docs/development/BENCHMARKS.md) — full benchmark table + version-over-version perf history

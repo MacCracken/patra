@@ -30,7 +30,7 @@ modules = [
 ]
 
 [deps]
-stdlib = ["syscalls", "string", "alloc", "freelist", "io", "fmt", "str", "vec", "atomic"]
+stdlib = ["syscalls", "string", "alloc", "freelist", "io", "fmt", "str", "vec", "atomic", "sync"]
 
 # Patra's sole external dep (structured logging: sakshi_error / sakshi_set_level,
 # used in src/file.cyr + src/lib.cyr). Cyrius does not resolve transitive deps,

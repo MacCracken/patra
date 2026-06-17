@@ -1,8 +1,27 @@
 # ADR 0001 — Cyrius 5.5.x DCE is a Toolchain No-op
 
-**Status**: Accepted (workaround in place)
-**Date**: 2026-04-21
+**Status**: Accepted (workaround in place) — re-verified under cyrius 6.2.19 (2026-06-17); behavior changed, conclusion unchanged
+**Date**: 2026-04-21 (re-verified 2026-06-17)
 **Affects**: Patra 1.1.0+ (CI/release pipelines), all `cyrius build` invocations
+
+## Update 2026-06-17 — re-verified under cyrius 6.2.19
+
+The ADR's instruction (Decision §3) was to re-check when the toolchain moved.
+Re-ran the DCE-on vs DCE-off comparison on `programs/demo.cyr` under the
+current pin (cyrius **6.2.19**):
+
+- DCE-off: `note: 358 unreachable fns (67301 bytes — set CYRIUS_DCE=1 to eliminate)`
+- DCE-on (`CYRIUS_DCE=1`): `note: 358 unreachable fns (67301 bytes NOPed)`
+- **Both binaries are byte-identical (239,280 bytes).**
+
+So the diagnostic wording changed (5.5.x "not wired" → 6.2.x "NOPed"), but the
+**binary size is still unchanged by DCE** — the pass now overwrites unreachable
+functions with NOPs in place rather than removing them from the image, so the
+size regression this ADR documents **persists**. Decision stands: keep
+`CYRIUS_DCE=1` (now does NOP-fill, harmless, forward-compatible if a true
+strip pass lands later) and accept the inflated size. **Not** superseded —
+re-file / annotate again only if a future cyrius release actually shrinks the
+output.
 
 ## Context
 
@@ -61,6 +80,6 @@ toolchain-side concern, not a Patra defect.
 
 - Patra CHANGELOG entries for 1.1.0 (DCE introduced) and 1.3.0
   (regression first noted).
-- Cyrius 5.5.18 / 5.5.22 toolchain (pinned and currently-installed).
+- Cyrius 5.5.18 / 5.5.22 toolchain (pinned at filing time; current pin is 6.2.19 — see the 2026-06-17 re-verification above).
 - Compiler diagnostic: `note: N unreachable fns (B bytes — set
   CYRIUS_DCE=1 to eliminate)`.

@@ -5,6 +5,34 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.4] - 2026-06-17
+
+**Thread-safety mutex migrated to stdlib `lib/sync.cyr`.** The process-global
+statement lock (`_patra_mtx`) now uses the cyrius stdlib's portable mutex
+instead of patra's hand-rolled inline futex. Behavior is unchanged on patra's
+Linux targets — the stdlib Linux backend is the same `atomic_cas` +
+`FUTEX_WAIT`/`WAKE` 2-state scheme patra had vendored — but patra now gets the
+per-OS backends (Windows `SRWLOCK`, macOS spinlock) for free and drops a
+maintenance burden. Closes the loop on the v1.11.0 workaround: patra filed the
+"no portable stdlib mutex" gap during P1, cyrius 6.2.x shipped `lib/sync.cyr`
+(its header cites patra's issue), and this release adopts it.
+
+### Changed
+
+- **`_patra_lock` / `_patra_unlock` now call `mutex_lock` / `mutex_unlock`** from
+  `lib/sync.cyr`; `patra_init` allocates the lock via `mutex_new()` instead of
+  `fl_alloc(8)`. The no-init / single-threaded no-op path (lock cell `0`) is
+  unchanged. Adds `"sync"` to `[deps].stdlib` and `include "lib/sync.cyr"` to
+  `src/lib.cyr` (after `atomic`, which `sync` depends on). The inline
+  `atomic_cas` / `SYS_FUTEX` calls are gone from patra's source.
+
+### Gates
+
+- **772 tests** (incl. the `test_concurrency` 4×250 shared-handle stress —
+  exact count, zero torn rows), 6 fuzz, 36 benchmarks (no regression —
+  `insert_1k` ~21 µs, `insert_1k_prepared` ~14.6 µs), libro 15/15, vidya 19/19,
+  lint clean. `dist/patra.cyr` regenerated.
+
 ## [1.11.3] - 2026-06-17
 
 **Write-readback API (yeo-cy-test) + cyrius pin `6.2.1` → `6.2.19`.**
