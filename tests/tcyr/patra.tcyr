@@ -3762,6 +3762,105 @@ fn test_autoinc_persistence() {
     patra_close(db);
 }
 
+# -- v1.11.3: last_insert_id / rows_affected (yeo-cy-test) ----
+
+fn test_last_insert_id() {
+    test_group("last_insert_id");
+    cleanup();
+    var db = patra_open(_tpath);
+    # Fresh handle: nothing inserted yet.
+    assert_eq(patra_last_insert_id(db), 0, "fresh handle => 0");
+    # Null handle is tolerated.
+    assert_eq(patra_last_insert_id(0), 0, "null db => 0");
+
+    patra_exec(db, "CREATE TABLE t (id INT AUTOINCREMENT, name STR)");
+    patra_exec(db, "INSERT INTO t (name) VALUES ('a')");
+    assert_eq(patra_last_insert_id(db), 1, "first auto id = 1");
+    patra_exec(db, "INSERT INTO t (name) VALUES ('b')");
+    assert_eq(patra_last_insert_id(db), 2, "second auto id = 2");
+
+    # Explicit id is reflected too (sqlite3_last_insert_rowid parity).
+    patra_exec(db, "INSERT INTO t VALUES (100, 'c')");
+    assert_eq(patra_last_insert_id(db), 100, "explicit id reflected");
+    # Auto continues from max+1 = 101.
+    patra_exec(db, "INSERT INTO t (name) VALUES ('d')");
+    assert_eq(patra_last_insert_id(db), 101, "auto continues 101");
+
+    # UPDATE / DELETE must not touch last_insert_id.
+    patra_exec(db, "UPDATE t SET name = 'A' WHERE id = 1");
+    assert_eq(patra_last_insert_id(db), 101, "update leaves last id");
+    patra_exec(db, "DELETE FROM t WHERE id = 1");
+    assert_eq(patra_last_insert_id(db), 101, "delete leaves last id");
+
+    # A table without an AUTOINCREMENT column leaves last id unchanged.
+    patra_exec(db, "CREATE TABLE p (x INT, y INT)");
+    patra_exec(db, "INSERT INTO p VALUES (5, 6)");
+    assert_eq(patra_last_insert_id(db), 101, "non-autoinc insert leaves last id");
+    patra_close(db);
+}
+
+fn test_last_insert_id_or_ignore() {
+    test_group("last_insert_id OR IGNORE");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE objs (hash STR, id INT AUTOINCREMENT)");
+    patra_exec(db, "CREATE INDEX ON objs (hash)");
+    patra_exec(db, "INSERT INTO objs (hash) VALUES ('x')");
+    assert_eq(patra_last_insert_id(db), 1, "first id = 1");
+    # A conflicting OR IGNORE is a no-op: last_insert_id must not advance.
+    assert_eq(patra_exec(db, "INSERT OR IGNORE INTO objs (hash) VALUES ('x')"), PATRA_OK, "ignored ok");
+    assert_eq(patra_last_insert_id(db), 1, "ignore leaves last id");
+    # A non-conflicting OR IGNORE does insert and advances it.
+    patra_exec(db, "INSERT OR IGNORE INTO objs (hash) VALUES ('y')");
+    assert_eq(patra_last_insert_id(db), 2, "fresh insert advances to 2");
+    patra_close(db);
+}
+
+fn test_rows_affected() {
+    test_group("rows_affected");
+    cleanup();
+    var db = patra_open(_tpath);
+    assert_eq(patra_rows_affected(db), 0, "fresh handle => 0");
+    assert_eq(patra_rows_affected(0), 0, "null db => 0");
+
+    patra_exec(db, "CREATE TABLE people (id INT, name STR, age INT)");
+    assert_eq(patra_exec(db, "INSERT INTO people VALUES (1, 'alice', 25)"), PATRA_OK, "ins1");
+    assert_eq(patra_rows_affected(db), 1, "insert => 1");
+    patra_exec(db, "INSERT INTO people VALUES (2, 'bob', 25)");
+    patra_exec(db, "INSERT INTO people VALUES (3, 'carol', 40)");
+
+    # Multi-row UPDATE reports the matched count.
+    patra_exec(db, "UPDATE people SET age = 99 WHERE age = 25");
+    assert_eq(patra_rows_affected(db), 2, "update matched 2");
+    # No-match UPDATE reports 0 (the "nothing there" signal the consumer wants).
+    patra_exec(db, "UPDATE people SET age = 0 WHERE id = 999");
+    assert_eq(patra_rows_affected(db), 0, "update matched 0");
+
+    # DELETE reports the deleted count; no-match is 0.
+    patra_exec(db, "DELETE FROM people WHERE age = 99");
+    assert_eq(patra_rows_affected(db), 2, "delete removed 2");
+    patra_exec(db, "DELETE FROM people WHERE id = 999");
+    assert_eq(patra_rows_affected(db), 0, "delete removed 0");
+    patra_close(db);
+}
+
+fn test_rows_affected_or_ignore() {
+    test_group("rows_affected OR IGNORE");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE objs (hash STR, val INT)");
+    patra_exec(db, "CREATE INDEX ON objs (hash)");
+    patra_exec(db, "INSERT INTO objs VALUES ('a', 1)");
+    assert_eq(patra_rows_affected(db), 1, "first insert => 1");
+    # Conflicting OR IGNORE inserts nothing.
+    assert_eq(patra_exec(db, "INSERT OR IGNORE INTO objs VALUES ('a', 2)"), PATRA_OK, "ignored ok");
+    assert_eq(patra_rows_affected(db), 0, "ignored insert => 0");
+    # Non-conflicting OR IGNORE inserts.
+    patra_exec(db, "INSERT OR IGNORE INTO objs VALUES ('b', 3)");
+    assert_eq(patra_rows_affected(db), 1, "fresh insert => 1");
+    patra_close(db);
+}
+
 # -- v1.10.2: TEXT column type -------------------------------
 
 # Build "INSERT INTO bigt (body) VALUES ('<n × ch>')" and exec it. `ch` must be
@@ -4366,6 +4465,12 @@ fn main() {
     test_autoinc_explicit_and_zero();
     test_autoinc_reseed_after_delete();
     test_autoinc_persistence();
+
+    # v1.11.3 last_insert_id / rows_affected (yeo-cy-test)
+    test_last_insert_id();
+    test_last_insert_id_or_ignore();
+    test_rows_affected();
+    test_rows_affected_or_ignore();
 
     # v1.10.2 TEXT column type
     test_parse_text();

@@ -158,6 +158,13 @@ patra_finalize(st);
 
 `?` works in `INSERT` values, `WHERE` values, and `UPDATE … SET` values. Bound values are written/compared as bytes and never reparsed as SQL, so quotes and other metacharacters can't escape — this is the safe way to store arbitrary free text (a string literal would truncate or inject at the first `'`). Bind buffers must stay valid until the prepared statement runs; a statement containing `?` can't be passed to `patra_exec` / `patra_query` directly (it returns `PATRA_ERR_PARAM`).
 
+**Write readback** — after a write, two accessors report what it did (mirroring `sqlite3_last_insert_rowid` / `sqlite3_changes`):
+
+- `patra_last_insert_id(db)` — the `AUTOINCREMENT` id (auto-assigned or explicit) of the most recent successful `INSERT` on the handle. `0` if no INSERT has succeeded yet or the table has no `AUTOINCREMENT` column. An ignored `INSERT OR IGNORE` does not advance it, and `UPDATE` / `DELETE` leave it untouched — so an insert-then-return handler can `INSERT` then echo the created row's id without a racy `SELECT MAX(id)`.
+- `patra_rows_affected(db)` — rows matched by the most recent `INSERT` / `UPDATE` / `DELETE`: `1` for a successful INSERT, `0` for an ignored `INSERT OR IGNORE`, and the WHERE-matched count for `UPDATE` / `DELETE` (so a `PUT` / `DELETE` can tell "updated" from "nothing there").
+
+Both read handle-local state set at exec time and are unaffected by `SELECT` / DDL; a null handle returns `0`.
+
 ## Build
 
 ```

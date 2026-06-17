@@ -5,6 +5,51 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.3] - 2026-06-17
+
+**Write-readback API (yeo-cy-test) + cyrius pin `6.2.1` → `6.2.19`.**
+The yeo-cy-test probe (full-stack SecureYeoman slice) re-ran on patra 1.11.2
+and confirmed thread-safety P1 holds in a real concurrent consumer (250
+concurrent POSTs → 250 unique ids, no external lock). It filed two LOW
+"what did that write do?" gaps that block adopting `AUTOINCREMENT` for the
+common insert-then-echo REST shape. Both are closed here — additive, no
+format change, no public-API break.
+
+### Added
+
+- **`patra_last_insert_id(db)`** — the `AUTOINCREMENT` id of the most recent
+  successful `INSERT` on the handle (auto-assigned or explicitly supplied), à
+  la `sqlite3_last_insert_rowid`. Returns 0 on a fresh handle, a null handle,
+  or when the last INSERT targeted a table with no `AUTOINCREMENT` column. An
+  ignored `INSERT OR IGNORE` does not advance it; `UPDATE` / `DELETE` leave it
+  untouched. Lets consumers drop the app-side id counter and use
+  `AUTOINCREMENT` for `201`-with-created-row handlers (the gap that kept
+  yeo-cy-test on explicit app-assigned ids).
+- **`patra_rows_affected(db)`** — rows matched by the most recent
+  `INSERT` / `UPDATE` / `DELETE`, à la `sqlite3_changes`. A successful INSERT
+  is 1; an ignored `INSERT OR IGNORE` is 0; `UPDATE` / `DELETE` report the
+  WHERE-matched count. Lets a `PUT` / `DELETE` handler distinguish "updated"
+  from "nothing there" without a pre-`SELECT` existence probe.
+  Both readbacks are captured at the `_exec_insert` / `_exec_update` /
+  `_exec_delete` choke points, so they cover `patra_exec`, prepared
+  statements, and `patra_insert_row` alike. New handle fields `DB_LAST_ID` /
+  `DB_ROWS_AFFECTED` (DB handle 48 → 64 bytes); `tbl_update` / `tbl_delete`
+  surface their matched count via `_tbl_rows_affected`.
+
+### Changed
+
+- **cyrius pin `6.2.1` → `6.2.19`.** No source change required for the bump
+  itself (clears the build-time pin-drift warning against the installed
+  6.2.19 toolchain).
+
+### Gates
+
+- **772 tests** (+25: `last_insert_id`, `last_insert_id OR IGNORE`,
+  `rows_affected`, `rows_affected OR IGNORE`), 6 fuzz, 36 benchmarks (no
+  regression — `insert_1k` ~22 µs, `insert_1k_prepared` ~14.7 µs, the
+  readback `store64`s within noise), libro 15/15, vidya 19/19, lint clean.
+  `dist/patra.cyr` regenerated.
+
 ## [1.11.2] - 2026-06-14
 
 **SQL-tokenizer enum namespaced (`TK_*` → `SQLT_*`) to clear a symbol

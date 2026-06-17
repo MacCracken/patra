@@ -109,6 +109,37 @@ Both items below name that concrete limit. Full write-up:
   after P1 lands and profiling shows the serialized handle is the bottleneck
   (yeo-cy-test's DB ops are sub-millisecond, so the P1 mutex is fine for now).
 
+### From yeo-cy-test (P1 consumed + two findings shipped in 1.11.3, 2026-06-17)
+
+yeo-cy-test re-ran on patra **1.11.2** (cyrius 6.2.18) and **consumed P1**: it
+deleted its app-level `g_db_lock` and now calls patra directly from the worker
+pool, allocating its own row ids lock-free with `atomic_fetch_add`. Re-verified
+downstream: 250 concurrent POSTs → 250 unique contiguous ids, 0 errors, no
+external lock; a slow client holding 2/4 workers leaves `/api/health` at ~10 ms.
+So P1's stated guarantee holds in a real concurrent consumer. Full write-up:
+[`secureyeoman/yeo-cy-test/FINDINGS.md`](../../../secureyeoman/yeo-cy-test/FINDINGS.md).
+
+- ✅ **`last_insert_id` — SHIPPED (1.11.3) as `patra_last_insert_id(db)`.**
+  With P1 done, the natural next cleanup downstream was to drop the app-side
+  `g_next_id` counter entirely and let patra assign ids via `AUTOINCREMENT`
+  (shipped 1.10.1). That stalled on one missing piece: there was no way to read
+  back the id patra just auto-assigned, so an insert-then-echo REST handler (the
+  common shape — return the created row with its id in the `201`) would have had
+  to issue a racy `SELECT MAX(id)`. `patra_last_insert_id(db)` (à la
+  `sqlite3_last_insert_rowid`) closes it: the `AUTOINCREMENT` id (auto-assigned
+  or explicit) of the most recent successful INSERT on the handle, 0 if none /
+  no autoinc column, unmoved by an ignored `INSERT OR IGNORE` or by
+  `UPDATE` / `DELETE`. `AUTOINCREMENT` is now usable for the insert-then-return
+  pattern.
+- ✅ **`rows_affected` — SHIPPED (1.11.3) as `patra_rows_affected(db)`.** A bare
+  `UPDATE` / `DELETE` on a non-existent id returned `PATRA_OK` with no way to
+  learn that zero rows matched, so a `PUT` / `DELETE` handler couldn't tell
+  "updated" from "nothing there" without a pre-`SELECT` existence probe.
+  `patra_rows_affected(db)` (à la `sqlite3_changes`) reports the WHERE-matched
+  count of the most recent write (1 for a successful INSERT, 0 for an ignored
+  `INSERT OR IGNORE`). Pairs with `last_insert_id` as the "what did that write
+  do?" readback REST handlers need.
+
 ### Pre-existing (toolchain, not consumer-filed)
 
 - **`programs/` aarch64 cross-build** — the three test programs in `programs/` (`demo.cyr`, `test_libro.cyr`, `test_vidya.cyr`) still use raw `syscall(SYS_UNLINK, …)`; the v1.9.1 wrapper migration covered `src/*.cyr` but not the demo harness. Cross-build of `src/lib.cyr` is clean; only the test binaries break under `--aarch64`. Folds into the next consumer-driven release if an aarch64-CI consumer asks for it.

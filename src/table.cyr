@@ -4,6 +4,12 @@ var _tbl_last_ref = 0;
 var _tbl_lp_idx = 0 - 1;
 var _tbl_lp_page = 0;
 
+# Rows matched by the most recent tbl_update / tbl_delete. lib.cyr lifts this
+# into the db handle's DB_ROWS_AFFECTED after a successful exec (the DB struct
+# lives in lib.cyr, which is included last — same global-handshake pattern as
+# _tbl_last_ref). v1.11.3, yeo-cy-test changes()-style readback.
+var _tbl_rows_affected = 0;
+
 fn _tbl_entry(hdr, idx): i64 {
     return hdr + HDR_TBLDIR + idx * TBL_ENTRY_SZ;
 }
@@ -278,6 +284,7 @@ fn tbl_update(fd, hdr, idx, row_sz, schema, ncols, pr): i64 {
     var cur = load64(entry + TBL_ROOT);
     var buf = pg_alloc();
     var nsets = load64(pr + PR_COUNT);
+    _tbl_rows_affected = 0;
 
     # Check if indexed column is being updated
     var uic = load64(schema + SCH_IDX_COL);
@@ -356,6 +363,7 @@ fn tbl_update(fd, hdr, idx, row_sz, schema, ncols, pr): i64 {
                     }
                 }
                 modified = 1;
+                _tbl_rows_affected = _tbl_rows_affected + 1;
             }
         }
 
@@ -425,6 +433,7 @@ fn tbl_delete(fd, hdr, idx, row_sz, schema, ncols, pr): i64 {
 
     var rc = load64(entry + TBL_NROWS);
     store64(entry + TBL_NROWS, rc - deleted);
+    _tbl_rows_affected = deleted;
 
     pg_free(buf);
     return PATRA_OK;
