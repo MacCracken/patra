@@ -50,13 +50,7 @@ if [ -f cyrius.cyml ]; then
     sed -i "s/^version = \"$OLD\"/version = \"$NEW\"/" cyrius.cyml
 fi
 
-# 3. CLAUDE.md `- **Version**: X.Y.Z` line (cyrius's CLAUDE.md
-#    pattern; patra adopted it pre-v1.8.x).
-if [ -f CLAUDE.md ]; then
-    sed -i "s/^- \*\*Version\*\*: $OLD$/- **Version**: $NEW/" CLAUDE.md
-fi
-
-# 4. CHANGELOG.md — add a dated stub if no entry for $NEW yet.
+# 3. CHANGELOG.md — add a dated stub if no entry for $NEW yet.
 #    Inserts the stub after the file header (line containing
 #    "Semantic Versioning"). The stub is intentionally empty so
 #    the human author writes the actual Fixed/Changed/Added
@@ -85,8 +79,6 @@ echo "$OLD -> $NEW"
 echo ""
 echo "Updated:"
 echo "  VERSION"
-echo "  cyrius.cyml (package.version)"
-echo "  CLAUDE.md (Version line)"
 if grep -q "## \[$NEW\]" CHANGELOG.md 2>/dev/null; then
     echo "  CHANGELOG.md ([$NEW] entry)"
 fi

@@ -15,7 +15,6 @@
 - **Type**: Shared library — database engine for the sovereign stack
 - **License**: GPL-3.0-only
 - **Language**: Cyrius (toolchain pinned in `cyrius.cyml [package].cyrius`)
-- **Version**: `VERSION` at the project root is the source of truth — do not inline the number here
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-standards.md) · [First-Party Documentation](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md)
 - **Shared crates**: [shared-crates.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/shared-crates.md)
@@ -39,10 +38,8 @@ Own the database. Zero deps. Pure Cyrius. SQL + B-tree + JSONL in a single `incl
 
 ## Scaffolding
 
-Project pre-dates `cyrius init`; structure was hand-built and reconciled
-back to first-party-standards layout. **Do not manually create new
-project structure** — use the tools where they apply. If the tools are
-missing something, fix the tools.
+**Do not manually create new project structure** — use the tools where
+they apply. If the tools are missing something, fix the tools.
 
 ## Quick Start
 
@@ -198,7 +195,7 @@ src/
   - `.github/workflows/release.yml` — version gate → CI gate → DCE build → artifacts (source tarball, bundled `dist/patra.cyr`, DCE demo binary, SHA256SUMS)
 - **Concurrency**: CI uses `cancel-in-progress: true` keyed on workflow + ref
 - **State sync**: release post-hook should bump `docs/development/state.md` (version, binary size, test/bench counts, latest release row). If the hook doesn't, fix the hook — don't hand-maintain state
-- **Version-bump script**: `./scripts/version-bump.sh X.Y.Z` keeps `VERSION` + `cyrius.cyml package.version` + `CLAUDE.md` Version line + a CHANGELOG stub in lockstep. Bumping the cyrius pin is still manual (separate from package version)
+- **Version-bump script**: `./scripts/version-bump.sh X.Y.Z` writes `VERSION` (the single source of truth — `cyrius.cyml package.version` tracks it via `${file:VERSION}`) and adds a CHANGELOG stub. Bumping the cyrius pin is still manual (separate from package version)
 
 ## Docs
 
