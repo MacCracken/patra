@@ -15,6 +15,7 @@ Patra has no speculative feature backlog. Work lands when a consumer hits a conc
 **Consumer requests** — detail in [`requests/`](requests/):
 
 - 🔵 **P2 — concurrent readers** (yeo-cy-test, lower priority). One internal lock serializes all DB work, so a read-heavy server gets no cross-core read parallelism. Wanted: reader/writer lock around the pager, or connection-per-thread. Only worth it once profiling shows the serialized handle is the bottleneck. → [`requests/2026-06-09-yeo-cy-test-concurrent-readers.md`](requests/2026-06-09-yeo-cy-test-concurrent-readers.md)
+- 🔵 **Atomic insert-returning-id** (yeo-cy-test, medium priority). `last_insert_id`/`rows_affected` (shipped 1.11.3) read shared-handle fields, so the insert + readback aren't atomic across concurrent workers — the echo can return another worker's id (tight window; stress-tested 24×2400, not reproduced, but real by inspection). Wanted: an insert that returns its assigned id (and a write that returns its affected-count) atomically under the statement mutex, or `INSERT … RETURNING id`. Gates clean `last_insert_id` use for concurrent inserts. → [`requests/2026-06-18-yeo-cy-test-insert-returning-id.md`](requests/2026-06-18-yeo-cy-test-insert-returning-id.md)
 
 **Internal / toolchain** (not consumer-filed):
 

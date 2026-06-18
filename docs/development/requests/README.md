@@ -30,3 +30,4 @@ the `issues/` convention.
 | File | Filed | Consumer | Blocker |
 |---|---|---|---|
 | [`2026-06-09-yeo-cy-test-concurrent-readers.md`](2026-06-09-yeo-cy-test-concurrent-readers.md) | 2026-06-09 | yeo-cy-test | P2 — one internal lock serializes all DB work; a read-heavy server gets no cross-core read parallelism. Lower priority (only worth it once profiling shows the serialized handle is the bottleneck). |
+| [`2026-06-18-yeo-cy-test-insert-returning-id.md`](2026-06-18-yeo-cy-test-insert-returning-id.md) | 2026-06-18 | yeo-cy-test | `last_insert_id`/`rows_affected` (1.11.3) read shared-handle fields, so the insert + readback aren't atomic across concurrent workers — the echo can return another worker's id. Wanted: an atomic insert-returning-id (or affected-count). Medium priority; gates clean `last_insert_id` use for concurrent inserts. |
