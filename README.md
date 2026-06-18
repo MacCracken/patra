@@ -175,6 +175,13 @@ patra_finalize(st);
 
 Both read handle-local state set at exec time and are unaffected by `SELECT` / DDL; a null handle returns `0`.
 
+**Atomic readback (concurrent writers)** — `patra_last_insert_id` / `patra_rows_affected` read handle-local fields in a *separate* call from the write. Under a lock-free worker pool sharing one handle, a concurrent write can land between the two and overwrite the field, so the readback can return another worker's value. For that model, use the atomic variants, which capture the value inside the same statement-mutex critical section as the write:
+
+- `patra_insert_returning(db, stmt, out_id)` — run a prepared `INSERT` and write its assigned id to `out_id` (a writable i64 cell; pass `0` to ignore). Returns the exec status. Equivalent to `patra_exec_prepared` + `patra_last_insert_id`, but race-free across concurrent writers; only meaningful on an `AUTOINCREMENT` target.
+- `patra_exec_returning(db, stmt, out_affected)` — run a prepared `INSERT` / `UPDATE` / `DELETE` and write its affected-row count to `out_affected`. The race-free pairing of `patra_rows_affected`.
+
+On a non-`PATRA_OK` status both write `0` to the out-param.
+
 ## Build
 
 ```

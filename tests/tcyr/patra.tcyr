@@ -3861,6 +3861,101 @@ fn test_rows_affected_or_ignore() {
     patra_close(db);
 }
 
+# -- v1.11.5: atomic insert/exec returning (yeo-cy-test) -----
+
+fn test_insert_returning() {
+    test_group("insert_returning");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (id INT AUTOINCREMENT, name STR)");
+    var id = fl_alloc(8);
+
+    var ins = patra_prepare(db, "INSERT INTO t (name) VALUES ('a')");
+    assert_eq(patra_insert_returning(db, ins, id), PATRA_OK, "ins ok");
+    assert_eq(load64(id), 1, "returns assigned id 1");
+    # Same value as the separate readback, and atomic with the write.
+    assert_eq(patra_last_insert_id(db), 1, "last_insert_id agrees");
+    assert_eq(patra_insert_returning(db, ins, id), PATRA_OK, "ins ok 2");
+    assert_eq(load64(id), 2, "returns assigned id 2");
+    patra_finalize(ins);
+
+    # out_id = 0 is tolerated (caller only wants the status).
+    var ins3 = patra_prepare(db, "INSERT INTO t (name) VALUES ('c')");
+    assert_eq(patra_insert_returning(db, ins3, 0), PATRA_OK, "null out_id ok");
+    assert_eq(patra_last_insert_id(db), 3, "id advanced to 3");
+    patra_finalize(ins3);
+
+    # Non-AUTOINCREMENT table: like patra_last_insert_id, the field is left at
+    # the prior INSERT's id (3) — patra_insert_returning is only meaningful on
+    # an AUTOINCREMENT target.
+    patra_exec(db, "CREATE TABLE p (x INT, y INT)");
+    var insp = patra_prepare(db, "INSERT INTO p VALUES (5, 6)");
+    store64(id, 99);
+    assert_eq(patra_insert_returning(db, insp, id), PATRA_OK, "ins p ok");
+    assert_eq(load64(id), 3, "non-autoinc leaves prior id (mirrors last_insert_id)");
+    patra_finalize(insp);
+
+    # Null handle: status error, out_id zeroed (no stale value leaks).
+    store64(id, 77);
+    assert_eq(patra_insert_returning(0, ins, id), PATRA_ERR_IO, "null db => IO err");
+    assert_eq(load64(id), 0, "out_id zeroed on error");
+    fl_free(id);
+    patra_close(db);
+}
+
+fn test_insert_returning_or_ignore() {
+    test_group("insert_returning OR IGNORE");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE objs (hash STR, id INT AUTOINCREMENT)");
+    patra_exec(db, "CREATE INDEX ON objs (hash)");
+    var id = fl_alloc(8);
+
+    var ins = patra_prepare(db, "INSERT OR IGNORE INTO objs (hash) VALUES ('x')");
+    assert_eq(patra_insert_returning(db, ins, id), PATRA_OK, "first ok");
+    assert_eq(load64(id), 1, "first id = 1");
+    # Conflicting OR IGNORE: no row stored, id must not advance.
+    assert_eq(patra_insert_returning(db, ins, id), PATRA_OK, "ignored ok");
+    assert_eq(load64(id), 1, "ignored leaves id at 1");
+    patra_finalize(ins);
+    fl_free(id);
+    patra_close(db);
+}
+
+fn test_exec_returning() {
+    test_group("exec_returning");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE people (id INT, name STR, age INT)");
+    patra_exec(db, "INSERT INTO people VALUES (1, 'a', 25)");
+    patra_exec(db, "INSERT INTO people VALUES (2, 'b', 25)");
+    patra_exec(db, "INSERT INTO people VALUES (3, 'c', 40)");
+    var n = fl_alloc(8);
+
+    var upd = patra_prepare(db, "UPDATE people SET age = 99 WHERE age = 25");
+    assert_eq(patra_exec_returning(db, upd, n), PATRA_OK, "update ok");
+    assert_eq(load64(n), 2, "update matched 2");
+    patra_finalize(upd);
+
+    var del = patra_prepare(db, "DELETE FROM people WHERE id = 999");
+    assert_eq(patra_exec_returning(db, del, n), PATRA_OK, "delete ok");
+    assert_eq(load64(n), 0, "delete matched 0");
+    patra_finalize(del);
+
+    # A successful INSERT reports 1; out_affected = 0 tolerated.
+    var ins = patra_prepare(db, "INSERT INTO people VALUES (4, 'd', 50)");
+    assert_eq(patra_exec_returning(db, ins, 0), PATRA_OK, "null out ok");
+    assert_eq(patra_rows_affected(db), 1, "insert affected 1");
+
+    # Null handle: status error, out_affected zeroed (no stale value leaks).
+    store64(n, 55);
+    assert_eq(patra_exec_returning(0, ins, n), PATRA_ERR_IO, "null db => IO err");
+    assert_eq(load64(n), 0, "out_affected zeroed on error");
+    patra_finalize(ins);
+    fl_free(n);
+    patra_close(db);
+}
+
 # -- v1.10.2: TEXT column type -------------------------------
 
 # Build "INSERT INTO bigt (body) VALUES ('<n × ch>')" and exec it. `ch` must be
@@ -4471,6 +4566,11 @@ fn main() {
     test_last_insert_id_or_ignore();
     test_rows_affected();
     test_rows_affected_or_ignore();
+
+    # v1.11.5 atomic insert/exec returning (yeo-cy-test)
+    test_insert_returning();
+    test_insert_returning_or_ignore();
+    test_exec_returning();
 
     # v1.10.2 TEXT column type
     test_parse_text();

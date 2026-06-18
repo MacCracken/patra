@@ -22,4 +22,4 @@ and the CHANGELOG:
 
 | File | Filed | Shipped | Hook |
 |---|---|---|---|
-| _(none yet — requests filed into this folder move here on ship)_ | | | |
+| [`2026-06-18-yeo-cy-test-insert-returning-id.md`](2026-06-18-yeo-cy-test-insert-returning-id.md) | 2026-06-18 | v1.11.5 | Atomic `patra_insert_returning` / `patra_exec_returning` — read the assigned id / affected-count inside the write's statement-mutex critical section, closing the v1.11.3 readback race for concurrent writers on a shared handle. |

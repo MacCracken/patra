@@ -5,6 +5,49 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.5] - 2026-06-18
+
+**Atomic insert-returning-id (yeo-cy-test) + cyrius pin `6.2.19` → `6.2.21`.**
+Closes the readback race the consumer flagged after adopting the v1.11.3
+write-readback API. `patra_exec_prepared` + `patra_last_insert_id` are two
+ops: under a lock-free worker pool sharing one handle, a concurrent INSERT can
+land between them and overwrite `DB_LAST_ID`, so the echo can return another
+worker's id (same hazard for `rows_affected` after a concurrent UPDATE /
+DELETE). The stored rows were always uniquely id'd — only the readback raced —
+but it was a real correctness hazard by inspection. The fix captures the field
+*inside* the same statement-mutex critical section as the write. Additive, no
+format change, no public-API break.
+
+### Added
+
+- **`patra_insert_returning(db, stmt, out_id)`** — execute a prepared INSERT
+  and atomically read back its assigned `AUTOINCREMENT` id (auto or explicit)
+  into `out_id` (a writable i64 cell; pass `0` to ignore). Returns the exec
+  status. The id mirrors `patra_last_insert_id` exactly — a non-AUTOINCREMENT
+  INSERT leaves it at the prior value, so the call is only meaningful on an
+  AUTOINCREMENT target. Race-free replacement for `patra_exec_prepared` +
+  `patra_last_insert_id` when concurrent writers share a handle.
+- **`patra_exec_returning(db, stmt, out_affected)`** — execute a prepared
+  INSERT / UPDATE / DELETE and atomically read back its affected-row count into
+  `out_affected` (pass `0` to ignore). The race-free pairing of
+  `patra_rows_affected` for concurrent UPDATE / DELETE under a shared handle.
+  On a non-`PATRA_OK` status both APIs write `0` to the out-param (no stale
+  value leaks).
+
+### Changed
+
+- **cyrius toolchain pin `6.2.19` → `6.2.21`.** Clears the build-time
+  pin-drift warning against the installed toolchain; source-change-free for the
+  toolchain itself (build, tests, fuzz, benchmarks, libro/vidya integration all
+  green either way).
+
+### Gates
+
+- **795 tests** (+23: `insert_returning`, `insert_returning OR IGNORE`,
+  `exec_returning`), 6 fuzz, 36 benchmarks (no regression — `insert_1k`
+  ~21 µs, `insert_1k_prepared` ~15.3 µs), libro 15/15, vidya 19/19, lint clean.
+  `dist/patra.cyr` regenerated.
+
 ## [1.11.4] - 2026-06-17
 
 **Thread-safety mutex migrated to stdlib `lib/sync.cyr`.** The process-global

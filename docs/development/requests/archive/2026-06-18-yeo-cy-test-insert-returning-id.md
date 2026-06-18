@@ -1,14 +1,22 @@
 # Atomic insert-returning-id (race-free id/affected readback for concurrent writers)
 
+> **SHIPPED v1.11.5 (2026-06-18).** `patra_insert_returning(db, stmt, out_id)`
+> and `patra_exec_returning(db, stmt, out_affected)` capture the assigned id /
+> affected-count *inside* the same statement-mutex critical section as the
+> write — race-free under a shared handle with concurrent writers. The
+> `last_insert_id` / `rows_affected` field semantics are unchanged; these are
+> the atomic read-it-with-the-write variants. See
+> [`../../../../CHANGELOG.md`](../../../../CHANGELOG.md) § 1.11.5.
+
 **Filed:** 2026-06-18 (yeo-cy-test upstream-adoption pass)
 **Consumer:** yeo-cy-test (SecureYeoman → Cyrius port probe)
-**Status:** Open — medium priority
+**Status:** Shipped v1.11.5
 **Related:** `patra_last_insert_id` / `patra_rows_affected` shipped v1.11.3 (this
-consumer's readback ask) — see [`../../../CHANGELOG.md`](../../../CHANGELOG.md).
+consumer's readback ask) — see [`../../../../CHANGELOG.md`](../../../../CHANGELOG.md).
 P1 shared-handle thread-safety shipped v1.11.0; pairs with the still-open
-[`2026-06-09-yeo-cy-test-concurrent-readers.md`](2026-06-09-yeo-cy-test-concurrent-readers.md)
+[`../2026-06-09-yeo-cy-test-concurrent-readers.md`](../2026-06-09-yeo-cy-test-concurrent-readers.md)
 (both are "the shared handle under N workers" surface). Full consumer write-up:
-[`secureyeoman/yeo-cy-test/FINDINGS.md`](../../../../secureyeoman/yeo-cy-test/FINDINGS.md).
+[`secureyeoman/yeo-cy-test/FINDINGS.md`](../../../../../secureyeoman/yeo-cy-test/FINDINGS.md).
 
 ## The limit
 
