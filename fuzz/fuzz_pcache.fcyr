@@ -1,0 +1,88 @@
+# fuzz_pcache.fcyr -- shared page-cache (src/pcache.cyr) invariants
+#
+# Drives a long pseudo-random sequence of _pc_put / _pc_get / _pc_evict /
+# _pc_check over a small page-number domain, checking every HIT against a
+# shadow model:
+#   (1) a hit must return the page it was asked for (tail marker == page#);
+#   (2) a hit's content must equal the MOST RECENT put for that page;
+#   (3) a hit may only happen while the page is "live" — put since the last
+#       evict(page) / generation flush.
+# Misses are always allowed (the cache may drop a page on a full probe window).
+# A violation exits non-zero. Exercises dedupe-on-put, probe-with-holes (evict),
+# and the generation gate. Deterministic LCG — no Math.random.
+
+include "src/lib.cyr"
+
+enum FzConst { FZ_DOM = 64; FZ_ITERS = 200000; }
+
+var _fz_lastval = 0;   # marker of the most recent put per page (1..FZ_DOM)
+var _fz_live = 0;      # 1 if the page is retrievable (put since evict/flush)
+
+fn _fz_run(): i64 {
+    _fz_lastval = alloc((FZ_DOM + 1) * 8);
+    _fz_live = alloc((FZ_DOM + 1) * 8);
+    var buf = pg_alloc();
+    var out = pg_alloc();
+
+    var z = 0;
+    while (z <= FZ_DOM) {
+        store64(_fz_lastval + z * 8, 0);
+        store64(_fz_live + z * 8, 0);
+        z = z + 1;
+    }
+
+    var seed = 0x9E3779B97F4A7C15;
+    var gen = 0;
+    var vctr = 1;
+    var n = 0;
+    while (n < FZ_ITERS) {
+        seed = seed * 6364136223846793005 + 1442695040888963407;
+        var op = (seed >> 40) & 7;
+        var page = ((seed >> 8) & (FZ_DOM - 1)) + 1;
+
+        if (op < 4) {
+            var hit = _pc_get(page, out);
+            if (hit != 0) {
+                if (load64(out + 4088) != page) { syscall(SYS_EXIT, 41); }
+                if (load64(out) != load64(_fz_lastval + page * 8)) { syscall(SYS_EXIT, 42); }
+                if (load64(_fz_live + page * 8) == 0) { syscall(SYS_EXIT, 43); }
+            }
+        }
+        if (op == 4) {
+            store64(buf, vctr);
+            store64(buf + 4088, page);
+            _pc_put(page, buf);
+            store64(_fz_lastval + page * 8, vctr);
+            store64(_fz_live + page * 8, 1);
+            vctr = vctr + 1;
+        }
+        if (op == 5) {
+            _pc_evict(page);
+            store64(_fz_live + page * 8, 0);
+        }
+        if (op == 6) {
+            _pc_check(gen);
+        }
+        if (op == 7) {
+            gen = gen + 1;
+            _pc_check(gen);
+            var j = 0;
+            while (j <= FZ_DOM) {
+                store64(_fz_live + j * 8, 0);
+                j = j + 1;
+            }
+        }
+        n = n + 1;
+    }
+
+    pg_free(buf);
+    pg_free(out);
+    return 0;
+}
+
+alloc_init();
+fl_init();
+patra_init();
+patra_cache_enable(1);
+_fz_run();
+syscall(SYS_EXIT, 0);

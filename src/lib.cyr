@@ -15,11 +15,13 @@ include "lib/str.cyr"
 include "lib/vec.cyr"
 include "lib/atomic.cyr"
 include "lib/sync.cyr"
+include "lib/thread_local.cyr"
 include "lib/sakshi.cyr"
 
 # ── Modules (order matters: sql before where before table) ──
 
 include "src/file.cyr"
+include "src/pcache.cyr"
 include "src/wal.cyr"
 include "src/page.cyr"
 include "src/row.cyr"
@@ -66,22 +68,24 @@ enum RsOff {
 
 # ── Thread safety (v1.11.0, yeo-cy-test P1) ────────────────────
 #
-# The SQL parse/exec path uses process-global scratch (`_sql_toks`,
-# `_sql_pr` in sql.cyr) shared across ALL db handles in the process —
-# so two threads calling patra_exec / patra_query / a prepared statement
-# at the same time clobber each other's tokens + parse result, even on
-# different databases. `_patra_mtx` is a process-global mutex from the
-# stdlib `lib/sync.cyr` (portable, per-OS backend: Linux futex / Windows
+# The SQL parse/exec path used process-global scratch (`_sql_toks` / `_spr()`
+# in sql.cyr) shared across ALL db handles in the process — so two threads
+# calling patra_exec / patra_query / a prepared statement at the same time
+# clobbered each other's tokens + parse result, even on different databases.
+# P1 (v1.11.0) papered over this with `_patra_mtx`, a process-global mutex from
+# the stdlib `lib/sync.cyr` (portable, per-OS backend: Linux futex / Windows
 # SRWLOCK / macOS spinlock) that serializes every self-contained statement
 # operation. Before v1.11.4 patra hand-rolled this futex inline (the stdlib
 # had no standalone lock — see
 # issues/archive/2026-06-09-cyrius-no-portable-mutex.md); cyrius 6.2.x
 # shipped `lib/sync.cyr`, so patra now uses it. Behavior is unchanged on
 # patra's Linux targets (same atomic_cas + FUTEX_WAIT/WAKE 2-state scheme).
-# Because the racing scratch is process-global, the lock is too: a per-DB
-# lock would leave a two-handle data race. Hold time is the whole
-# tokenize+parse+exec, so concurrent ops are memory-safe and serializable
-# (the P1 minimum bar). Reader/writer parallelism + per-DB locking is P2.
+#
+# P2 (v1.12.0) lifts the serialization for readers. Step 1 (this change) made
+# the parse scratch PER-THREAD (TLS slots, sql.cyr) so concurrent parses no
+# longer collide; the statement mutex is still held on every op for now and is
+# dropped on the read path (patra_query / patra_query_prepared) in a later step
+# once the page slab and freelist are also thread-safe. Writers stay serialized.
 #
 # Caveat (documented): per-call locking makes each auto-commit statement
 # atomic, but does NOT make an explicit BEGIN…COMMIT span atomic across
@@ -111,6 +115,13 @@ fn _patra_unlock(): i64 {
 
 # Initialize patra (call once before use, before spawning threads)
 fn patra_init(): i64 {
+    # Install this (main/foreign) thread's TLS block so the per-thread SQL
+    # parse scratch (sql.cyr) resolves. Worker threads spawned via
+    # lib/thread.cyr get their block free via CLONE_SETTLS — they must NOT
+    # call thread_local_init. Must precede _sql_init (which seeds slot state).
+    thread_local_init();
+    _pt_alloc_mtx = mutex_new();
+    _pc_init();
     _sql_init();
     _patra_mtx = mutex_new();
     sakshi_set_level(SK_WARN);
@@ -156,9 +167,9 @@ fn patra_open(path): i64 {
     # WAL recovery
     wal_recover(fd, wpath);
 
-    var db = fl_alloc(DB_SZ);
+    var db = _pt_alloc(DB_SZ);
     var hdr = pg_alloc();
-    patra_hdr_read(fd, hdr);
+    _pc_refresh(fd, hdr);
     store64(db + DB_FD, fd);
     store64(db + DB_HDR, hdr);
     store64(db + DB_PATH, wpath);
@@ -179,12 +190,24 @@ fn patra_close(db): i64 {
     }
     pg_free(load64(db + DB_HDR));
     sys_close(fd);
-    fl_free(db);
+    _pt_free(db);
     return 0;
 }
 
 fn _db_fd(db): i64 { return load64(db + DB_FD); }
 fn _db_hdr(db): i64 { return load64(db + DB_HDR); }
+
+# P2: re-read the on-disk header AND run the shared page cache's generation
+# gate. Every locked op (read query + every write exec) calls this right after
+# taking its flock, so a commit by ANOTHER handle or process (which bumped the
+# on-disk HDR_COMMITGEN) forces a cache flush before this op trusts a cached
+# page. Same-process writers keep the cache coherent via page_write eviction +
+# _pc_set_gen, so the common case finds gen == _pc_gen and does not flush.
+fn _pc_refresh(fd, hdr): i64 {
+    patra_hdr_read(fd, hdr);
+    _pc_check(load64(hdr + HDR_COMMITGEN));
+    return 0;
+}
 
 # ── Write readback (v1.11.3, yeo-cy-test) ────────────────────
 #
@@ -249,6 +272,17 @@ fn patra_flush(db): i64 {
 # header without syncing, increments the pending counter, and triggers
 # an auto-flush every PATRA_BATCH_FLUSH_N writes to bound the crash window.
 fn _db_hdr_commit(db, fd, hdr): i64 {
+    # P2: bump the commit generation before persisting the header. Every
+    # auto-commit mutation flows through here, so the on-disk gen strictly
+    # increases per committed change — readers compare it to detect another
+    # handle's / process's writes and flush the shared page cache. SELECT never
+    # reaches this; rollback re-reads (no write), so neither advances the gen.
+    # _pc_set_gen labels the in-process cache with the new gen so a same-process
+    # reader (whose changed pages were already evicted by page_write) doesn't
+    # needlessly flush — only a cross-process bump trips _pc_check's != flush.
+    var _cg = load64(hdr + HDR_COMMITGEN) + 1;
+    store64(hdr + HDR_COMMITGEN, _cg);
+    _pc_set_gen(_cg);
     if (load64(db + DB_SYNC_MODE) == PATRA_SYNC_BATCH) {
         var r = patra_hdr_write_nosync(fd, hdr);
         if (r != PATRA_OK) { return r; }
@@ -270,23 +304,23 @@ fn _exec_create(db): i64 {
     var hdr = _db_hdr(db);
 
     patra_lock_ex(fd);
-    patra_hdr_read(fd, hdr);
+    _pc_refresh(fd, hdr);
 
-    var ncols = load64(_sql_pr + PR_COUNT);
-    var names = fl_alloc(ncols * 16);
-    var types = fl_alloc(ncols * 8);
+    var ncols = load64(_spr() + PR_COUNT);
+    var names = _pt_alloc(ncols * 16);
+    var types = _pt_alloc(ncols * 8);
 
     for (var i = 0; i < ncols; i = i + 1) {
-        var item = _sql_pr + PR_ITEMS + i * CR_SZ;
+        var item = _spr() + PR_ITEMS + i * CR_SZ;
         store64(names + i * 16, load64(item + CR_NPTR));
         store64(names + i * 16 + 8, load64(item + CR_NLEN));
         store64(types + i * 8, load64(item + CR_TYPE));
     }
 
-    var r = tbl_create(fd, hdr, load64(_sql_pr + PR_TNAME),
-    load64(_sql_pr + PR_TNLEN), names, types, ncols, load64(_sql_pr + PR_AUTOINC));
-    fl_free(names);
-    fl_free(types);
+    var r = tbl_create(fd, hdr, load64(_spr() + PR_TNAME),
+    load64(_spr() + PR_TNLEN), names, types, ncols, load64(_spr() + PR_AUTOINC));
+    _pt_free(names);
+    _pt_free(types);
 
     if (r == PATRA_OK) { _db_hdr_commit(db, fd, hdr); }
     patra_unlock(fd);
@@ -323,10 +357,10 @@ fn _exec_insert(db): i64 {
     var hdr = _db_hdr(db);
 
     patra_lock_ex(fd);
-    patra_hdr_read(fd, hdr);
+    _pc_refresh(fd, hdr);
 
-    var tname = load64(_sql_pr + PR_TNAME);
-    var tnlen = load64(_sql_pr + PR_TNLEN);
+    var tname = load64(_spr() + PR_TNAME);
+    var tnlen = load64(_spr() + PR_TNLEN);
     var idx = tbl_find(hdr, tname, tnlen);
     if (idx < 0) {
         patra_unlock(fd);
@@ -339,8 +373,8 @@ fn _exec_insert(db): i64 {
     page_read(fd, spg, schema);
 
     var ncols = load64(schema + SCH_NCOLS);
-    var nvals = load64(_sql_pr + PR_COUNT);
-    var ins_nc = load64(_sql_pr + PR_INS_NCOLS);
+    var nvals = load64(_spr() + PR_COUNT);
+    var ins_nc = load64(_spr() + PR_INS_NCOLS);
 
     # Positional INSERT supplies one value per schema column in declaration
     # order; column-list INSERT (INSERT INTO t (a, b) VALUES ...) supplies one
@@ -361,21 +395,21 @@ fn _exec_insert(db): i64 {
     }
 
     var rsz = row_compute_size(schema, ncols);
-    var row = fl_alloc(rsz);
+    var row = _pt_alloc(rsz);
     memset(row, 0, rsz);
 
     for (var i = 0; i < nvals; i = i + 1) {
-        var item = _sql_pr + PR_ITEMS + i * IR_SZ;
+        var item = _spr() + PR_ITEMS + i * IR_SZ;
         var vtype = load64(item + IR_TYPE);
         # Target column: positional binds value i to column i; column-list binds
         # value i to its i-th named column. Columns left unnamed keep the
         # zero/empty default from the memset above.
         var ci = i;
         if (ins_nc != 0) {
-            var citem = _sql_pr + PR_INS_COLS + i * INSCOL_SZ;
+            var citem = _spr() + PR_INS_COLS + i * INSCOL_SZ;
             ci = _wh_resolve_col(schema, ncols, load64(citem + INSCOL_PTR), load64(citem + INSCOL_LEN));
             if (ci < 0) {
-                fl_free(row);
+                _pt_free(row);
                 pg_free(schema);
                 patra_unlock(fd);
                 return PATRA_ERR_NOTFOUND;
@@ -386,7 +420,7 @@ fn _exec_insert(db): i64 {
 
         if (vtype == COL_INT) {
             if (ctype != COL_INT) {
-                fl_free(row);
+                _pt_free(row);
                 pg_free(schema);
                 patra_unlock(fd);
                 return PATRA_ERR_TYPE;
@@ -403,7 +437,7 @@ fn _exec_insert(db): i64 {
                 var thead = _bytes_write_chain(fd, hdr, load64(item + IR_SPTR), tlen);
                 row_write_bytes_ref(row, off, thead, tlen);
             } else {
-                fl_free(row);
+                _pt_free(row);
                 pg_free(schema);
                 patra_unlock(fd);
                 return PATRA_ERR_TYPE;
@@ -433,7 +467,7 @@ fn _exec_insert(db): i64 {
     # STR-indexed cols are hash-keyed: btree_search returns candidates, then
     # we byte-compare the 256-byte slot in each candidate row to filter false
     # positives from hash collisions.
-    if (load64(_sql_pr + PR_INSERT_IGNORE) != 0) {
+    if (load64(_spr() + PR_INSERT_IGNORE) != 0) {
         var iic = load64(schema + SCH_IDX_COL);
         if (iic >= 0) {
             if (iic < ncols) {
@@ -443,11 +477,11 @@ fn _exec_insert(db): i64 {
                     var ictype = load64(schema + SCH_START + iic * SCH_ENTRY_SZ + SCH_CTYPE);
                     var ihit = 0;
                     if (ictype == COL_INT) {
-                        var probe = fl_alloc(8);
+                        var probe = _pt_alloc(8);
                         if (btree_search(fd, hdr, iir, pkey, probe, 1) > 0) { ihit = 1; }
-                        fl_free(probe);
+                        _pt_free(probe);
                     } else {
-                        var refs = fl_alloc(256 * 8);
+                        var refs = _pt_alloc(256 * 8);
                         var nrefs = btree_search(fd, hdr, iir, pkey, refs, 256);
                         var icoff = row_field_offset(schema, ncols, iic);
                         var pbuf = pg_alloc();
@@ -466,13 +500,13 @@ fn _exec_insert(db): i64 {
                             }
                         }
                         pg_free(pbuf);
-                        fl_free(refs);
+                        _pt_free(refs);
                     }
                     if (ihit != 0) {
                         # Row is being skipped — reclaim any TEXT/BYTES chains
                         # the bind loop already wrote so they don't orphan.
                         _tbl_free_row_bytes(fd, hdr, row, schema, ncols);
-                        fl_free(row);
+                        _pt_free(row);
                         pg_free(schema);
                         store64(db + DB_ROWS_AFFECTED, 0);
                         patra_unlock(fd);
@@ -505,7 +539,7 @@ fn _exec_insert(db): i64 {
         }
     }
 
-    fl_free(row);
+    _pt_free(row);
     pg_free(schema);
 
     if (r == PATRA_OK) { _db_hdr_commit(db, fd, hdr); }
@@ -520,10 +554,10 @@ fn _exec_update(db): i64 {
     var hdr = _db_hdr(db);
 
     patra_lock_ex(fd);
-    patra_hdr_read(fd, hdr);
+    _pc_refresh(fd, hdr);
 
-    var tname = load64(_sql_pr + PR_TNAME);
-    var tnlen = load64(_sql_pr + PR_TNLEN);
+    var tname = load64(_spr() + PR_TNAME);
+    var tnlen = load64(_spr() + PR_TNLEN);
     var idx = tbl_find(hdr, tname, tnlen);
     if (idx < 0) {
         patra_unlock(fd);
@@ -537,7 +571,7 @@ fn _exec_update(db): i64 {
     var ncols = load64(schema + SCH_NCOLS);
     var rsz = row_compute_size(schema, ncols);
 
-    var r = tbl_update(fd, hdr, idx, rsz, schema, ncols, _sql_pr);
+    var r = tbl_update(fd, hdr, idx, rsz, schema, ncols, _spr());
 
     # Write schema page if index root may have changed
     if (r == PATRA_OK) {
@@ -557,10 +591,10 @@ fn _exec_delete(db): i64 {
     var hdr = _db_hdr(db);
 
     patra_lock_ex(fd);
-    patra_hdr_read(fd, hdr);
+    _pc_refresh(fd, hdr);
 
-    var tname = load64(_sql_pr + PR_TNAME);
-    var tnlen = load64(_sql_pr + PR_TNLEN);
+    var tname = load64(_spr() + PR_TNAME);
+    var tnlen = load64(_spr() + PR_TNLEN);
     var idx = tbl_find(hdr, tname, tnlen);
     if (idx < 0) {
         patra_unlock(fd);
@@ -574,7 +608,7 @@ fn _exec_delete(db): i64 {
     var ncols = load64(schema + SCH_NCOLS);
     var rsz = row_compute_size(schema, ncols);
 
-    var r = tbl_delete(fd, hdr, idx, rsz, schema, ncols, _sql_pr);
+    var r = tbl_delete(fd, hdr, idx, rsz, schema, ncols, _spr());
     if (r == PATRA_OK) { store64(db + DB_ROWS_AFFECTED, _tbl_rows_affected); }
     pg_free(schema);
 
@@ -590,10 +624,10 @@ fn _exec_drop(db): i64 {
     var hdr = _db_hdr(db);
 
     patra_lock_ex(fd);
-    patra_hdr_read(fd, hdr);
+    _pc_refresh(fd, hdr);
 
-    var tname = load64(_sql_pr + PR_TNAME);
-    var tnlen = load64(_sql_pr + PR_TNLEN);
+    var tname = load64(_spr() + PR_TNAME);
+    var tnlen = load64(_spr() + PR_TNLEN);
     var idx = tbl_find(hdr, tname, tnlen);
     if (idx < 0) {
         patra_unlock(fd);
@@ -614,14 +648,14 @@ fn _exec_alter_rename_tbl(db): i64 {
     var hdr = _db_hdr(db);
 
     patra_lock_ex(fd);
-    patra_hdr_read(fd, hdr);
+    _pc_refresh(fd, hdr);
 
-    var tname = load64(_sql_pr + PR_TNAME);
-    var tnlen = load64(_sql_pr + PR_TNLEN);
+    var tname = load64(_spr() + PR_TNAME);
+    var tnlen = load64(_spr() + PR_TNLEN);
     var idx = tbl_find(hdr, tname, tnlen);
     if (idx < 0) { patra_unlock(fd); return PATRA_ERR_NOTFOUND; }
 
-    var it = _sql_pr + PR_ITEMS;
+    var it = _spr() + PR_ITEMS;
     var new_ptr = load64(it + CR_NPTR);
     var new_len = load64(it + CR_NLEN);
 
@@ -649,10 +683,10 @@ fn _exec_alter_rename_col(db): i64 {
     var hdr = _db_hdr(db);
 
     patra_lock_ex(fd);
-    patra_hdr_read(fd, hdr);
+    _pc_refresh(fd, hdr);
 
-    var tname = load64(_sql_pr + PR_TNAME);
-    var tnlen = load64(_sql_pr + PR_TNLEN);
+    var tname = load64(_spr() + PR_TNAME);
+    var tnlen = load64(_spr() + PR_TNLEN);
     var idx = tbl_find(hdr, tname, tnlen);
     if (idx < 0) { patra_unlock(fd); return PATRA_ERR_NOTFOUND; }
 
@@ -662,8 +696,8 @@ fn _exec_alter_rename_col(db): i64 {
     page_read(fd, spg, schema);
     var ncols = load64(schema + SCH_NCOLS);
 
-    var it_old = _sql_pr + PR_ITEMS;
-    var it_new = _sql_pr + PR_ITEMS + CR_SZ;
+    var it_old = _spr() + PR_ITEMS;
+    var it_new = _spr() + PR_ITEMS + CR_SZ;
     var old_ptr = load64(it_old + CR_NPTR);
     var old_len = load64(it_old + CR_NLEN);
     var new_ptr = load64(it_new + CR_NPTR);
@@ -704,10 +738,10 @@ fn _exec_alter_add(db): i64 {
     var hdr = _db_hdr(db);
 
     patra_lock_ex(fd);
-    patra_hdr_read(fd, hdr);
+    _pc_refresh(fd, hdr);
 
-    var tname = load64(_sql_pr + PR_TNAME);
-    var tnlen = load64(_sql_pr + PR_TNLEN);
+    var tname = load64(_spr() + PR_TNAME);
+    var tnlen = load64(_spr() + PR_TNLEN);
     var idx = tbl_find(hdr, tname, tnlen);
     if (idx < 0) { patra_unlock(fd); return PATRA_ERR_NOTFOUND; }
 
@@ -722,7 +756,7 @@ fn _exec_alter_add(db): i64 {
         return PATRA_ERR_COLCOUNT;
     }
 
-    var it = _sql_pr + PR_ITEMS;
+    var it = _spr() + PR_ITEMS;
     var nc_ptr = load64(it + CR_NPTR);
     var nc_len = load64(it + CR_NLEN);
     var nc_type = load64(it + CR_TYPE);
@@ -741,7 +775,7 @@ fn _exec_alter_add(db): i64 {
     # Stage rows into a scratch buffer with the default (zero) trailing field
     var scratch = 0;
     if (nrows > 0) {
-        scratch = fl_alloc(nrows * rsz_new);
+        scratch = _pt_alloc(nrows * rsz_new);
         memset(scratch, 0, nrows * rsz_new);
     }
     var buf = pg_alloc();
@@ -817,7 +851,7 @@ fn _exec_alter_add(db): i64 {
     }
 
     page_write(fd, spg, schema);
-    if (nrows > 0) { fl_free(scratch); }
+    if (nrows > 0) { _pt_free(scratch); }
     pg_free(schema);
     _db_hdr_commit(db, fd, hdr);
     patra_unlock(fd);
@@ -835,10 +869,10 @@ fn _exec_alter_drop_col(db): i64 {
     var hdr = _db_hdr(db);
 
     patra_lock_ex(fd);
-    patra_hdr_read(fd, hdr);
+    _pc_refresh(fd, hdr);
 
-    var tname = load64(_sql_pr + PR_TNAME);
-    var tnlen = load64(_sql_pr + PR_TNLEN);
+    var tname = load64(_spr() + PR_TNAME);
+    var tnlen = load64(_spr() + PR_TNLEN);
     var idx = tbl_find(hdr, tname, tnlen);
     if (idx < 0) { patra_unlock(fd); return PATRA_ERR_NOTFOUND; }
 
@@ -853,7 +887,7 @@ fn _exec_alter_drop_col(db): i64 {
         return PATRA_ERR_COLCOUNT;
     }
 
-    var it = _sql_pr + PR_ITEMS;
+    var it = _spr() + PR_ITEMS;
     var dc_ptr = load64(it + CR_NPTR);
     var dc_len = load64(it + CR_NLEN);
     var di = _wh_resolve_col(schema, ncols_old, dc_ptr, dc_len);
@@ -877,7 +911,7 @@ fn _exec_alter_drop_col(db): i64 {
     # the ref bytes (page, length) are preserved by the memcpy-around-drop.
     var scratch = 0;
     if (nrows > 0) {
-        scratch = fl_alloc(nrows * rsz_new);
+        scratch = _pt_alloc(nrows * rsz_new);
         memset(scratch, 0, nrows * rsz_new);
     }
     var buf = pg_alloc();
@@ -970,7 +1004,7 @@ fn _exec_alter_drop_col(db): i64 {
     }
 
     page_write(fd, spg, schema);
-    if (nrows > 0) { fl_free(scratch); }
+    if (nrows > 0) { _pt_free(scratch); }
     pg_free(schema);
     _db_hdr_commit(db, fd, hdr);
     patra_unlock(fd);
@@ -984,10 +1018,10 @@ fn _exec_vacuum(db): i64 {
     var hdr = _db_hdr(db);
 
     patra_lock_ex(fd);
-    patra_hdr_read(fd, hdr);
+    _pc_refresh(fd, hdr);
 
-    var tname = load64(_sql_pr + PR_TNAME);
-    var tnlen = load64(_sql_pr + PR_TNLEN);
+    var tname = load64(_spr() + PR_TNAME);
+    var tnlen = load64(_spr() + PR_TNLEN);
     var idx = tbl_find(hdr, tname, tnlen);
     if (idx < 0) { patra_unlock(fd); return PATRA_ERR_NOTFOUND; }
 
@@ -1015,10 +1049,10 @@ fn _exec_create_index(db): i64 {
     var hdr = _db_hdr(db);
 
     patra_lock_ex(fd);
-    patra_hdr_read(fd, hdr);
+    _pc_refresh(fd, hdr);
 
-    var tname = load64(_sql_pr + PR_TNAME);
-    var tnlen = load64(_sql_pr + PR_TNLEN);
+    var tname = load64(_spr() + PR_TNAME);
+    var tnlen = load64(_spr() + PR_TNLEN);
     var idx = tbl_find(hdr, tname, tnlen);
     if (idx < 0) { patra_unlock(fd); return PATRA_ERR_NOTFOUND; }
 
@@ -1029,8 +1063,8 @@ fn _exec_create_index(db): i64 {
     var ncols = load64(schema + SCH_NCOLS);
 
     # Resolve column name
-    var cn_ptr = load64(_sql_pr + PR_ITEMS);
-    var cn_len = load64(_sql_pr + PR_ITEMS + 8);
+    var cn_ptr = load64(_spr() + PR_ITEMS);
+    var cn_len = load64(_spr() + PR_ITEMS + 8);
     var ci = _wh_resolve_col(schema, ncols, cn_ptr, cn_len);
     if (ci < 0) { pg_free(schema); patra_unlock(fd); return PATRA_ERR_NOTFOUND; }
 
@@ -1077,7 +1111,7 @@ fn patra_begin(db): i64 {
     var fd = _db_fd(db);
     var wpath = load64(db + DB_PATH);
     patra_lock_ex(fd);
-    patra_hdr_read(fd, _db_hdr(db));
+    _pc_refresh(fd, _db_hdr(db));
     wal_start(fd, wpath);
     store64(db + DB_TX, 1);
     return PATRA_OK;
@@ -1089,6 +1123,13 @@ fn patra_commit(db): i64 {
     var fd = _db_fd(db);
     var wpath = load64(db + DB_PATH);
     var overflow = wal_overflowed();
+    # P2: bump the commit generation on explicit-transaction commit too, so a
+    # multi-statement txn is detectable as a change by readers on other handles;
+    # _pc_set_gen keeps same-process readers from flushing (the txn's pages were
+    # evicted on their page_writes).
+    var _tg = load64(_db_hdr(db) + HDR_COMMITGEN) + 1;
+    store64(_db_hdr(db) + HDR_COMMITGEN, _tg);
+    _pc_set_gen(_tg);
     patra_hdr_write(fd, _db_hdr(db));
     wal_commit(wpath);
     patra_unlock(fd);
@@ -1102,6 +1143,11 @@ fn patra_rollback(db): i64 {
     if (load64(db + DB_TX) == 0) { return PATRA_OK; }
     var wpath = load64(db + DB_PATH);
     wal_rollback(wpath);
+    # P2: wal_rollback restores before-images via raw sys_write, bypassing
+    # page_write's eviction. The txn's own page_writes already evicted the
+    # modified pages, so a flush is belt-and-suspenders — but rollback is rare
+    # and a stale cached page here would be a silent correctness hole, so flush.
+    _pc_flush();
     patra_hdr_read(_db_fd(db), _db_hdr(db));
     patra_unlock(_db_fd(db));
     store64(db + DB_TX, 0);
@@ -1124,9 +1170,9 @@ fn _patra_exec_impl(db, sql): i64 {
     var r = sql_parse();
     if (r != PATRA_OK) { return r; }
     # `?` placeholders require prepare + bind — they can't be executed directly.
-    if (load64(_sql_pr + PR_NPARAMS) > 0) { return PATRA_ERR_PARAM; }
+    if (load64(_spr() + PR_NPARAMS) > 0) { return PATRA_ERR_PARAM; }
 
-    var stmt = load64(_sql_pr + PR_STMT);
+    var stmt = load64(_spr() + PR_STMT);
     if (stmt == STMT_CREATE) { return _exec_create(db); }
     if (stmt == STMT_INSERT) { return _exec_insert(db); }
     if (stmt == STMT_UPDATE) { return _exec_update(db); }
@@ -1195,7 +1241,7 @@ fn _sort_result_multi(rs, ob_idxs, ob_types, ob_dirs, obn): i64 {
     var nrows = load64(rs + RS_NROWS);
     if (nrows <= 1) { return 0; }
 
-    var tmp = fl_alloc(rsz);
+    var tmp = _pt_alloc(rsz);
     for (var i = 1; i < nrows; i = i + 1) {
         memcpy(tmp, data + i * rsz, rsz);
         var j = i - 1;
@@ -1207,18 +1253,22 @@ fn _sort_result_multi(rs, ob_idxs, ob_types, ob_dirs, obn): i64 {
         }
         memcpy(data + (j + 1) * rsz, tmp, rsz);
     }
-    fl_free(tmp);
+    _pt_free(tmp);
     return 0;
 }
 
 # ── patra_query (SELECT with WHERE, ORDER BY, LIMIT) ────────
 
 # Execute a SELECT query, returns result set
+# P2 (v1.12.0): readers do NOT take the process-global statement mutex, so
+# SELECTs run concurrently across threads. Safety rests on per-thread parse
+# scratch (sql.cyr TLS) + per-thread page slab (file.cyr TLS) + serialized
+# fl_alloc/fl_free (_pt_alloc_mtx), with each caller on its OWN handle (own fd
+# + DB_HDR) per the connection-per-thread model — a SHARED handle across reader
+# threads would still race DB_HDR + the fd offset. The per-op LOCK_SH inside
+# _patra_query_exec excludes any committing writer. Writers keep _patra_lock.
 fn patra_query(db, sql): i64 {
-    _patra_lock();
-    var r = _patra_query_impl(db, sql);
-    _patra_unlock();
-    return r;
+    return _patra_query_impl(db, sql);
 }
 
 fn _patra_query_impl(db, sql): i64 {
@@ -1227,8 +1277,8 @@ fn _patra_query_impl(db, sql): i64 {
     var r = sql_parse();
     if (r != PATRA_OK) { return 0; }
     # `?` placeholders require prepare + bind — reject direct parameterized query.
-    if (load64(_sql_pr + PR_NPARAMS) > 0) { return 0; }
-    if (load64(_sql_pr + PR_STMT) != STMT_SELECT) { return 0; }
+    if (load64(_spr() + PR_NPARAMS) > 0) { return 0; }
+    if (load64(_spr() + PR_STMT) != STMT_SELECT) { return 0; }
     return _patra_query_exec(db);
 }
 
@@ -1237,10 +1287,10 @@ fn _patra_query_exec(db): i64 {
     var hdr = _db_hdr(db);
 
     patra_lock_sh(fd);
-    patra_hdr_read(fd, hdr);
+    _pc_refresh(fd, hdr);
 
-    var tname = load64(_sql_pr + PR_TNAME);
-    var tnlen = load64(_sql_pr + PR_TNLEN);
+    var tname = load64(_spr() + PR_TNAME);
+    var tnlen = load64(_spr() + PR_TNLEN);
     var idx = tbl_find(hdr, tname, tnlen);
     if (idx < 0) {
         patra_unlock(fd);
@@ -1257,7 +1307,7 @@ fn _patra_query_exec(db): i64 {
     var rsz = row_compute_size(schema, ncols);
 
     # Check for aggregate query
-    var agg = load64(_sql_pr + PR_AGG_TYPE);
+    var agg = load64(_spr() + PR_AGG_TYPE);
     if (agg != AGG_NONE) {
         # Compute aggregate over matching rows
         var agg_val = 0;
@@ -1266,7 +1316,7 @@ fn _patra_query_exec(db): i64 {
         var agg_off = 0;
         if (agg != AGG_COUNT) {
             var aci = _wh_resolve_col(schema, ncols,
-            load64(_sql_pr + PR_AGG_COL_PTR), load64(_sql_pr + PR_AGG_COL_LEN));
+            load64(_spr() + PR_AGG_COL_PTR), load64(_spr() + PR_AGG_COL_LEN));
             if (aci < 0) { pg_free(schema); patra_unlock(fd); return 0; }
             agg_off = row_field_offset(schema, ncols, aci);
         }
@@ -1278,7 +1328,7 @@ fn _patra_query_exec(db): i64 {
             var anr = load64(abuf + DP_NROWS);
             for (var ai = 0; ai < anr; ai = ai + 1) {
                 var arp = abuf + DP_DATA + ai * rsz;
-                if (where_eval(arp, schema, ncols, _sql_pr)) {
+                if (where_eval(arp, schema, ncols, _spr())) {
                     agg_count = agg_count + 1;
                     if (agg != AGG_COUNT) {
                         var av = row_read_int(arp, agg_off);
@@ -1298,7 +1348,7 @@ fn _patra_query_exec(db): i64 {
         if (agg == AGG_COUNT) { agg_val = agg_count; }
 
         # Build 1-row, 1-column result
-        var ars = fl_alloc(RS_HDR_SZ + 8 + 32 + 8);
+        var ars = _pt_alloc(RS_HDR_SZ + 8 + 32 + 8);
         memset(ars, 0, RS_HDR_SZ + 8 + 32 + 8);
         store64(ars + RS_NCOLS, 1);
         store64(ars + RS_NROWS, 1);
@@ -1320,7 +1370,7 @@ fn _patra_query_exec(db): i64 {
     # Allocate result for worst case (all rows)
     var total = RS_HDR_SZ + ncols * 8 + ncols * SCH_CNAME_MAX + nrows * rsz;
     if (total < RS_HDR_SZ + 64) { total = RS_HDR_SZ + 64; }
-    var rs = fl_alloc(total);
+    var rs = _pt_alloc(total);
     memset(rs, 0, total);
 
     var types_ptr = rs + RS_HDR_SZ;
@@ -1348,10 +1398,10 @@ fn _patra_query_exec(db): i64 {
     if (ic >= 0) {
         var ir = load64(schema + SCH_IDX_ROOT);
         if (ir != 0) {
-            var wn = load64(_sql_pr + PR_WHERE_N);
+            var wn = load64(_spr() + PR_WHERE_N);
             var wjoin_ok = 0;
             if (wn == 1) { wjoin_ok = 1; }
-            elif (load64(_sql_pr + PR_WHERE_JOIN) == WH_AND) { wjoin_ok = 1; }
+            elif (load64(_spr() + PR_WHERE_JOIN) == WH_AND) { wjoin_ok = 1; }
             if (wjoin_ok != 0) {
                 # Scan WHERE conditions for indexed column — build range [lo, hi]
                 var icn = schema + SCH_START + ic * SCH_ENTRY_SZ + SCH_CNAME;
@@ -1367,7 +1417,7 @@ fn _patra_query_exec(db): i64 {
                 # collisions correctly.
                 var ictype_eq = load64(schema + SCH_START + ic * SCH_ENTRY_SZ + SCH_CTYPE);
                 for (var wi = 0; wi < wn; wi = wi + 1) {
-                    var cond = _sql_pr + PR_WHERE + wi * WH_ENTRY_SZ;
+                    var cond = _spr() + PR_WHERE + wi * WH_ENTRY_SZ;
                     var cptr = load64(cond + WH_COL_PTR);
                     var clen = load64(cond + WH_COL_LEN);
                     if (clen == icnl) {
@@ -1400,7 +1450,7 @@ fn _patra_query_exec(db): i64 {
                 if (idx_found != 0) {
                     if (idx_lo <= idx_hi) {
                         # 1024 refs * 8 bytes = 8KB ref buffer
-                        var refs = fl_alloc(8192);
+                        var refs = _pt_alloc(8192);
                         var nrefs = _bt_range(fd, hdr, ir, idx_lo, idx_hi, refs, 1024);
 
                         # Selectivity-based planner: when the index returns
@@ -1417,10 +1467,10 @@ fn _patra_query_exec(db): i64 {
 
                         if (nrefs >= 1024) {
                             # Index returned max refs — may be truncated, fall back to scan
-                            fl_free(refs);
+                            _pt_free(refs);
                         } elif (low_selectivity != 0) {
                             # Index would return >=50% of rows — scan is cheaper
-                            fl_free(refs);
+                            _pt_free(refs);
                         } else {
                             used_index = 1;
                             var rbuf = pg_alloc();
@@ -1435,13 +1485,13 @@ fn _patra_query_exec(db): i64 {
                                     lpg = rpg;
                                 }
                                 var rp = rbuf + DP_DATA + rsl * rsz;
-                                if (where_eval(rp, schema, ncols, _sql_pr)) {
+                                if (where_eval(rp, schema, ncols, _spr())) {
                                     memcpy(data_ptr + actual * rsz, rp, rsz);
                                     actual = actual + 1;
                                 }
                             }
                             pg_free(rbuf);
-                            fl_free(refs);
+                            _pt_free(refs);
                         }
                     }
                 }
@@ -1450,7 +1500,7 @@ fn _patra_query_exec(db): i64 {
     }
 
     if (used_index == 0) {
-        actual = tbl_scan_where(fd, hdr, idx, data_ptr, rsz, schema, ncols, _sql_pr);
+        actual = tbl_scan_where(fd, hdr, idx, data_ptr, rsz, schema, ncols, _spr());
     }
     store64(rs + RS_NROWS, actual);
 
@@ -1458,15 +1508,15 @@ fn _patra_query_exec(db): i64 {
     patra_unlock(fd);
 
     # ORDER BY (multi-column)
-    var obn = load64(_sql_pr + PR_ORDERBY_N);
+    var obn = load64(_spr() + PR_ORDERBY_N);
     if (obn > 0) {
-        var ob_idxs = fl_alloc(obn * 8);
-        var ob_types = fl_alloc(obn * 8);
-        var ob_dirs = fl_alloc(obn * 8);
+        var ob_idxs = _pt_alloc(obn * 8);
+        var ob_types = _pt_alloc(obn * 8);
+        var ob_dirs = _pt_alloc(obn * 8);
         var np = load64(rs + RS_NAMES);
         var ob_valid = 1;
         for (var oi = 0; oi < obn; oi = oi + 1) {
-            var ob = _sql_pr + PR_ORDERBY_COLS + oi * OB_SZ;
+            var ob = _spr() + PR_ORDERBY_COLS + oi * OB_SZ;
             var ob_p = load64(ob + OB_PTR);
             var ob_l = load64(ob + OB_LEN);
             var ob_d = load64(ob + OB_DIR);
@@ -1485,13 +1535,13 @@ fn _patra_query_exec(db): i64 {
         if (ob_valid != 0) {
             _sort_result_multi(rs, ob_idxs, ob_types, ob_dirs, obn);
         }
-        fl_free(ob_idxs);
-        fl_free(ob_types);
-        fl_free(ob_dirs);
+        _pt_free(ob_idxs);
+        _pt_free(ob_types);
+        _pt_free(ob_dirs);
     }
 
     # LIMIT
-    var lim = load64(_sql_pr + PR_LIMIT);
+    var lim = load64(_spr() + PR_LIMIT);
     if (lim > 0) {
         if (actual > lim) {
             store64(rs + RS_NROWS, lim);
@@ -1500,16 +1550,16 @@ fn _patra_query_exec(db): i64 {
 
     # Projection (SELECT col1, col2, ...). PR_PROJ_N = 0 is SELECT *, returned as-is.
     # Runs after ORDER BY / LIMIT so sort can reference columns not in the projection.
-    var pjn = load64(_sql_pr + PR_PROJ_N);
+    var pjn = load64(_spr() + PR_PROJ_N);
     if (pjn > 0) {
-        var pj_idxs = fl_alloc(pjn * 8);
-        var pj_types = fl_alloc(pjn * 8);
-        var pj_offs = fl_alloc(pjn * 8);
+        var pj_idxs = _pt_alloc(pjn * 8);
+        var pj_types = _pt_alloc(pjn * 8);
+        var pj_offs = _pt_alloc(pjn * 8);
         var pj_names_src = load64(rs + RS_NAMES);
         var pj_types_src = load64(rs + RS_TYPES);
         var pj_valid = 1;
         for (var pji = 0; pji < pjn; pji = pji + 1) {
-            var pj_item = _sql_pr + PR_ITEMS + pji * SEL_SZ;
+            var pj_item = _spr() + PR_ITEMS + pji * SEL_SZ;
             var pj_p = load64(pj_item + SEL_PTR);
             var pj_l = load64(pj_item + SEL_LEN);
             var pj_ci = 0 - 1;
@@ -1527,10 +1577,10 @@ fn _patra_query_exec(db): i64 {
             }
         }
         if (pj_valid == 0) {
-            fl_free(pj_idxs);
-            fl_free(pj_types);
-            fl_free(pj_offs);
-            fl_free(rs);
+            _pt_free(pj_idxs);
+            _pt_free(pj_types);
+            _pt_free(pj_offs);
+            _pt_free(rs);
             return 0;
         }
 
@@ -1542,7 +1592,7 @@ fn _patra_query_exec(db): i64 {
         var pj_out_n = load64(rs + RS_NROWS);
         var pj_total = RS_HDR_SZ + pjn * 8 + pjn * SCH_CNAME_MAX + pj_out_n * pj_new_rsz;
         if (pj_total < RS_HDR_SZ + 64) { pj_total = RS_HDR_SZ + 64; }
-        var rs2 = fl_alloc(pj_total);
+        var rs2 = _pt_alloc(pj_total);
         memset(rs2, 0, pj_total);
         var pj_t = rs2 + RS_HDR_SZ;
         var pj_nm = pj_t + pjn * 8;
@@ -1575,10 +1625,10 @@ fn _patra_query_exec(db): i64 {
             }
         }
 
-        fl_free(pj_idxs);
-        fl_free(pj_types);
-        fl_free(pj_offs);
-        fl_free(rs);
+        _pt_free(pj_idxs);
+        _pt_free(pj_types);
+        _pt_free(pj_offs);
+        _pt_free(rs);
         return rs2;
     }
 
@@ -1594,7 +1644,7 @@ fn _patra_query_exec(db): i64 {
 # directly from the cached parse result.
 #
 # Layout (4112 bytes per stmt): 8-byte SQL ptr + 8-byte SQL len + 4096-byte
-# parse-result snapshot (mirrors `_sql_pr`). The owned SQL buffer keeps the
+# parse-result snapshot (mirrors `_spr()`). The owned SQL buffer keeps the
 # pointers in the parse result valid; finalize releases both.
 enum StmtOff {
     STMT_SQL = 0;
@@ -1629,8 +1679,8 @@ fn _patra_prepare_impl(db, sql): i64 {
     if (db == 0) { return 0; }
     if (sql == 0) { return 0; }
     var slen = strlen(sql);
-    var stmt = fl_alloc(STMT_TOTAL_SZ);
-    var sbuf = fl_alloc(slen + 1);
+    var stmt = _pt_alloc(STMT_TOTAL_SZ);
+    var sbuf = _pt_alloc(slen + 1);
     memcpy(sbuf, sql, slen);
     store8(sbuf + slen, 0);
     store64(stmt + STMT_SQL, sbuf);
@@ -1638,14 +1688,14 @@ fn _patra_prepare_impl(db, sql): i64 {
 
     sql_tokenize(sbuf);
     if (sql_parse() != PATRA_OK) {
-        fl_free(sbuf);
-        fl_free(stmt);
+        _pt_free(sbuf);
+        _pt_free(stmt);
         return 0;
     }
-    memcpy(stmt + STMT_PR_BUF, _sql_pr, 4096);
+    memcpy(stmt + STMT_PR_BUF, _spr(), 4096);
     # Record the `?` count and zero the bind area. Unbound slots default to
     # INT 0; patra_bind_* fill the rest before exec.
-    store64(stmt + STMT_NPARAMS, load64(_sql_pr + PR_NPARAMS));
+    store64(stmt + STMT_NPARAMS, load64(_spr() + PR_NPARAMS));
     memset(stmt + STMT_BINDS, 0, BIND_MAX * BIND_SZ);
     return stmt;
 }
@@ -1654,12 +1704,12 @@ fn _patra_prepare_impl(db, sql): i64 {
 fn patra_finalize(stmt): i64 {
     if (stmt == 0) { return 0; }
     var sbuf = load64(stmt + STMT_SQL);
-    if (sbuf != 0) { fl_free(sbuf); }
-    fl_free(stmt);
+    if (sbuf != 0) { _pt_free(sbuf); }
+    _pt_free(stmt);
     return 0;
 }
 
-# Internal: copy the cached parse result into _sql_pr so the existing
+# Internal: copy the cached parse result into _spr() so the existing
 # _exec_* / _patra_query_exec dispatch sees the prepared statement's
 # tables/values. Single-threaded; the global is overwritten per call.
 # Word-at-a-time copy because stdlib memcpy is byte-by-byte and 4KB
@@ -1668,7 +1718,7 @@ fn _stmt_restore(stmt): i64 {
     var src = stmt + STMT_PR_BUF;
     var i = 0;
     while (i < 4096) {
-        store64(_sql_pr + i, load64(src + i));
+        store64(_spr() + i, load64(src + i));
         i = i + 8;
     }
     return 0;
@@ -1679,9 +1729,9 @@ fn _stmt_restore(stmt): i64 {
 # WH_STR_PTR/LEN. After this the conditions hold concrete COL_INT / COL_STR
 # values, so where_eval and the index fast-path work unchanged.
 fn _apply_binds_where(binds): i64 {
-    var wn = load64(_sql_pr + PR_WHERE_N);
+    var wn = load64(_spr() + PR_WHERE_N);
     for (var i = 0; i < wn; i = i + 1) {
-        var cond = _sql_pr + PR_WHERE + i * WH_ENTRY_SZ;
+        var cond = _spr() + PR_WHERE + i * WH_ENTRY_SZ;
         if (load64(cond + WH_VAL_TYPE) == COL_PARAM) {
             var sl = binds + load64(cond + WH_INT_VAL) * BIND_SZ;
             var bt = load64(sl + BIND_TYPE);
@@ -1704,11 +1754,11 @@ fn _apply_binds_where(binds): i64 {
 fn _apply_binds(stmt): i64 {
     if (load64(stmt + STMT_NPARAMS) <= 0) { return 0; }
     var binds = stmt + STMT_BINDS;
-    var st = load64(_sql_pr + PR_STMT);
+    var st = load64(_spr() + PR_STMT);
     if (st == STMT_INSERT) {
-        var n = load64(_sql_pr + PR_COUNT);
+        var n = load64(_spr() + PR_COUNT);
         for (var i = 0; i < n; i = i + 1) {
-            var item = _sql_pr + PR_ITEMS + i * IR_SZ;
+            var item = _spr() + PR_ITEMS + i * IR_SZ;
             if (load64(item + IR_TYPE) == COL_PARAM) {
                 var sl = binds + load64(item + IR_IVAL) * BIND_SZ;
                 var bt = load64(sl + BIND_TYPE);
@@ -1722,9 +1772,9 @@ fn _apply_binds(stmt): i64 {
             }
         }
     } elif (st == STMT_UPDATE) {
-        var ns = load64(_sql_pr + PR_COUNT);
+        var ns = load64(_spr() + PR_COUNT);
         for (var s = 0; s < ns; s = s + 1) {
-            var setp = _sql_pr + PR_ITEMS + s * SET_SZ;
+            var setp = _spr() + PR_ITEMS + s * SET_SZ;
             if (load64(setp + SET_VTYPE) == COL_PARAM) {
                 var ssl = binds + load64(setp + SET_IVAL) * BIND_SZ;
                 var sbt = load64(ssl + BIND_TYPE);
@@ -1805,7 +1855,7 @@ fn _patra_exec_prepared_impl(db, stmt): i64 {
     if (stmt == 0) { return PATRA_ERR_SYNTAX; }
     _stmt_restore(stmt);
     _apply_binds(stmt);
-    var st = load64(_sql_pr + PR_STMT);
+    var st = load64(_spr() + PR_STMT);
     if (st == STMT_CREATE) { return _exec_create(db); }
     if (st == STMT_INSERT) { return _exec_insert(db); }
     if (st == STMT_UPDATE) { return _exec_update(db); }
@@ -1821,11 +1871,13 @@ fn _patra_exec_prepared_impl(db, stmt): i64 {
 }
 
 # Execute a prepared SELECT, returning a result set or 0.
+# P2 (v1.12.0): readers run lock-free (see patra_query). A prepared SELECT
+# restores into the per-thread parse buffer (_stmt_restore), so concurrent
+# prepared queries don't collide — but the stmt's own bind slots are not
+# per-thread, so a single prepared stmt must not be bound+run from two threads
+# at once (bind on a per-thread stmt, or serialize). Writers keep _patra_lock.
 fn patra_query_prepared(db, stmt): i64 {
-    _patra_lock();
-    var r = _patra_query_prepared_impl(db, stmt);
-    _patra_unlock();
-    return r;
+    return _patra_query_prepared_impl(db, stmt);
 }
 
 fn _patra_query_prepared_impl(db, stmt): i64 {
@@ -1833,7 +1885,7 @@ fn _patra_query_prepared_impl(db, stmt): i64 {
     if (stmt == 0) { return 0; }
     _stmt_restore(stmt);
     _apply_binds(stmt);
-    if (load64(_sql_pr + PR_STMT) != STMT_SELECT) { return 0; }
+    if (load64(_spr() + PR_STMT) != STMT_SELECT) { return 0; }
     return _patra_query_exec(db);
 }
 
@@ -1974,7 +2026,7 @@ fn patra_result_read_text(db, rs, row, col, out): i64 {
 
 # Free result set and all buffers
 fn patra_result_free(rs): i64 {
-    if (rs != 0) { fl_free(rs); }
+    if (rs != 0) { _pt_free(rs); }
     return 0;
 }
 
@@ -2002,7 +2054,7 @@ fn _patra_insert_row_impl(db, tname, tnlen, ncols, types, ivals, sptrs, slens, b
     var hdr = _db_hdr(db);
 
     patra_lock_ex(fd);
-    patra_hdr_read(fd, hdr);
+    _pc_refresh(fd, hdr);
 
     var idx = tbl_find(hdr, tname, tnlen);
     if (idx < 0) { patra_unlock(fd); return PATRA_ERR_NOTFOUND; }
@@ -2027,7 +2079,7 @@ fn _patra_insert_row_impl(db, tname, tnlen, ncols, types, ivals, sptrs, slens, b
     }
 
     var rsz = row_compute_size(schema, scols);
-    var row = fl_alloc(rsz);
+    var row = _pt_alloc(rsz);
     memset(row, 0, rsz);
 
     # Write the row. BLOB payloads write their chains here; if the insert
@@ -2071,7 +2123,7 @@ fn _patra_insert_row_impl(db, tname, tnlen, ncols, types, ivals, sptrs, slens, b
         }
     }
 
-    fl_free(row);
+    _pt_free(row);
     pg_free(schema);
 
     if (r == PATRA_OK) { _db_hdr_commit(db, fd, hdr); }

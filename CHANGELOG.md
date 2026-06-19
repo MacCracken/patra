@@ -5,6 +5,72 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.0] - 2026-06-18
+
+**Concurrent readers (yeo-cy-test P2) + opt-in shared page cache + cyrius pin
+`6.2.21` → `6.2.22`.** SELECTs now run in parallel across threads instead of
+serializing on the process-global statement lock. The win is **~3.6×** read
+throughput on a 4-thread scan (`read_scan_4t_serial` 514 µs → `read_scan_4t_par`
+143 µs/scan). Reads are lock-free; writers stay serialized (single-writer). The
+model is **connection-per-thread**: each worker opens its own handle over one
+file, and the existing per-fd `flock` (shared for readers, exclusive for
+writers) arbitrates across handles and processes — leveraging the OS page cache
+for shared caching for free. The old shared-single-handle model still works
+(just without read parallelism), so existing consumers need no change.
+
+A shared in-process page cache also ships, but **OFF by default** — see Added.
+
+### Added
+
+- **Concurrent `SELECT`s (P2).** `patra_query` / `patra_query_prepared` no
+  longer take the statement mutex. Each reader thread runs on its own handle
+  (own fd + header). Made safe by moving the SQL parse scratch and the page-slab
+  allocator into thread-local storage (`lib/thread_local.cyr`) and serializing
+  the freelist behind an allocator mutex. `patra_init` now installs the calling
+  thread's TLS block; worker threads spawned via `lib/thread.cyr` inherit one
+  free (foreign threads must call `thread_local_init` once). **Migration for
+  read parallelism:** open one handle per worker thread instead of sharing one.
+- **`patra_cache_enable(on)` / `patra_cache_enabled()`** — opt-in shared page
+  cache (process-global; one cache across all handles). **Default OFF.** It is
+  redundant with the OS page cache for RAM-resident data and its global lock
+  re-serializes the concurrent readers, so it is a net loss on warm workloads
+  (measured ~3× slower on tmpfs: `read_scan_4t_cached` ~475 µs vs the 143 µs
+  default). Enable it only for **cold / slow-disk read-heavy** workloads where
+  avoiding real I/O beats the lock cost. Coherence (when enabled): Variant I
+  invalidate-on-write (`page_write` evicts) for same-process, plus a header
+  commit-generation gate for cross-handle / cross-process. The 4 MB pool is
+  allocated lazily on first enable, so default-off consumers pay nothing.
+- **`HDR_COMMITGEN`** — a monotonic commit-generation counter in the header's
+  formerly-reserved byte 32. Bumped on every committed mutation; the page cache
+  compares it to detect another handle's/process's writes. **No format break**:
+  old and new files read 0 there, `PATRA_VER` stays 1, old/new binaries
+  interoperate.
+
+### Changed
+
+- **cyrius toolchain pin `6.2.21` → `6.2.22`.** Clears the build-time pin-drift
+  warning; source-change-free for the toolchain itself.
+
+### Known limitations
+
+- **BYTES/TEXT result-set reads under concurrent writers.** A result set stores
+  BYTES/TEXT columns as a `(page, len)` reference materialized lazily by
+  `patra_result_read_bytes` / `patra_result_read_text` *after* the query's read
+  lock releases. A concurrent writer that frees+reuses those chain pages can make
+  the lazy read return stale/foreign bytes — a **pre-existing** TOCTOU (not
+  introduced or worsened by this release). Read a result set's BYTES/TEXT values
+  before yielding to a writer that may delete those rows, or serialize. Eager
+  materialization is deferred until a consumer needs it.
+
+### Gates
+
+- **834 tests** (+22: read-concurrency stress on per-thread handles,
+  cross-handle visibility, commit-generation, page-cache unit + coherence),
+  **7 fuzz** (+1: `fuzz_pcache` shadow-model invariant check), 38 benchmarks
+  (+2: `read_scan_4t_par` 143 µs / `read_scan_4t_cached` 475 µs; no regression
+  on the default path — `insert_1k` ~21 µs), libro 15/15, vidya 19/19, lint
+  clean. New module `src/pcache.cyr`. `dist/patra.cyr` regenerated.
+
 ## [1.11.5] - 2026-06-18
 
 **Atomic insert-returning-id (yeo-cy-test) + cyrius pin `6.2.19` → `6.2.21`.**

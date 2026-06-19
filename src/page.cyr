@@ -10,10 +10,17 @@ fn page_offset(num): i64 {
     return PAGE_SIZE + num * PAGE_SIZE;
 }
 
-# Read a page from file into buffer
+# Read a page from file into buffer. P2: consult the shared page cache first
+# (pcache.cyr); on a miss, do the lseek+read and populate the cache. Coherence
+# is upheld by page_write evicting on every change (same-process) and the
+# per-op _pc_check generation gate (cross-handle / cross-process), both wired in
+# lib.cyr. Valid page numbers are >= 1 (page_read_checked rejects <= 0), so the
+# cache's key-0 = empty sentinel never collides with a real page.
 fn page_read(fd, num, buf): i64 {
+    if (_pc_get(num, buf) != 0) { return PATRA_OK; }
     if (_pt_seek(fd, page_offset(num)) < 0) { return PATRA_ERR_IO; }
     if (sys_read(fd, buf, PAGE_SIZE) != PAGE_SIZE) { return PATRA_ERR_IO; }
+    _pc_put(num, buf);
     return PATRA_OK;
 }
 
@@ -27,8 +34,14 @@ fn page_read_checked(fd, hdr, num, buf): i64 {
     return page_read(fd, num, buf);
 }
 
-# Write a page from buffer to file (WAL-logged)
+# Write a page from buffer to file (WAL-logged). P2 Variant I (invalidate-on-
+# write): evict the page from the shared cache BEFORE touching disk, so the
+# cache is coherent-by-construction with whatever ends up there (committed,
+# half-written, or later rolled back) — no cached page ever outlives the disk
+# bytes it mirrors. The writer holds LOCK_EX, so no reader observes the gap.
+# This is the single invalidation hook (page_alloc / page_free route through it).
 fn page_write(fd, num, buf): i64 {
+    _pc_evict(num);
     wal_log_page(num);
     if (_pt_seek(fd, page_offset(num)) < 0) { return PATRA_ERR_IO; }
     if (sys_write(fd, buf, PAGE_SIZE) != PAGE_SIZE) { return PATRA_ERR_IO; }
@@ -39,32 +52,32 @@ fn page_write(fd, num, buf): i64 {
 fn page_alloc(fd, hdr): i64 {
     var fh = load64(hdr + HDR_FREEHEAD);
     if (fh != 0) {
-        var buf = fl_alloc(PAGE_SIZE);
+        var buf = _pt_alloc(PAGE_SIZE);
         var rr = page_read(fd, fh, buf);
-        if (rr != PATRA_OK) { fl_free(buf); return 0; }
+        if (rr != PATRA_OK) { _pt_free(buf); return 0; }
         var next = load64(buf + FP_NEXT);
         store64(hdr + HDR_FREEHEAD, next);
-        fl_free(buf);
+        _pt_free(buf);
         return fh;
     }
     var num = load64(hdr + HDR_PGCOUNT);
     store64(hdr + HDR_PGCOUNT, num + 1);
-    var buf = fl_alloc(PAGE_SIZE);
+    var buf = _pt_alloc(PAGE_SIZE);
     memset(buf, 0, PAGE_SIZE);
     page_write(fd, num, buf);
-    fl_free(buf);
+    _pt_free(buf);
     return num;
 }
 
 # Free a page (add to free list)
 fn page_free(fd, hdr, num): i64 {
-    var buf = fl_alloc(PAGE_SIZE);
+    var buf = _pt_alloc(PAGE_SIZE);
     memset(buf, 0, PAGE_SIZE);
     store64(buf + FP_TYPE, PAGE_FREE);
     store64(buf + FP_NEXT, load64(hdr + HDR_FREEHEAD));
     page_write(fd, num, buf);
     store64(hdr + HDR_FREEHEAD, num);
-    fl_free(buf);
+    _pt_free(buf);
 }
 
 # Initialize buffer as empty data page

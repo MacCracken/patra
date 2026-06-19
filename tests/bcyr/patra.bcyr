@@ -3,11 +3,29 @@
 include "src/lib.cyr"
 include "lib/bench.cyr"
 include "lib/fnptr.cyr"
+include "lib/mmap.cyr"
+include "lib/thread.cyr"
 
 var _bpath = "/tmp/patra_bench.patra";
 var _bdb = 0;
 
 fn _bcleanup() { syscall(SYS_UNLINK, _bpath); return 0; }
+
+# v1.12.0 P2 parallel-read benchmark. Each worker scans the `pread` table _prn
+# times on its OWN handle (connection-per-thread), lock-free as of S5. Per-op =
+# wall-clock / (threads × _prn): with real cross-core parallelism it drops
+# toward 1/threads of the serialized S0 baseline (read_scan_4t_serial ~514µs).
+var _prn = 0;
+
+fn _pr_worker(db): i64 {
+    var i = 0;
+    while (i < _prn) {
+        var rs = patra_query(db, "SELECT * FROM pread");
+        if (rs != 0) { patra_result_free(rs); }
+        i = i + 1;
+    }
+    return 0;
+}
 
 fn work_tokenize() { sql_tokenize("INSERT INTO users VALUES (42, 'hello world')"); return 0; }
 fn work_parse_insert() { sql_tokenize("INSERT INTO users VALUES (42, 'hello world')"); sql_parse(); return 0; }
@@ -642,6 +660,80 @@ fn main() {
     patra_finalize(pp_stmt);
 
     patra_close(_bdb);
+    _bcleanup();
+
+    # --- v1.12.0 P2: parallel read throughput ---
+    # 4 reader threads × 250 SELECTs over a 500-row table, each on its OWN
+    # handle (connection-per-thread, lock-free as of S5). Per-op = wall / 1000;
+    # with cross-core parallelism it drops well below the serialized S0 baseline.
+    _bcleanup();
+    _bdb = patra_open(_bpath);
+    patra_exec(_bdb, "CREATE TABLE pread (id INT, val STR)");
+    for (var prfill = 0; prfill < 500; prfill = prfill + 1) {
+        patra_exec(_bdb, "INSERT INTO pread VALUES (1, 'x')");
+    }
+    patra_close(_bdb);
+    _prn = 250;
+    var prdbs = fl_alloc(4 * 8);
+    for (var propen = 0; propen < 4; propen = propen + 1) {
+        store64(prdbs + propen * 8, patra_open(_bpath));
+    }
+    var b_pr = bench_new("read_scan_4t_par");
+    bench_batch_start(b_pr);
+    var prts = fl_alloc(4 * 8);
+    for (var prspawn = 0; prspawn < 4; prspawn = prspawn + 1) {
+        store64(prts + prspawn * 8, thread_create(&_pr_worker, load64(prdbs + prspawn * 8)));
+    }
+    for (var prjoin = 0; prjoin < 4; prjoin = prjoin + 1) {
+        thread_join(load64(prts + prjoin * 8));
+    }
+    bench_batch_stop(b_pr, 4 * 250);
+    vec_push(benches, b_pr);
+    for (var prclose = 0; prclose < 4; prclose = prclose + 1) {
+        patra_close(load64(prdbs + prclose * 8));
+    }
+    fl_free(prts);
+    fl_free(prdbs);
+    _bcleanup();
+
+    # --- v1.12.0 P2: same read with the OPT-IN page cache ENABLED ---
+    # Documents the tradeoff: on tmpfs (this bench) the cache is SLOWER than the
+    # default lock-free path — its global mutex re-serializes the readers and its
+    # copy-out is redundant with the OS page cache. It pays off only for cold /
+    # slow-disk read-heavy workloads. Default stays OFF (read_scan_4t_par above).
+    _bcleanup();
+    _bdb = patra_open(_bpath);
+    patra_exec(_bdb, "CREATE TABLE pread (id INT, val STR)");
+    for (var prcf = 0; prcf < 500; prcf = prcf + 1) {
+        patra_exec(_bdb, "INSERT INTO pread VALUES (1, 'x')");
+    }
+    patra_close(_bdb);
+    patra_cache_enable(1);
+    var prcdbs = fl_alloc(4 * 8);
+    for (var prco = 0; prco < 4; prco = prco + 1) {
+        store64(prcdbs + prco * 8, patra_open(_bpath));
+    }
+    for (var prcw = 0; prcw < 4; prcw = prcw + 1) {
+        var rsw = patra_query(load64(prcdbs + prcw * 8), "SELECT * FROM pread");
+        if (rsw != 0) { patra_result_free(rsw); }
+    }
+    var b_prc = bench_new("read_scan_4t_cached");
+    bench_batch_start(b_prc);
+    var prcts = fl_alloc(4 * 8);
+    for (var prcs = 0; prcs < 4; prcs = prcs + 1) {
+        store64(prcts + prcs * 8, thread_create(&_pr_worker, load64(prcdbs + prcs * 8)));
+    }
+    for (var prcj = 0; prcj < 4; prcj = prcj + 1) {
+        thread_join(load64(prcts + prcj * 8));
+    }
+    bench_batch_stop(b_prc, 4 * 250);
+    vec_push(benches, b_prc);
+    for (var prcc = 0; prcc < 4; prcc = prcc + 1) {
+        patra_close(load64(prcdbs + prcc * 8));
+    }
+    fl_free(prcts);
+    fl_free(prcdbs);
+    patra_cache_enable(0);
     _bcleanup();
 
     bench_report_all(benches);

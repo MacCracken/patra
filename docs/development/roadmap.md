@@ -1,10 +1,10 @@
 # Patra Development Roadmap
 
-> **Last refreshed**: 2026-06-18 (v1.11.5 cut — atomic insert-returning-id)
+> **Last refreshed**: 2026-06-18 (v1.12.0 cut — P2 concurrent readers)
 >
 > Thin **backlog index**, forward-looking only. Open consumer requests live one-file-each in [`requests/`](requests/) (this file points at them); upstream cyrius bugs live in [`issues/`](issues/). Shipped work lives in [`../../CHANGELOG.md`](../../CHANGELOG.md) + [`completed-phases.md`](completed-phases.md); live state (version, sizes, counts, consumers) in [`state.md`](state.md).
 
-> **Current**: v1.11.5 — atomic insert-returning-id (`patra_insert_returning` / `patra_exec_returning`) closes the v1.11.3 readback race for concurrent writers sharing one handle. Next: **v1.12.0 — P2 concurrent readers** (reader/writer pager lock + thread-local scratch). Patra serves libro, vidya, daimon, agnoshi, mela, hoosh, and sit.
+> **Current**: v1.12.0 — **P2 concurrent readers shipped.** `SELECT`s run lock-free in parallel (connection-per-thread; ~3.6× on a 4-thread scan); writers stay single-writer. A shared page cache shipped opt-in / off-by-default (it regresses warm workloads — redundant with the OS page cache + its lock re-serializes readers). No open consumer requests. Patra serves libro, vidya, daimon, agnoshi, mela, hoosh, and sit.
 
 ## Driven by consumer needs
 
@@ -12,9 +12,12 @@ Patra has no speculative feature backlog. Work lands when a consumer hits a conc
 
 ## Open backlog
 
-**Consumer requests** — detail in [`requests/`](requests/):
+**Consumer requests** — none open. (P2 concurrent readers shipped in v1.12.0 — see [`requests/archive/`](requests/archive/).)
 
-- 🟡 **P2 — concurrent readers** (yeo-cy-test, scheduled for **v1.12.0**). One internal lock serializes all DB work, so a read-heavy server gets no cross-core read parallelism. Wanted: reader/writer lock around the pager, or connection-per-thread. Folds in the deferred P1 option (b) — thread-local parse/exec scratch instead of the process-global `_sql_toks` / `_sql_pr`. → [`requests/2026-06-09-yeo-cy-test-concurrent-readers.md`](requests/2026-06-09-yeo-cy-test-concurrent-readers.md)
+**Deferred (consumer-driven — land when a consumer hits it):**
+
+- **Eager BYTES/TEXT result materialization.** A result set's `BYTES`/`TEXT` `(page,len)` ref is materialized lazily *after* the read lock releases, so a concurrent writer that frees the row can make the read return stale bytes (pre-existing TOCTOU, documented in README + [`../architecture/003-page-cache-coherence.md`](../architecture/003-page-cache-coherence.md)). The fix (snapshot payloads into the result set at query time) is a breaking change to result-set memory; defer until a BYTES consumer hits it under concurrent writers.
+- **Sharded page-cache lock.** The opt-in cache's single global mutex re-serializes readers; striped locks would cut that, but the cache is still copy-out overhead vs the OS page cache on warm data — only worth it if a cold/slow-disk read-heavy consumer adopts the cache and profiles the lock.
 
 **Internal / toolchain** (not consumer-filed):
 

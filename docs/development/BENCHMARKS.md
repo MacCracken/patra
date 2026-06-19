@@ -118,6 +118,29 @@ tokenize + parse on every call.
 The ~7µs saving matches the `parse_insert` cost. The word-at-a-time
 `_stmt_restore` keeps the 4KB snapshot copy from eating the win.
 
+## Read concurrency (1.12.0, yeo-cy-test P2)
+
+4 reader threads × 250 `SELECT * FROM pread` over a 500-row table (1000 scans
+total), per-op = wall-clock / 1000. The serialized baseline was measured on the
+pre-P2 code (read path under the statement lock, query+free app-serialized);
+the parallel number on the shipped code (lock-free reads, connection-per-thread,
+each worker its own handle).
+
+| Bench                  | Avg / scan | Notes |
+|------------------------|-----------:|-------|
+| `read_scan_4t_serial`* | ~514µs     | Pre-P2 baseline: ≈ single-thread `select_scan_500` → 4 threads add nothing, fully serialized. (*Historical — the shipped bench is the parallel form below.) |
+| `read_scan_4t_par`     | ~143µs     | Shipped default: read lock dropped + connection-per-thread → **~3.6× throughput** vs the serialized baseline (4 threads scan in parallel). |
+| `read_scan_4t_cached`  | ~475µs     | Same workload with the **opt-in** page cache enabled (`patra_cache_enable(1)`). **~3.3× SLOWER** than the default — the cache's global mutex re-serializes the readers and its copy-out is redundant with the OS page cache on RAM-resident (tmpfs) data. |
+
+The cache is **OFF by default** for this reason — it only pays off on cold /
+slow-disk read-heavy workloads where avoiding real I/O beats the lock cost (the
+tmpfs bench is the worst case for it). Default-path writes are unregressed
+(`insert_1k` ~21µs, `btree_insert_1k` ~5µs); with the cache on they rise (~56µs /
+~24µs) from per-page evict + copy-out overhead. See
+[ADR 0003](../adr/0003-opt-in-page-cache.md) for the full analysis. (Captured on
+the same Linux/NVMe/x86-64 host as the table above, cyrius 6.2.x; the parallel
+speedup is core-count- and memory-bandwidth-bound — treat as order-of-magnitude.)
+
 ## Group commit (1.8.0) — real-disk path
 
 500 single-INSERT exec calls (no explicit BEGIN/COMMIT). `/tmp` (tmpfs) hides

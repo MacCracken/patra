@@ -1,0 +1,214 @@
+# pcache.cyr — shared in-process page cache (v1.12.0 P2)
+#
+# A process-global, fixed-capacity cache of 4KB data pages, shared across all
+# per-thread handles (connection-per-thread). It turns a repeated cross-handle
+# read of a hot page (btree node, jsonl data page, bytes-chain page) from a
+# two-syscall lseek+read into an in-RAM memcpy.
+#
+# DESIGN (correctness-first; see docs/adr + docs/architecture):
+#  - Open-addressed, linear-probe, FIXED 1024 slots (PC_CAP). Keyed by page
+#    number; key 0 = empty (page 0 is the header and is NEVER cached, so 0 is a
+#    safe sentinel). Probe window bounded to PC_PROBE_MAX hops — a fully-occupied
+#    window evicts the slot at the probe start (no chaining, no unbounded probe).
+#  - COPY-OUT under the lock: a hit memcpys the slot into the CALLER's own
+#    buffer, so callers never hold a pointer INTO a slot. Slot buffers are
+#    alloc()'d ONCE at init and RETAINED for process life (never freed) —
+#    eviction overwrites a buffer in place, so a buffer pointer never dangles
+#    (no use-after-evict, no pins, no refcounts, no epochs). All cache buffers
+#    come from alloc() (bump, thread-safe), so the cache NEVER touches the
+#    non-thread-safe freelist (fl_alloc/_pt_alloc) at runtime.
+#  - ONE global mutex (_pc_mtx, lib/sync.cyr) guards every cache touch. Readers
+#    contend only at page-fetch granularity (a probe + one 4KB memcpy), never
+#    during the row scan. Reader-vs-writer never contend here — flock excludes
+#    them on the file. LOCK-ORDER: _pc_mtx is NEVER held across _pt_alloc /
+#    _pt_free (the cache allocates nothing at runtime), so it never nests with
+#    the allocator mutex.
+#  - PROBE-WITH-HOLES: _pc_evict zeroes a key mid-window, leaving a hole, so
+#    _pc_get / _pc_put must NOT stop probing at the first empty slot — they
+#    always scan the full PC_PROBE_MAX window. (Stopping early would miss a key
+#    that probed past a since-evicted slot — the classic open-addressing-
+#    deletion bug.) _pc_put dedupes on key (overwrites in place) so at most one
+#    slot ever holds a given page; _pc_evict zeroes ALL matches defensively.
+#  - COHERENCE is the engine's job (page.cyr / lib.cyr), not this module's:
+#    invalidate-on-write (_pc_evict in page_write/page_free) keeps the cache in
+#    step with disk same-process; the HDR_COMMITGEN gate (_pc_check) flushes on
+#    any cross-handle/cross-process commit. This module is the mechanism only.
+
+# OPT-IN (v1.12.0). The cache is OFF by default and every entry point short-
+# circuits on _pc_on == 0 (a single flag load — no mutex, no memcpy), so the
+# default read/write path is identical to the no-cache path. It is REDUNDANT
+# with the OS page cache for RAM-resident data (a hot lseek+read already returns
+# from the kernel page cache) AND its single global mutex re-serializes the
+# otherwise lock-free concurrent readers — so on warm / RAM-resident workloads
+# it is a net LOSS (measured ~3x on tmpfs). It pays off only for COLD or
+# slow-disk read-heavy workloads, where avoiding real I/O beats the lock cost.
+# Consumers opt in with patra_cache_enable(1) once at startup (process-global —
+# one shared cache across all handles). The 4MB buffer pool is allocated lazily
+# on first enable, so default-off consumers pay nothing.
+
+enum PcConst { PC_CAP = 1024; PC_PROBE_MAX = 8; }
+
+var _pc_on = 0;     # master switch: 0 = disabled (default), 1 = enabled
+var _pc_keys = 0;   # alloc(PC_CAP*8): page number per slot, 0 = empty
+var _pc_bufs = 0;   # alloc(PC_CAP*8): pointer to a PAGE_SIZE buffer per slot
+var _pc_gen = 0;    # generation the whole cache is coherent with
+var _pc_mtx = 0;    # mutex cell (lib/sync.cyr)
+
+# Knuth multiplicative hash, masked to PC_CAP-1. The product may overflow i64
+# and go negative; the low 10 bits (& PC_CAP-1) are well-defined regardless of
+# sign, so the slot index is always 0..PC_CAP-1.
+fn _pc_hash(num): i64 {
+    return (num * 2654435761) & (PC_CAP - 1);
+}
+
+# Called from patra_init. Creates only the (cheap) mutex cell; the 4MB buffer
+# pool is deferred to the first patra_cache_enable(1) so default-off consumers
+# allocate nothing.
+fn _pc_init(): i64 {
+    _pc_on = 0;
+    _pc_gen = 0;
+    if (_pc_mtx == 0) { _pc_mtx = mutex_new(); }
+    return 0;
+}
+
+# Lazily allocate the slot metadata + 1024 PAGE_SIZE buffers (4MB), once. alloc()
+# (bump, thread-safe, never freed) gives stable buffer addresses for the process
+# lifetime, so the cache never touches the freelist at runtime.
+fn _pc_alloc(): i64 {
+    if (_pc_keys != 0) { return 0; }
+    _pc_keys = alloc(PC_CAP * 8);
+    _pc_bufs = alloc(PC_CAP * 8);
+    var i = 0;
+    while (i < PC_CAP) {
+        store64(_pc_keys + i * 8, 0);
+        store64(_pc_bufs + i * 8, alloc(PAGE_SIZE));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Public: turn the shared page cache on/off (process-global — affects ALL
+# handles). Call once at startup before spawning worker threads. Enabling
+# allocates the pool on first use and flushes any stale entries; the generation
+# gate re-syncs on the next op. Returns PATRA_OK.
+fn patra_cache_enable(on): i64 {
+    if (on == 0) { _pc_on = 0; return PATRA_OK; }
+    _pc_alloc();
+    mutex_lock(_pc_mtx);
+    memset(_pc_keys, 0, PC_CAP * 8);
+    _pc_gen = 0;
+    _pc_on = 1;
+    mutex_unlock(_pc_mtx);
+    return PATRA_OK;
+}
+
+# Public: is the shared page cache currently enabled?
+fn patra_cache_enabled(): i64 { return _pc_on; }
+
+# Look up page `num`. On hit, memcpy the cached page into `buf` and return 1;
+# on miss return 0. Scans the FULL probe window (holes from eviction mean an
+# empty slot does not terminate the search).
+fn _pc_get(num, buf): i64 {
+    if (num == 0) { return 0; }
+    if (_pc_on == 0) { return 0; }
+    mutex_lock(_pc_mtx);
+    var h = _pc_hash(num);
+    var hit = 0;
+    var i = 0;
+    while (i < PC_PROBE_MAX) {
+        var slot = (h + i) & (PC_CAP - 1);
+        if (load64(_pc_keys + slot * 8) == num) {
+            memcpy(buf, load64(_pc_bufs + slot * 8), PAGE_SIZE);
+            hit = 1;
+        }
+        i = i + 1;
+    }
+    mutex_unlock(_pc_mtx);
+    return hit;
+}
+
+# Insert / refresh page `num` with the contents of `buf`. Dedupes on key (an
+# existing slot for `num` is overwritten in place, so at most one slot per
+# page); else the first empty slot in the window; else (window full of other
+# keys) evicts the probe-start slot. memcpy is done under the lock.
+fn _pc_put(num, buf): i64 {
+    if (num == 0) { return 0; }
+    if (_pc_on == 0) { return 0; }
+    mutex_lock(_pc_mtx);
+    var h = _pc_hash(num);
+    var target = 0 - 1;
+    var empty = 0 - 1;
+    var i = 0;
+    while (i < PC_PROBE_MAX) {
+        var slot = (h + i) & (PC_CAP - 1);
+        var k = load64(_pc_keys + slot * 8);
+        if (k == num) { target = slot; }
+        if (k == 0) {
+            if (empty < 0) { empty = slot; }
+        }
+        i = i + 1;
+    }
+    if (target < 0) { target = empty; }
+    if (target < 0) { target = h; }
+    memcpy(load64(_pc_bufs + target * 8), buf, PAGE_SIZE);
+    store64(_pc_keys + target * 8, num);
+    mutex_unlock(_pc_mtx);
+    return 0;
+}
+
+# Drop page `num` from the cache (zeroes every matching key in the window).
+# Called by the writer on page_write / page_free (invalidate-on-write).
+fn _pc_evict(num): i64 {
+    if (num == 0) { return 0; }
+    if (_pc_on == 0) { return 0; }
+    mutex_lock(_pc_mtx);
+    var h = _pc_hash(num);
+    var i = 0;
+    while (i < PC_PROBE_MAX) {
+        var slot = (h + i) & (PC_CAP - 1);
+        if (load64(_pc_keys + slot * 8) == num) {
+            store64(_pc_keys + slot * 8, 0);
+        }
+        i = i + 1;
+    }
+    mutex_unlock(_pc_mtx);
+    return 0;
+}
+
+# Generation gate: if the on-disk commit generation differs from the one the
+# cache is labeled with, another handle or process committed — flush the whole
+# cache and adopt the new generation. != (not >) so a WAL-recovery gen rewind
+# also forces a flush. Called once per read op after the header is re-read.
+fn _pc_check(disk_gen): i64 {
+    if (_pc_on == 0) { return 0; }
+    mutex_lock(_pc_mtx);
+    if (disk_gen != _pc_gen) {
+        memset(_pc_keys, 0, PC_CAP * 8);
+        _pc_gen = disk_gen;
+    }
+    mutex_unlock(_pc_mtx);
+    return 0;
+}
+
+# Unconditional full flush (every key -> empty). Buffers are retained.
+fn _pc_flush(): i64 {
+    if (_pc_on == 0) { return 0; }
+    mutex_lock(_pc_mtx);
+    memset(_pc_keys, 0, PC_CAP * 8);
+    mutex_unlock(_pc_mtx);
+    return 0;
+}
+
+# Label the cache as coherent with generation `g`. A writer calls this after
+# bumping HDR_COMMITGEN (and evicting the pages it changed via page_write), so a
+# subsequent SAME-process reader's _pc_check finds gen == _pc_gen and does NOT
+# needlessly flush — the targeted evicts already made the cache coherent. A
+# cross-process writer can't reach our _pc_gen, so its commit still trips the
+# != flush in _pc_check. Called inside the writer's LOCK_EX.
+fn _pc_set_gen(g): i64 {
+    if (_pc_on == 0) { return 0; }
+    mutex_lock(_pc_mtx);
+    _pc_gen = g;
+    mutex_unlock(_pc_mtx);
+    return 0;
+}

@@ -174,8 +174,8 @@ fn _bt_push_up(fd, hdr, root, left_pg, sep, right_pg): i64 {
     }
 
     # Parent full — split internal node
-    var tk = fl_alloc(520);
-    var tc = fl_alloc(528);
+    var tk = _pt_alloc(520);
+    var tc = _pt_alloc(528);
 
     # Find position for sep
     var pos = nk;
@@ -241,8 +241,8 @@ fn _bt_push_up(fd, hdr, root, left_pg, sep, right_pg): i64 {
     }
     page_write(fd, rpg, pb);
 
-    fl_free(tk);
-    fl_free(tc);
+    _pt_free(tk);
+    _pt_free(tc);
     pg_free(pb);
 
     _bt_pdepth = _bt_pdepth - 1;
@@ -266,8 +266,8 @@ fn btree_insert(fd, hdr, root, key, val): i64 {
     }
 
     # Leaf full — build sorted temp (64 entries)
-    var tk = fl_alloc(520);
-    var tv = fl_alloc(520);
+    var tk = _pt_alloc(520);
+    var tv = _pt_alloc(520);
     var ins = 0;
     var ff = 0;
     for (var i = 0; i < nk; i = i + 1) {
@@ -313,8 +313,8 @@ fn btree_insert(fd, hdr, root, key, val): i64 {
     }
     page_write(fd, rpg, buf);
 
-    fl_free(tk);
-    fl_free(tv);
+    _pt_free(tk);
+    _pt_free(tv);
     pg_free(buf);
 
     return _bt_push_up(fd, hdr, root, leaf_pg, sep, rpg);

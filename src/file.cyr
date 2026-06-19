@@ -54,12 +54,22 @@ enum PatraErr {
 }
 
 # Header layout (4096 bytes total — page 0)
+#
+# HDR_COMMITGEN (v1.12.0 P2) is a monotonic commit-generation counter living in
+# the formerly-reserved 32..63 region (HDR_TBLCOUNT ends at 32, HDR_TBLDIR
+# starts at 64). patra_hdr_init memsets the whole page to 0, so new AND old
+# files read gen 0 — backward/forward compatible, NO format/version break
+# (PATRA_VER stays 1; an old binary just ignores it). Every committed header
+# write bumps it; a reader (on any handle or process) that finds the on-disk gen
+# != its cached gen flushes the shared page cache (pcache.cyr). 8 of the 32
+# reserved bytes are now used; 40..63 stay reserved.
 enum HdrOff {
     HDR_MAGIC = 0;
     HDR_VER = 4;
     HDR_PGCOUNT = 8;
     HDR_FREEHEAD = 16;
     HDR_TBLCOUNT = 24;
+    HDR_COMMITGEN = 32;
     HDR_TBLDIR = 64;
 }
 
@@ -204,6 +214,39 @@ fn _pt_file_open(path): i64 {
     return sys_open(path, 2 + O_NOFOLLOW, 0);
 }
 
+# ── Allocator serialization (v1.12.0 P2) ───────────
+#
+# lib/freelist.cyr's fl_alloc/fl_free are NOT thread-safe — they mutate
+# process-global free-list heads + the bump arena with plain load/store, no
+# lock (unlike alloc.cyr's bump allocator, which has a CAS spinlock). Once
+# concurrent readers run (the read lock drops in a later step) two reader
+# threads can allocate at once (result sets, slab-overflow buffers) and corrupt
+# the freelist. So EVERY patra-issued fl_alloc/fl_free goes through _pt_alloc /
+# _pt_free, serialized by this process-global mutex. The critical section is
+# just the freelist splice (tiny), so contention is far below the old
+# whole-statement mutex. _pt_alloc_mtx is created in patra_init; 0 before then
+# means single-threaded (no lock) — the same no-op contract as _patra_mtx.
+# LOCK-ORDER INVARIANT: the page cache (pcache.cyr, added later) must NEVER hold
+# its _pc_mtx across an _pt_alloc / _pt_free call — allocation is always done
+# outside the cache lock, so the two mutexes never nest.
+var _pt_alloc_mtx = 0;
+
+fn _pt_alloc(n): i64 {
+    if (_pt_alloc_mtx == 0) { return fl_alloc(n); }
+    mutex_lock(_pt_alloc_mtx);
+    var p = fl_alloc(n);
+    mutex_unlock(_pt_alloc_mtx);
+    return p;
+}
+
+fn _pt_free(p): i64 {
+    if (_pt_alloc_mtx == 0) { return fl_free(p); }
+    mutex_lock(_pt_alloc_mtx);
+    fl_free(p);
+    mutex_unlock(_pt_alloc_mtx);
+    return 0;
+}
+
 # ── Page slab (4KB buffer pool) ───────────
 #
 # Hot paths (page_read/_write callers, btree node walks, schema reads,
@@ -214,36 +257,48 @@ fn _pt_file_open(path): i64 {
 # can't accumulate unbounded retained memory; overflows fall back to
 # freelist transparently. Callers must pair pg_alloc / pg_free — slab
 # correctness depends on every pushed buffer being PAGE_SIZE.
+#
+# PER-THREAD (v1.12.0 P2): the slab is a non-atomic LIFO, so two concurrent
+# reader threads sharing one would lose updates (hand out the same buffer or
+# leak one). Each thread keeps its OWN slab in TLS (lib/thread_local.cyr) —
+# slot 3 = stack array ptr, slot 4 = top index (slots 0-2 are the SQL parse
+# scratch, sql.cyr). The backing array is alloc()'d (thread-safe bump) lazily
+# per thread; the buffers it caches come from fl_alloc on overflow, still
+# serialized by _patra_lock until the read lock is dropped (S5) behind the
+# allocator mutex (S3). Note: each worker thread retains up to PG_SLAB_MAX
+# 4KB buffers, so a large reader pool multiplies retained slab memory.
 enum SlabConst { PG_SLAB_MAX = 32; }
-var _pg_slab_stack = 0;
-var _pg_slab_top = 0;
+enum SlabTls { TLS_SLAB_STACK = 3; TLS_SLAB_TOP = 4; }
 
 fn _pg_slab_init(): i64 {
-    if (_pg_slab_stack == 0) {
-        _pg_slab_stack = alloc(PG_SLAB_MAX * 8);
+    if (thread_local_get(TLS_SLAB_STACK) == 0) {
+        thread_local_set(TLS_SLAB_STACK, alloc(PG_SLAB_MAX * 8));
     }
     return 0;
 }
 
-# Allocate a 4KB buffer from the page slab, falling back to fl_alloc on miss.
+# Allocate a 4KB buffer from this thread's page slab, falling back to fl_alloc.
 fn pg_alloc(): i64 {
     _pg_slab_init();
-    if (_pg_slab_top > 0) {
-        _pg_slab_top = _pg_slab_top - 1;
-        return load64(_pg_slab_stack + _pg_slab_top * 8);
+    var top = thread_local_get(TLS_SLAB_TOP);
+    if (top > 0) {
+        top = top - 1;
+        thread_local_set(TLS_SLAB_TOP, top);
+        return load64(thread_local_get(TLS_SLAB_STACK) + top * 8);
     }
-    return fl_alloc(PAGE_SIZE);
+    return _pt_alloc(PAGE_SIZE);
 }
 
-# Return a 4KB buffer to the page slab, or to fl_free if the slab is full.
+# Return a 4KB buffer to this thread's page slab, or to fl_free if it's full.
 fn pg_free(buf): i64 {
     if (buf == 0) { return 0; }
     _pg_slab_init();
-    if (_pg_slab_top < PG_SLAB_MAX) {
-        store64(_pg_slab_stack + _pg_slab_top * 8, buf);
-        _pg_slab_top = _pg_slab_top + 1;
+    var top = thread_local_get(TLS_SLAB_TOP);
+    if (top < PG_SLAB_MAX) {
+        store64(thread_local_get(TLS_SLAB_STACK) + top * 8, buf);
+        thread_local_set(TLS_SLAB_TOP, top + 1);
         return 0;
     }
-    fl_free(buf);
+    _pt_free(buf);
     return 0;
 }

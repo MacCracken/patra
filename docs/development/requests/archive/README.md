@@ -22,4 +22,5 @@ and the CHANGELOG:
 
 | File | Filed | Shipped | Hook |
 |---|---|---|---|
+| [`2026-06-09-yeo-cy-test-concurrent-readers.md`](2026-06-09-yeo-cy-test-concurrent-readers.md) | 2026-06-09 | v1.12.0 | Concurrent `SELECT`s — connection-per-thread + lock-free reads (~3.6× on a 4-thread scan); writers single-writer. Thread-local parse scratch + page slab, allocator mutex. Shared page cache shipped opt-in / off-by-default. |
 | [`2026-06-18-yeo-cy-test-insert-returning-id.md`](2026-06-18-yeo-cy-test-insert-returning-id.md) | 2026-06-18 | v1.11.5 | Atomic `patra_insert_returning` / `patra_exec_returning` — read the assigned id / affected-count inside the write's statement-mutex critical section, closing the v1.11.3 readback race for concurrent writers on a shared handle. |

@@ -145,10 +145,10 @@ fn patra_json_build(buf, max, keys, vals, types, n): i64 {
 # values (ignored for INT). Added in 1.5.3 to close the embedded-NUL
 # truncation in `jsonl_append_obj` without breaking existing callers.
 fn jsonl_append_obj_lens(fd, keys, vals, vlens, types, n): i64 {
-    var buf = fl_alloc(4096);
+    var buf = _pt_alloc(4096);
     var len = json_build_lens(buf, 4096, keys, vals, vlens, types, n);
     jsonl_append(fd, buf, len);
-    fl_free(buf);
+    _pt_free(buf);
     return 0;
 }
 
@@ -171,12 +171,12 @@ fn jsonl_read(fd): i64 {
 
     if (size <= 0) {
         patra_unlock(fd);
-        var lr = fl_alloc(JLR_SZ);
+        var lr = _pt_alloc(JLR_SZ);
         memset(lr, 0, JLR_SZ);
         return lr;
     }
 
-    var data = fl_alloc(size + 1);
+    var data = _pt_alloc(size + 1);
     var rd = 0;
     var eof = 0;
     while (eof == 0) {
@@ -198,7 +198,7 @@ fn jsonl_read(fd): i64 {
         if (load8(data + size - 1) != 10) { nlc = nlc + 1; }
     }
 
-    var lines = fl_alloc(nlc * 16 + 16);
+    var lines = _pt_alloc(nlc * 16 + 16);
     var li = 0;
     var start = 0;
     for (var i = 0; i <= size; i = i + 1) {
@@ -217,7 +217,7 @@ fn jsonl_read(fd): i64 {
         }
     }
 
-    var lr = fl_alloc(JLR_SZ);
+    var lr = _pt_alloc(JLR_SZ);
     store64(lr + JLR_COUNT, li);
     store64(lr + JLR_DATA, data);
     store64(lr + JLR_LINES, lines);
@@ -244,9 +244,9 @@ fn jsonl_lines_free(lr): i64 {
     if (lr == 0) { return 0; }
     var d = load64(lr + JLR_DATA);
     var l = load64(lr + JLR_LINES);
-    if (d != 0) { fl_free(d); }
-    if (l != 0) { fl_free(l); }
-    fl_free(lr);
+    if (d != 0) { _pt_free(d); }
+    if (l != 0) { _pt_free(l); }
+    _pt_free(lr);
     return 0;
 }
 
@@ -355,7 +355,7 @@ fn jsonl_get_int(line, llen, key, klen): i64 {
 fn jsonl_count(fd): i64 {
     patra_lock_sh(fd);
     syscall(SYS_LSEEK, fd, 0, 0);
-    var buf = fl_alloc(4096);
+    var buf = _pt_alloc(4096);
     var count = 0;
     var eof = 0;
     while (eof == 0) {
@@ -365,7 +365,7 @@ fn jsonl_count(fd): i64 {
             if (load8(buf + i) == 10) { count = count + 1; }
         }
     }
-    fl_free(buf);
+    _pt_free(buf);
     patra_unlock(fd);
     return count;
 }

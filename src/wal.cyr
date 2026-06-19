@@ -43,7 +43,7 @@ enum WalConst {
 # if unavailable (very old kernel / restricted container), falls back to
 # a time + tx-counter mix — weaker but still unique per transaction.
 fn _wal_gen_salts(): i64 {
-    var buf = fl_alloc(16);
+    var buf = _pt_alloc(16);
     var nr = syscall(SYS_GETRANDOM, buf, 16, 0);
     if (nr == 16) {
         _wal_salt1 = load64(buf);
@@ -54,7 +54,7 @@ fn _wal_gen_salts(): i64 {
         _wal_salt1 = t * 2654435761 + _wal_tx_counter;
         _wal_salt2 = t + _wal_tx_counter * 1099511628211;
     }
-    fl_free(buf);
+    _pt_free(buf);
     return 0;
 }
 
@@ -85,14 +85,14 @@ fn wal_start(db_fd, wal_path): i64 {
     _wal_gen_salts();
 
     # Write WAL header: magic + version + salt1 + salt2
-    var hdr = fl_alloc(WAL_HDR_SZ);
+    var hdr = _pt_alloc(WAL_HDR_SZ);
     memset(hdr, 0, WAL_HDR_SZ);
     store32(hdr, WAL_MAGIC);
     store32(hdr + 4, WAL_VER);
     store64(hdr + 8, _wal_salt1);
     store64(hdr + 16, _wal_salt2);
     sys_write(_wal_fd, hdr, WAL_HDR_SZ);
-    fl_free(hdr);
+    _pt_free(hdr);
     return PATRA_OK;
 }
 
@@ -117,7 +117,7 @@ fn wal_log_page(page_num): i64 {
     _wal_nlog = _wal_nlog + 1;
 
     # Read current page from disk
-    var buf = fl_alloc(WAL_REC_SZ);
+    var buf = _pt_alloc(WAL_REC_SZ);
     memset(buf, 0, WAL_REC_SZ);
     store64(buf, page_num);
     _pt_seek(_wal_db_fd, page_offset(page_num));
@@ -127,7 +127,7 @@ fn wal_log_page(page_num): i64 {
     store64(buf + 8 + PAGE_SIZE, _wal_hash(page_num, buf + 8, _wal_salt1, _wal_salt2));
     # Write record to WAL
     sys_write(_wal_fd, buf, WAL_REC_SZ);
-    fl_free(buf);
+    _pt_free(buf);
     return 0;
 }
 
@@ -154,14 +154,14 @@ fn wal_commit(wal_path): i64 {
 # PATRA_OK, or PATRA_ERR_MAGIC on bad magic / unsupported version / short read.
 fn _wal_hdr_verify(fd): i64 {
     if (syscall(SYS_LSEEK, fd, 0, 0) < 0) { return PATRA_ERR_IO; }
-    var hdr = fl_alloc(WAL_HDR_SZ);
+    var hdr = _pt_alloc(WAL_HDR_SZ);
     var nr = sys_read(fd, hdr, WAL_HDR_SZ);
-    if (nr != WAL_HDR_SZ) { fl_free(hdr); return PATRA_ERR_MAGIC; }
-    if (load32(hdr) != WAL_MAGIC) { fl_free(hdr); return PATRA_ERR_MAGIC; }
-    if (load32(hdr + 4) != WAL_VER) { fl_free(hdr); return PATRA_ERR_MAGIC; }
+    if (nr != WAL_HDR_SZ) { _pt_free(hdr); return PATRA_ERR_MAGIC; }
+    if (load32(hdr) != WAL_MAGIC) { _pt_free(hdr); return PATRA_ERR_MAGIC; }
+    if (load32(hdr + 4) != WAL_VER) { _pt_free(hdr); return PATRA_ERR_MAGIC; }
     _wal_salt1 = load64(hdr + 8);
     _wal_salt2 = load64(hdr + 16);
-    fl_free(hdr);
+    _pt_free(hdr);
     return PATRA_OK;
 }
 
@@ -177,7 +177,7 @@ fn wal_rollback(wal_path): i64 {
         sys_unlink(wal_path);
         return PATRA_ERR_MAGIC;
     }
-    var buf = fl_alloc(WAL_REC_SZ);
+    var buf = _pt_alloc(WAL_REC_SZ);
     var done = 0;
     while (done == 0) {
         var nr = sys_read(_wal_fd, buf, WAL_REC_SZ);
@@ -189,7 +189,7 @@ fn wal_rollback(wal_path): i64 {
         _pt_seek(_wal_db_fd, page_offset(pg));
         sys_write(_wal_db_fd, buf + 8, PAGE_SIZE);
     }
-    fl_free(buf);
+    _pt_free(buf);
     syscall(SYS_FDATASYNC, _wal_db_fd);
     sys_close(_wal_fd);
     _wal_fd = 0 - 1;
@@ -209,7 +209,7 @@ fn wal_recover(db_fd, wal_path): i64 {
         sys_close(wfd);
         return 1;
     }
-    var buf = fl_alloc(WAL_REC_SZ);
+    var buf = _pt_alloc(WAL_REC_SZ);
     var done = 0;
     while (done == 0) {
         var nr = sys_read(wfd, buf, WAL_REC_SZ);
@@ -221,7 +221,7 @@ fn wal_recover(db_fd, wal_path): i64 {
         _pt_seek(db_fd, page_offset(pg));
         sys_write(db_fd, buf + 8, PAGE_SIZE);
     }
-    fl_free(buf);
+    _pt_free(buf);
     syscall(SYS_FDATASYNC, db_fd);
     sys_close(wfd);
     sys_unlink(wal_path);

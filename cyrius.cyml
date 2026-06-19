@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "Patra — structured storage and SQL queries for Cyrius. The sovereign database."
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.2.21"
+cyrius = "6.2.22"
 repository = "https://github.com/MacCracken/patra"
 
 [build]
@@ -17,6 +17,7 @@ output = "patra"
 # is unchanged from the old scripts/bundle.sh (retired in v1.5.5).
 modules = [
     "src/file.cyr",
+    "src/pcache.cyr",
     "src/wal.cyr",
     "src/page.cyr",
     "src/row.cyr",
@@ -30,7 +31,7 @@ modules = [
 ]
 
 [deps]
-stdlib = ["syscalls", "string", "alloc", "freelist", "io", "fmt", "str", "vec", "atomic", "sync"]
+stdlib = ["syscalls", "string", "alloc", "freelist", "io", "fmt", "str", "vec", "atomic", "sync", "thread_local"]
 
 # Patra's sole external dep (structured logging: sakshi_error / sakshi_set_level,
 # used in src/file.cyr + src/lib.cyr). Cyrius does not resolve transitive deps,

@@ -11,7 +11,7 @@
 - **Transactions** — BEGIN/COMMIT/ROLLBACK with write-ahead logging
 - **Durability modes** — per-write fsync (default) or opt-in group-commit / batched fsync (`patra_set_sync_mode`)
 - **Prepared statements + bind params** — `?` placeholders with `patra_prepare` / `patra_bind_*`; parse-once, dispatch-many
-- **Thread-safe handles** — one db handle is safe to share across threads (auto-commit statement ops are internally serialized; since 1.11.0)
+- **Concurrent readers** — `SELECT`s run in parallel (connection-per-thread, lock-free reads; since 1.12.0); writes stay single-writer. A shared handle is also safe across threads (since 1.11.0)
 - **Zero dependencies** — pure Cyrius, no libsqlite3, no FFI
 - **File locking** — `flock` for concurrent process access
 - **JSON Lines mode** — append-only log with structured queries (libro integration)
@@ -93,21 +93,47 @@ modules = ["dist/sakshi.cyr"]
 The single-include bundle (`dist/patra.cyr`) carries the same requirement:
 include `dist/sakshi.cyr` next to it.
 
-As of **v1.11.0**, patra's internal thread-safety mutex uses the cyrius
-`atomic` stdlib module. Add `"atomic"` to your `[deps].stdlib` list
-(alongside whatever patra already needs) or the link fails on undefined
-`atomic_cas` / `atomic_store` / `atomic_fence`:
+patra's threading primitives come from the cyrius stdlib. Replicate this
+`[deps].stdlib` list (cyrius does not resolve transitive deps, so a consumer
+vendoring `dist/patra.cyr` must declare them) or the link fails on undefined
+`atomic_*` / `mutex_*` / `thread_local_*`:
 
 ```toml
 [deps]
-stdlib = ["syscalls", "string", "alloc", "freelist", "io", "fmt", "str", "vec", "atomic"]
+stdlib = ["syscalls", "string", "alloc", "freelist", "io", "fmt", "str", "vec", "atomic", "sync", "thread_local"]
 ```
 
-**Thread-safety**: a patra db handle is safe to share across threads —
-auto-commit statement calls (`patra_exec` / `patra_query` / the prepared
-variants / `patra_insert_row`) are internally serialized. Explicit
-`patra_begin … patra_commit` spans are *not* internally serialized; keep
-transactions on a single thread (or guard the span yourself).
+**Thread-safety**: a patra db handle is safe to share across threads — auto-commit
+statement calls (`patra_exec` / `patra_query` / the prepared variants /
+`patra_insert_row`) are internally consistent. Explicit `patra_begin … patra_commit`
+spans are *not* internally serialized; keep transactions on a single thread.
+
+**Concurrent readers (v1.12.0)**: `SELECT`s run in parallel — `patra_query` /
+`patra_query_prepared` no longer serialize on the statement lock; writes stay
+exclusive (single-writer). For read parallelism, use **connection-per-thread**:
+each worker thread opens its own handle (`patra_open`) over the same file. The
+per-fd `flock` (shared for readers, exclusive for writers) arbitrates across
+handles and processes, and the OS page cache serves shared pages from RAM.
+`patra_init()` is still called once on the main thread before spawning workers
+(it installs that thread's TLS block); worker threads spawned via the cyrius
+`thread` module inherit one automatically, but a foreign (non-cyrius) thread must
+call `thread_local_init()` once before its first patra call. Sharing a single
+handle across reader threads still works but does **not** give read parallelism
+(and a shared handle would race the per-handle header/file-offset) — open one per
+thread for the speedup.
+
+**Opt-in page cache** (`patra_cache_enable(on)`, process-global, **default OFF**):
+an in-process shared page cache. It is redundant with the OS page cache for
+RAM-resident data and its global lock re-serializes the concurrent readers, so it
+is a **net loss on warm workloads** — enable it only for cold / slow-disk
+read-heavy workloads where avoiding real I/O outweighs the lock cost.
+
+**BYTES/TEXT result reads under concurrent writers**: a result set stores
+`BYTES` / `TEXT` columns as a `(page, len)` reference materialized lazily by
+`patra_result_read_bytes` / `patra_result_read_text` *after* the query returns.
+A concurrent writer that deletes (frees + reuses) those rows in the gap can make
+the lazy read return stale/foreign bytes. Read a result set's `BYTES`/`TEXT`
+values before yielding to a writer that may delete those rows, or serialize.
 
 ## Consumers
 

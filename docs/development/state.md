@@ -9,12 +9,12 @@
 
 ## Current
 
-- **Version**: 1.11.5 (read `VERSION` for the authoritative number)
-- **Cyrius toolchain**: 6.2.21 (pinned in `cyrius.cyml [package].cyrius`).
+- **Version**: 1.12.0 (read `VERSION` for the authoritative number)
+- **Cyrius toolchain**: 6.2.22 (pinned in `cyrius.cyml [package].cyrius`).
   Progression on the 6.2.x line: 6.1.15 (v1.11.0) → 6.2.1 (v1.11.1, stdlib
-  pin sweep) → 6.2.19 (v1.11.3) → 6.2.21 (v1.11.5), each clearing the
-  build-time pin-drift warning against the installed toolchain. Each bump
-  source-change-free for the toolchain itself — build, tests, fuzz,
+  pin sweep) → 6.2.19 (v1.11.3) → 6.2.21 (v1.11.5) → 6.2.22 (v1.12.0), each
+  clearing the build-time pin-drift warning against the installed toolchain.
+  Each bump source-change-free for the toolchain itself — build, tests, fuzz,
   benchmarks, libro/vidya integration, and the `src/lib.cyr` aarch64
   cross-build all green.
 - **sakshi pin**: 2.2.3 (`[deps.sakshi].tag`; modules path
@@ -22,8 +22,9 @@
   downstream consumers must replicate `[deps.sakshi]` alongside
   `[deps.patra]` (cyrius does not resolve transitive deps) — documented
   in README § Dependencies as of v1.10.0.
-- **Binary**: ~240 KB demo (`programs/demo.cyr`, x86_64; 239,984 bytes at
-  v1.11.5; +464 over v1.11.4 — the two atomic readback entry points). Note:
+- **Binary**: ~244 KB demo (`programs/demo.cyr`, x86_64; 243,728 bytes at
+  v1.12.0; +3,744 over v1.11.5 — the `pcache.cyr` cache module, TLS scratch
+  accessors, and the `_pt_alloc`/`_pt_free` allocator wrappers). Note:
   `CYRIUS_DCE=1` and non-DCE builds are **byte-identical** under cyrius 6.2.x —
   DCE NOP-fills the unreachable fns in place but does not strip them, so the
   figure is the same either way (see
@@ -31,27 +32,34 @@
   re-verified 2026-06-17). aarch64 cross-build of `src/lib.cyr` produces a valid
   ARM ELF — `lib/sync.cyr` + `atomic.cyr` carry aarch64 branches
   (`SYS_FUTEX` = 98 on arm64), so portability holds.
-- **Status**: **v1.11.5 — atomic insert-returning-id (yeo-cy-test).**
-  `patra_insert_returning(db, stmt, out_id)` and
-  `patra_exec_returning(db, stmt, out_affected)` capture the assigned
-  AUTOINCREMENT id / affected-row count *inside* the same statement-mutex
-  critical section as the write, closing the v1.11.3 readback race: under a
-  lock-free worker pool sharing one handle, `patra_exec_prepared` +
-  `patra_last_insert_id` are two ops, so a concurrent write could land between
-  them and the echo return another worker's value. The underlying
-  `DB_LAST_ID` / `DB_ROWS_AFFECTED` field semantics are unchanged — these are
-  the atomic read-it-with-the-write variants. v1.11.4 migrated the statement
-  mutex to the stdlib `lib/sync.cyr` (`mutex_*`); v1.11.3 shipped the
-  write-readback pair (DB handle 48 → 64 B). The 1.10.x data-model/SQL arc
-  (5/5 yeo-cy-test blockers) stays complete. **Open / next:** **v1.12.0 —
-  P2 concurrent readers** (reader/writer pager lock + thread-local
-  parse/exec scratch; see [`roadmap.md`](roadmap.md)).
-- **Thread-safety contract**: auto-commit statement calls are internally
-  serialized + safe to share a handle across threads. Explicit
-  `patra_begin … patra_commit` spans are **not** internally serialized
-  (per-call locking can't make a multi-call transaction atomic) — keep
-  transactions single-threaded or serialize the span externally. Result-set
-  accessors touch only caller-owned memory (no lock needed).
+- **Status**: **v1.12.0 — concurrent readers (yeo-cy-test P2).** `SELECT`s run
+  in parallel instead of serializing on the statement mutex — **~3.6×** read
+  throughput on a 4-thread scan (`read_scan_4t` 514 → 143 µs/scan). Model is
+  **connection-per-thread**: each worker opens its own handle, and the per-fd
+  `flock` (shared readers / exclusive writers) arbitrates across handles +
+  processes; writers stay single-writer. Made safe by per-thread TLS parse
+  scratch + page slab (`lib/thread_local.cyr`, slots 0–4), a process-global
+  allocator mutex `_pt_alloc_mtx` around the non-thread-safe freelist, and
+  dropping `_patra_lock` from the query path only. A shared in-process page
+  cache (`src/pcache.cyr`) also shipped but is **OFF by default**
+  (`patra_cache_enable`): it is redundant with the OS page cache and its global
+  lock re-serializes readers, so it regresses warm workloads (~3× slower on
+  tmpfs) — useful only for cold/slow-disk read-heavy work. `HDR_COMMITGEN`
+  (reserved header byte 32, no format break) is the cache's cross-handle/process
+  generation gate. The old shared-single-handle model still works. **Deferred:**
+  eager BYTES/TEXT result materialization (a pre-existing lazy-read TOCTOU under
+  concurrent writers — documented caveat; consumer-driven). See
+  [`../adr/0002-connection-per-thread-concurrency.md`](../adr/0002-connection-per-thread-concurrency.md)
+  + [`../adr/0003-opt-in-page-cache.md`](../adr/0003-opt-in-page-cache.md).
+- **Thread-safety contract**: `SELECT` (`patra_query` / `patra_query_prepared`)
+  is lock-free and runs concurrently — use one handle per reader thread for
+  parallelism (a shared handle works but serializes and would race the
+  per-handle header/fd-offset). Auto-commit writes are serialized + safe across
+  threads. Explicit `patra_begin … patra_commit` spans are **not** internally
+  serialized — keep transactions single-threaded or serialize the span. Result-set
+  accessors touch caller-owned memory; the exception is `patra_result_read_bytes`
+  / `read_text`, whose lazy `(page,len)` chain walk can return stale bytes if a
+  concurrent writer frees the row (read before yielding to such a writer).
 - **Primary target**: Linux x86_64. aarch64 cross-build best-effort
   (`src/lib.cyr` cross-builds clean under cyrius 6.1.15; the test
   programs in `programs/` still use raw `syscall(SYS_UNLINK, …)` and
@@ -59,38 +67,42 @@
 
 ## Source layout
 
-11 modules, ~5,344 lines total in `src/`.
+12 modules, ~5,707 lines total in `src/`.
 
 | File | Lines | Responsibility |
 |------|------:|----------------|
-| `src/lib.cyr` | 2080 | public API + includes (entry point); `patra_insert_row` / `result_read_bytes`; prepared statements (`patra_prepare` / `_exec_prepared` / `_query_prepared` / `_finalize`); column-list INSERT bind (v1.10.0); AUTOINCREMENT + `_max_int_col` (v1.10.1); TEXT insert/update/read (v1.10.2); bind params `patra_bind_int`/`patra_bind_text` + `_apply_binds` (v1.10.3); process-global mutex `_patra_mtx` + `_patra_lock`/`_patra_unlock` wrapping the statement entry points (v1.11.0, P1 thread-safety; migrated to stdlib `lib/sync.cyr` `mutex_*` in v1.11.4); write-readback `patra_last_insert_id` / `patra_rows_affected` + `_db_record_insert` (v1.11.3, DB handle 48 → 64 B); atomic `patra_insert_returning` / `patra_exec_returning` (v1.11.5) |
-| `src/sql.cyr` | 999 | tokenizer + recursive-descent parser — CREATE / INSERT / SELECT / UPDATE / DELETE / CREATE INDEX / ALTER / VACUUM; INSERT OR IGNORE; column-list INSERT (v1.10.0); AUTOINCREMENT (v1.10.1); TEXT type (v1.10.2); `?` bind placeholders (v1.10.3); aggregates; column-list projection; BYTES / BLOB keyword |
+| `src/lib.cyr` | 2132 | public API + includes (entry point); `patra_insert_row` / `result_read_bytes`; prepared statements (`patra_prepare` / `_exec_prepared` / `_query_prepared` / `_finalize`); column-list INSERT bind (v1.10.0); AUTOINCREMENT + `_max_int_col` (v1.10.1); TEXT insert/update/read (v1.10.2); bind params (v1.10.3); process-global mutex `_patra_mtx` (v1.11.0; stdlib `mutex_*` v1.11.4); write-readback `patra_last_insert_id` / `patra_rows_affected` (v1.11.3); atomic `patra_insert_returning` / `patra_exec_returning` (v1.11.5); **P2 (v1.12.0): `thread_local_init` + `_pt_alloc_mtx` in `patra_init`, read-path lock drop in `patra_query`/`_query_prepared`, `_pc_refresh` (header re-read + gen gate) on every locked op, `_db_hdr_commit`/`patra_commit` gen-bump + `_pc_set_gen`** |
+| `src/sql.cyr` | 1028 | tokenizer + recursive-descent parser — CREATE / INSERT / SELECT / UPDATE / DELETE / CREATE INDEX / ALTER / VACUUM; INSERT OR IGNORE; column-list INSERT (v1.10.0); AUTOINCREMENT (v1.10.1); TEXT type (v1.10.2); `?` bind placeholders (v1.10.3); aggregates; column-list projection; BYTES / BLOB keyword; **P2 (v1.12.0): per-thread TLS parse scratch — `_stoks`/`_spr`/`_sntoks` accessors + `_sql_ensure`** |
+| `src/pcache.cyr` | 214 | **P2 (v1.12.0): opt-in shared page cache.** 1024-slot open-addressed cache keyed by page#, single global mutex, copy-out under lock, Variant I invalidate-on-write, `HDR_COMMITGEN` gen gate. `_pc_get`/`_pc_put`/`_pc_evict`/`_pc_check`/`_pc_set_gen`/`_pc_flush`; public `patra_cache_enable` / `patra_cache_enabled` (**default OFF** — lazy 4 MB pool on first enable) |
 | `src/btree.cyr` | 505 | B+ tree order-64; insert / split / search / range / lazy delete / compaction / whole-tree free; schema index + autoinc markers (`SCH_IDX_*`, `SCH_AUTOINC_COL`) |
 | `src/table.cyr` | 440 | table create / insert / scan / update / delete + index maintenance + BYTES/TEXT chain cleanup (`_col_is_chain`); TEXT UPDATE rewrite; `_tbl_rows_affected` matched-count handshake (v1.11.3) |
 | `src/jsonl.cyr` | 371 | JSON Lines I/O, JSON builder, field extraction, escaping; `patra_json_build` (renamed from `json_build` in v1.9.0) |
-| `src/file.cyr` | 249 | `.patra` format, header, flock, fdatasync, constants (incl. COL_BYTES, COL_TEXT, COL_PARAM, PAGE_BYTES, BY_*); 4 KB page-slab allocator (`pg_alloc` / `pg_free`, v1.8.2) |
+| `src/file.cyr` | 304 | `.patra` format, header (incl. `HDR_COMMITGEN`, v1.12.0), flock helpers (`patra_lock_sh`/`ex`/`unlock`), fdatasync, constants; 4 KB page-slab allocator (`pg_alloc` / `pg_free`, v1.8.2; **per-thread TLS slab v1.12.0**); **P2 (v1.12.0): `_pt_alloc`/`_pt_free` allocator mutex around the non-thread-safe freelist** |
 | `src/wal.cyr` | 229 | write-ahead logging — page before-images, crash recovery, salted records |
 | `src/where.cyr` | 166 | WHERE evaluation — 7 operators (incl LIKE), AND / OR; BYTES/TEXT columns never match |
 | `src/row.cyr` | 124 | row encoding: i64, 256-byte strings, 16-byte (page, len) chain refs; `_col_is_chain` (BYTES/TEXT); word-at-a-time `_memeq256` for INSERT OR IGNORE STR (v1.8.2) |
 | `src/bytes.cyr` | 106 | variable-length chain storage (BYTES + TEXT) — write / read / free across PAGE_BYTES pages (BY_DATA_MAX = 4072) |
 | `src/page.cyr` | 74 | 4 KB page alloc / read / write / free list + WAL integration |
 
-**Include order matters**: `file → wal → page → row → bytes → sql → where → btree → table → jsonl`.
+**Include order matters**: `file → pcache → wal → page → row → bytes → sql → where → btree → table → jsonl`. (`pcache` after `file` for PAGE_SIZE/HDR_*, before `page` which calls into it.)
 
 ## Tests / Fuzz / Bench
 
-- **Unit**: `tests/tcyr/patra.tcyr` — **795 / 795** assertions pass under
-  cyrius 6.2.21 (+23 over v1.11.4: the v1.11.5 atomic-readback groups —
-  `insert_returning`, `insert_returning OR IGNORE`, `exec_returning`; the
-  v1.11.3 write-readback and v1.11.0 `test_concurrency` groups stay in, so the
-  suite pulls `lib/thread.cyr` + `lib/mmap.cyr`).
-- **Fuzz**: 6 harnesses in `fuzz/` — `fuzz_btree`, `fuzz_bytes`,
-  `fuzz_file`, `fuzz_jsonl`, `fuzz_sql`, `fuzz_wal`. All clean under the
-  10 s CI timeout. `fuzz_sql` carries 20 column-list INSERT invariants
-  (100–119, v1.10.0) + 13 AUTOINCREMENT (120–132, v1.10.1) + 10 TEXT
-  (140–149, v1.10.2) + 14 bind-parameter (160–173, v1.10.3, incl. a
-  quote-injection case).
-- **Benchmarks**: `tests/bcyr/patra.bcyr` — **36 benchmarks**; full
+- **Unit**: `tests/tcyr/patra.tcyr` — **834 / 834** assertions pass under
+  cyrius 6.2.22 (+39 over v1.11.5: the v1.12.0 P2 groups — `read concurrency`
+  (4 reader threads, own handle each, lock-free), `cross-handle visibility`,
+  `commit generation`, `page cache` (pcache unit) + `page cache coherence`
+  (enabled, write/read interleave); the prior concurrency groups stay in, so
+  the suite pulls `lib/thread.cyr` + `lib/mmap.cyr`).
+- **Fuzz**: 7 harnesses in `fuzz/` — `fuzz_btree`, `fuzz_bytes`,
+  `fuzz_file`, `fuzz_jsonl`, `fuzz_sql`, `fuzz_wal`, **`fuzz_pcache`** (v1.12.0,
+  200k random `_pc_put`/`_pc_get`/`_pc_evict`/`_pc_check` ops vs a shadow model
+  — dedupe / probe-with-holes / gen-gate invariants). All clean under the 10 s
+  CI timeout. `fuzz_sql` carries 20 column-list INSERT invariants (100–119) +
+  13 AUTOINCREMENT (120–132) + 10 TEXT (140–149) + 14 bind-parameter (160–173).
+- **Benchmarks**: `tests/bcyr/patra.bcyr` — **38 benchmarks** (+2 v1.12.0:
+  `read_scan_4t_par` ~143 µs/scan = ~3.6× the serialized baseline, and
+  `read_scan_4t_cached` ~475 µs = the opt-in cache's tmpfs regression); full
   table baselined under cyrius 6.0.1 at v1.9.5 (see
   [`BENCHMARKS.md`](BENCHMARKS.md)). v1.10.3 re-ran under 6.0.3: no
   regression — `insert_1k` 19 µs, `insert_1k_prepared` 14 µs unchanged
@@ -119,14 +131,15 @@ All git-tag pinned in `cyrius.cyml`. No FFI, no C, no libsqlite3.
 
 **Cyrius stdlib declared explicitly** in `cyrius.cyml [deps].stdlib`:
 `syscalls`, `string`, `alloc`, `freelist`, `io`, `fmt`, `str`, `vec`,
-`atomic`, `sync`. `atomic` added in v1.11.0 for the thread-safety mutex;
-`sync` added in v1.11.4 when the mutex moved to the stdlib's portable
-`lib/sync.cyr` (`mutex_new` / `mutex_lock` / `mutex_unlock`; `sync` depends
-on `atomic` + `alloc`, both already present). **Consumers vendoring
-`dist/patra.cyr` must replicate `"atomic"` and `"sync"` in their own
-`[deps].stdlib`** (cyrius doesn't resolve transitive deps — same constraint
-as `sakshi`). The unit test also pulls `thread` + `mmap`, but those are
-test-only (not a runtime dep of the library).
+`atomic`, `sync`, `thread_local`. `atomic` added in v1.11.0 for the
+thread-safety mutex; `sync` in v1.11.4 (portable `lib/sync.cyr` mutex);
+`thread_local` in **v1.12.0** for the per-thread parse scratch + page slab
+(`thread_local_init` / `_get` / `_set`, 16 slots via `%fs` / `TPIDR_EL0`).
+**Consumers vendoring `dist/patra.cyr` must replicate `"atomic"`, `"sync"`,
+and `"thread_local"` in their own `[deps].stdlib`** (cyrius doesn't resolve
+transitive deps — same constraint as `sakshi`). The unit test also pulls
+`thread` + `mmap`, but those are test-only (not a runtime dep of the library;
+worker threads spawned via `lib/thread.cyr` inherit a TLS block free).
 
 ## Storage layout (`.patra` files on disk)
 
@@ -164,6 +177,7 @@ payload at `BY_DATA_MAX = 4072`.
 
 | Version | Date | Summary |
 |---------|------|---------|
+| 1.12.0 | 2026-06-18 | **Concurrent readers (yeo-cy-test P2) + opt-in page cache + cyrius 6.2.21 → 6.2.22.** `SELECT`s run in parallel — `patra_query`/`patra_query_prepared` no longer take the statement mutex; **~3.6×** read throughput on a 4-thread scan (514 → 143 µs/scan). Model is **connection-per-thread** (each worker its own handle; per-fd flock arbitrates readers/writers across handles + processes; writers single-writer). Made safe by per-thread TLS parse scratch + page slab (`lib/thread_local.cyr`, slots 0–4), a `_pt_alloc_mtx` allocator mutex around the non-thread-safe freelist, and dropping `_patra_lock` from the query path. New module `src/pcache.cyr`: an **opt-in** (`patra_cache_enable`, **default OFF**) shared page cache — Variant I invalidate-on-write + `HDR_COMMITGEN` gen gate; off by default because it's redundant with the OS page cache and its global lock re-serializes readers (~3× slower on tmpfs). `HDR_COMMITGEN` uses reserved header byte 32 (no format break). Old shared-handle model still works. Deferred: eager BYTES/TEXT materialization (pre-existing lazy-read TOCTOU — documented). Gates: **834 tests** (+39), **7 fuzz** (+`fuzz_pcache`), **38 benchmarks** (+2; default path unregressed — `insert_1k` ~21 µs), libro 15/15, vidya 19/19, lint clean. ADRs [0002](../adr/0002-connection-per-thread-concurrency.md) + [0003](../adr/0003-opt-in-page-cache.md), arch notes 001–003. `dist/patra.cyr` at 5682 lines. Binary 243,728 bytes. |
 | 1.11.5 | 2026-06-18 | **Atomic insert-returning-id (yeo-cy-test) + cyrius 6.2.19 → 6.2.21.** `patra_insert_returning(db, stmt, out_id)` (run a prepared INSERT, write its assigned AUTOINCREMENT id to `out_id`) and `patra_exec_returning(db, stmt, out_affected)` (run any prepared write, write its affected-row count) capture the value *inside* the same statement-mutex critical section as the write — closing the v1.11.3 readback race where a concurrent write on a shared handle could land between `patra_exec_prepared` and `patra_last_insert_id`/`patra_rows_affected` and make the echo return another worker's value. Out-param `0` ignores it; a non-`PATRA_OK` status writes `0` (no stale leak). Field semantics unchanged — these are the atomic read-with-the-write variants. cyrius pin clears the build-time drift warning. Gates: **795 tests** (+23: `insert_returning`, `insert_returning OR IGNORE`, `exec_returning`), 6 fuzz, 36 benchmarks (no regression — `insert_1k` ~21 µs, `insert_1k_prepared` ~15.3 µs), libro 15/15, vidya 19/19, lint clean. `dist/patra.cyr` at 5321 lines. Binary 239,984 bytes. |
 | 1.11.4 | 2026-06-17 | **Thread-safety mutex migrated to stdlib `lib/sync.cyr`.** `_patra_lock`/`_patra_unlock` now call the stdlib portable mutex (`mutex_lock`/`mutex_unlock`; `patra_init` → `mutex_new()`) instead of patra's hand-rolled inline futex — behavior identical on Linux (the stdlib Linux backend is the same `atomic_cas` + `FUTEX_WAIT`/`WAKE` 2-state scheme), with Windows `SRWLOCK` / macOS spinlock backends for free. Closes the v1.11.0 P1 workaround loop (patra filed the missing-portable-mutex gap; cyrius 6.2.x shipped `lib/sync.cyr`, header cites patra's issue). Adds `"sync"` to `[deps].stdlib`. Gates: **772 tests** (incl. `test_concurrency` 4×250 shared-handle stress), 6 fuzz, 36 benchmarks (no regression — `insert_1k` ~21 µs, `insert_1k_prepared` ~14.6 µs), libro 15/15, vidya 19/19, lint clean. `dist/patra.cyr` regenerated. Binary 239,520 bytes. |
 | 1.11.3 | 2026-06-17 | **Write-readback API (yeo-cy-test) + cyrius 6.2.1 → 6.2.19.** `patra_last_insert_id(db)` (AUTOINCREMENT id of the last successful INSERT — auto or explicit — à la `sqlite3_last_insert_rowid`; 0 for none / no autoinc col / ignored OR IGNORE; unmoved by UPDATE/DELETE) and `patra_rows_affected(db)` (rows matched by the last INSERT/UPDATE/DELETE, à la `sqlite3_changes`; 1 on insert, 0 on ignored OR IGNORE, WHERE-count on UPDATE/DELETE) close the two LOW yeo-cy-test gaps that blocked using `AUTOINCREMENT` for insert-then-echo REST handlers. Captured at the `_exec_insert`/`_exec_update`/`_exec_delete` choke points (covers `patra_exec`, prepared, `patra_insert_row`); DB handle 48 → 64 B (`DB_LAST_ID`/`DB_ROWS_AFFECTED`); UPDATE/DELETE counts via `_tbl_rows_affected`. cyrius pin clears the build-time drift warning. Gates: **772 tests** (+25), 6 fuzz, 36 benchmarks (no regression — readback `store64`s within noise; `insert_1k` ~22 µs, `insert_1k_prepared` ~14.7 µs), libro 15/15, vidya 19/19, lint clean. `dist/patra.cyr` at 5311 lines. |
@@ -193,7 +207,7 @@ Full history in [`../../CHANGELOG.md`](../../CHANGELOG.md). Pre-1.6 narrative in
 
 ## CI / verification hosts
 
-- **CI**: x86_64 Linux only — `cyrius build` + lint (**hard gate** as of v1.10.1 — any `warn` fails) + 795 tests + 6 fuzz + 36 benchmarks + libro + vidya integration. Toolchain installed via the upstream `install.sh` (v1.10.1, patterned on sigil), version sourced from the `cyrius.cyml` pin; deps resolved via `cyrius deps`.
+- **CI**: x86_64 Linux only — `cyrius build` + lint (**hard gate** as of v1.10.1 — any `warn` fails) + 834 tests + 7 fuzz + 38 benchmarks + libro + vidya integration. Toolchain installed via the upstream `install.sh` (v1.10.1, patterned on sigil), version sourced from the `cyrius.cyml` pin; deps resolved via `cyrius deps`.
 - **Release**: tag-driven on `[0-9]*`; verifies `VERSION == cyrius.cyml package.version == git tag`; ships source tarball + `dist/patra.cyr` bundle + DCE demo binary + SHA256SUMS. Same `install.sh` toolchain step as CI.
 - **aarch64**: best-effort. Library (`src/lib.cyr`) cross-builds clean; the `programs/` test binaries do not (still on raw `SYS_UNLINK`) — they're host-only.
 

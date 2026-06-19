@@ -29,4 +29,4 @@ the `issues/` convention.
 
 | File | Filed | Consumer | Blocker |
 |---|---|---|---|
-| [`2026-06-09-yeo-cy-test-concurrent-readers.md`](2026-06-09-yeo-cy-test-concurrent-readers.md) | 2026-06-09 | yeo-cy-test | P2 — one internal lock serializes all DB work; a read-heavy server gets no cross-core read parallelism. Scheduled for v1.12.0 (reader/writer pager lock + thread-local scratch). |
+| _(none open — P2 concurrent readers shipped in v1.12.0; see [`archive/`](archive/))_ | | | |

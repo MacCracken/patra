@@ -118,7 +118,7 @@ fn test_tokenize() {
     assert_eq(_tok_type(3), SQLT_LPAREN, "(");
     assert_eq(_tok_type(5), SQLT_KW_INT, "INT");
     assert_eq(_tok_type(8), SQLT_KW_STR, "STR");
-    assert_eq(_sql_ntoks, 10, "10 tokens");
+    assert_eq(_sntoks(), 10, "10 tokens");
 }
 
 fn test_tokenize_v2() {
@@ -153,23 +153,23 @@ fn test_parse_create() {
     test_group("parse create");
     sql_tokenize("CREATE TABLE users (id INT, name STR)");
     assert_eq(sql_parse(), PATRA_OK, "parse ok");
-    assert_eq(load64(_sql_pr + PR_STMT), STMT_CREATE, "stmt create");
-    assert_eq(load64(_sql_pr + PR_COUNT), 2, "2 columns");
+    assert_eq(load64(_spr() + PR_STMT), STMT_CREATE, "stmt create");
+    assert_eq(load64(_spr() + PR_COUNT), 2, "2 columns");
 }
 
 fn test_parse_insert() {
     test_group("parse insert");
     sql_tokenize("INSERT INTO users VALUES (1, 'alice')");
     assert_eq(sql_parse(), PATRA_OK, "parse ok");
-    assert_eq(load64(_sql_pr + PR_STMT), STMT_INSERT, "stmt insert");
-    assert_eq(load64(_sql_pr + PR_COUNT), 2, "2 values");
+    assert_eq(load64(_spr() + PR_STMT), STMT_INSERT, "stmt insert");
+    assert_eq(load64(_spr() + PR_COUNT), 2, "2 values");
 }
 
 fn test_parse_select() {
     test_group("parse select");
     sql_tokenize("SELECT * FROM users");
     assert_eq(sql_parse(), PATRA_OK, "parse ok");
-    assert_eq(load64(_sql_pr + PR_STMT), STMT_SELECT, "stmt select");
+    assert_eq(load64(_spr() + PR_STMT), STMT_SELECT, "stmt select");
 }
 
 fn test_parse_case_insensitive() {
@@ -194,77 +194,77 @@ fn test_parse_select_where() {
     test_group("parse select where");
     sql_tokenize("SELECT * FROM t WHERE id = 1");
     assert_eq(sql_parse(), PATRA_OK, "parse ok");
-    assert_eq(load64(_sql_pr + PR_WHERE_N), 1, "1 condition");
+    assert_eq(load64(_spr() + PR_WHERE_N), 1, "1 condition");
 
     sql_tokenize("SELECT * FROM t WHERE id > 1 AND age < 50");
     assert_eq(sql_parse(), PATRA_OK, "parse 2 conds");
-    assert_eq(load64(_sql_pr + PR_WHERE_N), 2, "2 conditions");
-    assert_eq(load64(_sql_pr + PR_WHERE_JOIN), WH_AND, "join AND");
+    assert_eq(load64(_spr() + PR_WHERE_N), 2, "2 conditions");
+    assert_eq(load64(_spr() + PR_WHERE_JOIN), WH_AND, "join AND");
 
     sql_tokenize("SELECT * FROM t WHERE id = 1 OR id = 2");
     assert_eq(sql_parse(), PATRA_OK, "parse OR");
-    assert_eq(load64(_sql_pr + PR_WHERE_JOIN), WH_OR, "join OR");
+    assert_eq(load64(_spr() + PR_WHERE_JOIN), WH_OR, "join OR");
 }
 
 fn test_parse_orderby_limit() {
     test_group("parse orderby limit");
     sql_tokenize("SELECT * FROM t ORDER BY age");
     assert_eq(sql_parse(), PATRA_OK, "order by");
-    assert_eq(load64(_sql_pr + PR_ORDERBY_N), 1, "has orderby");
+    assert_eq(load64(_spr() + PR_ORDERBY_N), 1, "has orderby");
 
     sql_tokenize("SELECT * FROM t LIMIT 5");
     assert_eq(sql_parse(), PATRA_OK, "limit");
-    assert_eq(load64(_sql_pr + PR_LIMIT), 5, "limit 5");
+    assert_eq(load64(_spr() + PR_LIMIT), 5, "limit 5");
 
     sql_tokenize("SELECT * FROM t WHERE id > 0 ORDER BY id LIMIT 3");
     assert_eq(sql_parse(), PATRA_OK, "where+order+limit");
-    assert_eq(load64(_sql_pr + PR_WHERE_N), 1, "1 where cond");
-    assert_eq(load64(_sql_pr + PR_ORDERBY_N), 1, "has orderby");
-    assert_eq(load64(_sql_pr + PR_LIMIT), 3, "limit 3");
+    assert_eq(load64(_spr() + PR_WHERE_N), 1, "1 where cond");
+    assert_eq(load64(_spr() + PR_ORDERBY_N), 1, "has orderby");
+    assert_eq(load64(_spr() + PR_LIMIT), 3, "limit 3");
 }
 
 fn test_parse_select_cols() {
     test_group("parse select cols");
     sql_tokenize("SELECT id FROM users");
     assert_eq(sql_parse(), PATRA_OK, "single col parse");
-    assert_eq(load64(_sql_pr + PR_STMT), STMT_SELECT, "stmt select");
-    assert_eq(load64(_sql_pr + PR_PROJ_N), 1, "proj_n=1");
+    assert_eq(load64(_spr() + PR_STMT), STMT_SELECT, "stmt select");
+    assert_eq(load64(_spr() + PR_PROJ_N), 1, "proj_n=1");
 
     sql_tokenize("SELECT id, name, age FROM users");
     assert_eq(sql_parse(), PATRA_OK, "multi col parse");
-    assert_eq(load64(_sql_pr + PR_PROJ_N), 3, "proj_n=3");
+    assert_eq(load64(_spr() + PR_PROJ_N), 3, "proj_n=3");
 
     sql_tokenize("SELECT * FROM users");
     assert_eq(sql_parse(), PATRA_OK, "star parse");
-    assert_eq(load64(_sql_pr + PR_PROJ_N), 0, "proj_n=0 for *");
+    assert_eq(load64(_spr() + PR_PROJ_N), 0, "proj_n=0 for *");
 
     sql_tokenize("SELECT name FROM t WHERE id = 1 ORDER BY age LIMIT 5");
     assert_eq(sql_parse(), PATRA_OK, "col + where + order + limit");
-    assert_eq(load64(_sql_pr + PR_PROJ_N), 1, "proj_n=1");
-    assert_eq(load64(_sql_pr + PR_WHERE_N), 1, "where=1");
-    assert_eq(load64(_sql_pr + PR_ORDERBY_N), 1, "orderby=1");
-    assert_eq(load64(_sql_pr + PR_LIMIT), 5, "limit=5");
+    assert_eq(load64(_spr() + PR_PROJ_N), 1, "proj_n=1");
+    assert_eq(load64(_spr() + PR_WHERE_N), 1, "where=1");
+    assert_eq(load64(_spr() + PR_ORDERBY_N), 1, "orderby=1");
+    assert_eq(load64(_spr() + PR_LIMIT), 5, "limit=5");
 }
 
 fn test_parse_update() {
     test_group("parse update");
     sql_tokenize("UPDATE t SET age = 31 WHERE name = 'alice'");
     assert_eq(sql_parse(), PATRA_OK, "parse ok");
-    assert_eq(load64(_sql_pr + PR_STMT), STMT_UPDATE, "stmt update");
-    assert_eq(load64(_sql_pr + PR_COUNT), 1, "1 set pair");
-    assert_eq(load64(_sql_pr + PR_WHERE_N), 1, "1 where cond");
+    assert_eq(load64(_spr() + PR_STMT), STMT_UPDATE, "stmt update");
+    assert_eq(load64(_spr() + PR_COUNT), 1, "1 set pair");
+    assert_eq(load64(_spr() + PR_WHERE_N), 1, "1 where cond");
 }
 
 fn test_parse_delete() {
     test_group("parse delete");
     sql_tokenize("DELETE FROM t WHERE id = 1");
     assert_eq(sql_parse(), PATRA_OK, "parse ok");
-    assert_eq(load64(_sql_pr + PR_STMT), STMT_DELETE, "stmt delete");
-    assert_eq(load64(_sql_pr + PR_WHERE_N), 1, "1 where cond");
+    assert_eq(load64(_spr() + PR_STMT), STMT_DELETE, "stmt delete");
+    assert_eq(load64(_spr() + PR_WHERE_N), 1, "1 where cond");
 
     sql_tokenize("DELETE FROM t");
     assert_eq(sql_parse(), PATRA_OK, "delete all");
-    assert_eq(load64(_sql_pr + PR_WHERE_N), 0, "no where");
+    assert_eq(load64(_spr() + PR_WHERE_N), 0, "no where");
 }
 
 # -- v0.1: Full integration ----------------------------------
@@ -1256,7 +1256,7 @@ fn test_sql_semicolons() {
     # Trailing semicolons should not break parsing
     sql_tokenize("SELECT * FROM t;");
     assert_eq(sql_parse(), PATRA_OK, "trailing semi");
-    assert_eq(load64(_sql_pr + PR_STMT), STMT_SELECT, "select with semi");
+    assert_eq(load64(_spr() + PR_STMT), STMT_SELECT, "select with semi");
 
     sql_tokenize("INSERT INTO t VALUES (1);");
     assert_eq(sql_parse(), PATRA_OK, "insert semi");
@@ -1323,7 +1323,7 @@ fn test_jsonl_special_chars() {
 # -- v1.5.3: audit P2 hardening + layout invariant ------------
 
 # Guards future parser growth against silently overrunning the 4096-byte
-# `_sql_pr` buffer. Each statement type stores its per-item entries at
+# `_spr()` buffer. Each statement type stores its per-item entries at
 # PR_ITEMS, but only SELECT uses PR_AGG_* / PR_PROJ_N / PR_ORDERBY_COLS
 # -- so PR_ITEMS can legitimately overlap those ranges for CREATE / INSERT /
 # UPDATE. The invariants we actually need:
@@ -1331,7 +1331,7 @@ fn test_jsonl_special_chars() {
 #   - SELECT's projection list (which uses PR_ITEMS) must stop before PR_AGG_TYPE
 #   - PR_ORDERBY_COLS + OB zone ends before PR_WHERE
 #   - PR_WHERE zone ends within 4096
-# Audit §4.4 (static-assert-equivalent test for `_sql_pr` math).
+# Audit §4.4 (static-assert-equivalent test for `_spr()` math).
 fn test_parse_result_layout_invariant() {
     test_group("parse result layout");
 
@@ -1772,22 +1772,22 @@ fn test_parse_alter() {
     test_group("parse alter");
     sql_tokenize("ALTER TABLE t ADD COLUMN age INT");
     assert_eq(sql_parse(), PATRA_OK, "add col parse");
-    assert_eq(load64(_sql_pr + PR_STMT), STMT_ALTER_ADD, "stmt=ADD");
+    assert_eq(load64(_spr() + PR_STMT), STMT_ALTER_ADD, "stmt=ADD");
 
     sql_tokenize("ALTER TABLE t RENAME TO people");
     assert_eq(sql_parse(), PATRA_OK, "rename to parse");
-    assert_eq(load64(_sql_pr + PR_STMT), STMT_ALTER_RENAME_TBL, "stmt=RENAME_TBL");
+    assert_eq(load64(_spr() + PR_STMT), STMT_ALTER_RENAME_TBL, "stmt=RENAME_TBL");
 
     sql_tokenize("ALTER TABLE t RENAME COLUMN id TO pk");
     assert_eq(sql_parse(), PATRA_OK, "rename col parse");
-    assert_eq(load64(_sql_pr + PR_STMT), STMT_ALTER_RENAME_COL, "stmt=RENAME_COL");
+    assert_eq(load64(_spr() + PR_STMT), STMT_ALTER_RENAME_COL, "stmt=RENAME_COL");
 
     sql_tokenize("ALTER TABLE t ADD age INT");
     assert_eq(sql_parse(), PATRA_ERR_SYNTAX, "missing COLUMN keyword");
 
     sql_tokenize("ALTER TABLE t DROP COLUMN id");
     assert_eq(sql_parse(), PATRA_OK, "drop col parse");
-    assert_eq(load64(_sql_pr + PR_STMT), STMT_ALTER_DROP_COL, "stmt=DROP_COL");
+    assert_eq(load64(_spr() + PR_STMT), STMT_ALTER_DROP_COL, "stmt=DROP_COL");
 
     sql_tokenize("ALTER TABLE t DROP id");
     assert_eq(sql_parse(), PATRA_ERR_SYNTAX, "missing COLUMN keyword");
@@ -2157,7 +2157,7 @@ fn test_parse_vacuum() {
     test_group("parse vacuum");
     sql_tokenize("VACUUM people");
     assert_eq(sql_parse(), PATRA_OK, "parse ok");
-    assert_eq(load64(_sql_pr + PR_STMT), STMT_VACUUM, "stmt vacuum");
+    assert_eq(load64(_spr() + PR_STMT), STMT_VACUUM, "stmt vacuum");
 
     sql_tokenize("VACUUM");
     assert_eq(sql_parse(), PATRA_ERR_SYNTAX, "requires table name");
@@ -2237,8 +2237,8 @@ fn test_parse_like() {
     test_group("parse like");
     sql_tokenize("SELECT * FROM t WHERE name LIKE 'a%'");
     assert_eq(sql_parse(), PATRA_OK, "like parse ok");
-    assert_eq(load64(_sql_pr + PR_WHERE_N), 1, "1 cond");
-    var cond = _sql_pr + PR_WHERE;
+    assert_eq(load64(_spr() + PR_WHERE_N), 1, "1 cond");
+    var cond = _spr() + PR_WHERE;
     assert_eq(load64(cond + WH_CMP_OP), CMP_LIKE, "op=LIKE");
     assert_eq(load64(cond + WH_VAL_TYPE), COL_STR, "str value");
 }
@@ -2755,9 +2755,9 @@ fn test_bytes_parse() {
     test_group("bytes parse");
     sql_tokenize("CREATE TABLE objects (hash STR, content BLOB)");
     assert_eq(sql_parse(), PATRA_OK, "parse ok");
-    assert_eq(load64(_sql_pr + PR_STMT), STMT_CREATE, "create stmt");
-    assert_eq(load64(_sql_pr + PR_COUNT), 2, "2 cols");
-    var c1 = _sql_pr + PR_ITEMS + 1 * CR_SZ;
+    assert_eq(load64(_spr() + PR_STMT), STMT_CREATE, "create stmt");
+    assert_eq(load64(_spr() + PR_COUNT), 2, "2 cols");
+    var c1 = _spr() + PR_ITEMS + 1 * CR_SZ;
     assert_eq(load64(c1 + CR_TYPE), COL_BYTES, "col1 BLOB");
 }
 
@@ -3442,17 +3442,17 @@ fn test_parse_insert_or_ignore() {
     test_group("parse INSERT OR IGNORE");
     sql_tokenize("INSERT INTO users VALUES (1, 'alice')");
     assert_eq(sql_parse(), PATRA_OK, "vanilla parses");
-    assert_eq(load64(_sql_pr + PR_INSERT_IGNORE), 0, "vanilla flag clear");
+    assert_eq(load64(_spr() + PR_INSERT_IGNORE), 0, "vanilla flag clear");
     sql_tokenize("INSERT OR IGNORE INTO users VALUES (1, 'alice')");
     assert_eq(sql_parse(), PATRA_OK, "ignore variant parses");
-    assert_eq(load64(_sql_pr + PR_STMT), STMT_INSERT, "stmt insert");
-    assert_eq(load64(_sql_pr + PR_INSERT_IGNORE), 1, "ignore flag set");
-    assert_eq(load64(_sql_pr + PR_COUNT), 2, "2 values");
+    assert_eq(load64(_spr() + PR_STMT), STMT_INSERT, "stmt insert");
+    assert_eq(load64(_spr() + PR_INSERT_IGNORE), 1, "ignore flag set");
+    assert_eq(load64(_spr() + PR_COUNT), 2, "2 values");
     sql_tokenize("INSERT OR REPLACE INTO users VALUES (1, 'alice')");
     assert_eq(sql_parse(), PATRA_ERR_SYNTAX, "OR <other> rejected");
     sql_tokenize("insert or ignore into users values (1, 'alice')");
     assert_eq(sql_parse(), PATRA_OK, "lowercase ok");
-    assert_eq(load64(_sql_pr + PR_INSERT_IGNORE), 1, "lowercase flag set");
+    assert_eq(load64(_spr() + PR_INSERT_IGNORE), 1, "lowercase flag set");
 }
 
 fn test_insert_or_ignore_dedup() {
@@ -3569,12 +3569,12 @@ fn test_parse_insert_collist() {
     test_group("parse insert collist");
     sql_tokenize("INSERT INTO t (id, name) VALUES (1, 'alice')");
     assert_eq(sql_parse(), PATRA_OK, "named list parses");
-    assert_eq(load64(_sql_pr + PR_INS_NCOLS), 2, "2 named cols");
-    assert_eq(load64(_sql_pr + PR_COUNT), 2, "2 values");
+    assert_eq(load64(_spr() + PR_INS_NCOLS), 2, "2 named cols");
+    assert_eq(load64(_spr() + PR_COUNT), 2, "2 values");
 
     sql_tokenize("INSERT INTO t VALUES (1, 'alice')");
     assert_eq(sql_parse(), PATRA_OK, "positional parses");
-    assert_eq(load64(_sql_pr + PR_INS_NCOLS), 0, "positional => 0 named");
+    assert_eq(load64(_spr() + PR_INS_NCOLS), 0, "positional => 0 named");
 
     sql_tokenize("INSERT INTO t () VALUES (1)");
     assert_eq(sql_parse(), PATRA_ERR_SYNTAX, "empty list rejected");
@@ -3671,15 +3671,15 @@ fn test_parse_autoinc() {
     test_group("parse autoinc");
     sql_tokenize("CREATE TABLE t (id INT AUTOINCREMENT, name STR)");
     assert_eq(sql_parse(), PATRA_OK, "autoinc on int parses");
-    assert_eq(load64(_sql_pr + PR_AUTOINC), 1, "auto col 0 => 1");
+    assert_eq(load64(_spr() + PR_AUTOINC), 1, "auto col 0 => 1");
 
     sql_tokenize("CREATE TABLE t (id INT, seq INT AUTOINCREMENT)");
     assert_eq(sql_parse(), PATRA_OK, "autoinc on 2nd int");
-    assert_eq(load64(_sql_pr + PR_AUTOINC), 2, "auto col 1 => 2");
+    assert_eq(load64(_spr() + PR_AUTOINC), 2, "auto col 1 => 2");
 
     sql_tokenize("CREATE TABLE t (id INT, name STR)");
     assert_eq(sql_parse(), PATRA_OK, "no autoinc");
-    assert_eq(load64(_sql_pr + PR_AUTOINC), 0, "no autoinc => 0");
+    assert_eq(load64(_spr() + PR_AUTOINC), 0, "no autoinc => 0");
 
     sql_tokenize("CREATE TABLE t (name STR AUTOINCREMENT)");
     assert_eq(sql_parse(), PATRA_ERR_SYNTAX, "autoinc on str rejected");
@@ -4129,16 +4129,16 @@ fn test_parse_bind() {
     test_group("parse bind params");
     sql_tokenize("INSERT INTO t VALUES (?, ?)");
     assert_eq(sql_parse(), PATRA_OK, "insert ? parses");
-    assert_eq(load64(_sql_pr + PR_NPARAMS), 2, "2 params");
+    assert_eq(load64(_spr() + PR_NPARAMS), 2, "2 params");
     sql_tokenize("SELECT * FROM t WHERE id = ?");
     assert_eq(sql_parse(), PATRA_OK, "select ? parses");
-    assert_eq(load64(_sql_pr + PR_NPARAMS), 1, "1 param");
+    assert_eq(load64(_spr() + PR_NPARAMS), 1, "1 param");
     sql_tokenize("UPDATE t SET name = ? WHERE id = ?");
     assert_eq(sql_parse(), PATRA_OK, "update ? parses");
-    assert_eq(load64(_sql_pr + PR_NPARAMS), 2, "2 params (set+where)");
+    assert_eq(load64(_spr() + PR_NPARAMS), 2, "2 params (set+where)");
     sql_tokenize("INSERT INTO t VALUES (1, 'x')");
     assert_eq(sql_parse(), PATRA_OK, "no-param parses");
-    assert_eq(load64(_sql_pr + PR_NPARAMS), 0, "0 params");
+    assert_eq(load64(_spr() + PR_NPARAMS), 0, "0 params");
 }
 
 fn test_bind_insert() {
@@ -4284,10 +4284,11 @@ fn test_bind_text_into_text_col() {
 var _cpath = "/tmp/patra_test_conc.patra";
 enum ConcCfg { CONC_K = 4; CONC_M = 250; }
 
-# Worker: hammer the SHARED handle with auto-commit INSERTs. Each call is a
-# full tokenize+parse+exec over the process-global SQL scratch (_sql_pr /
-# _sql_toks). Without the internal mutex the parses clobber each other and
-# the DB corrupts; with it the run is serializable and the count is exact.
+# Worker: hammer the SHARED handle with auto-commit INSERTs. WRITES stay
+# serialized by the process-global statement mutex (P2 only lifts the lock for
+# readers), so the run is serializable and the count is exact. The parse
+# scratch is per-thread as of v1.12.0, but writers still hold the mutex for the
+# whole tokenize+parse+exec (shared WAL / table / freelist state).
 fn _conc_worker(db): i64 {
     var i = 0;
     while (i < CONC_M) {
@@ -4331,6 +4332,306 @@ fn test_concurrency() {
 
     patra_close(db);
     syscall(SYS_UNLINK, _cpath);
+}
+
+# -- v1.12.0: read concurrency (yeo-cy-test P2) --------------
+#
+# As of S5 the read path is LOCK-FREE: patra_query no longer takes the
+# statement mutex. N reader threads run truly in parallel, each on its OWN
+# handle (connection-per-thread: own fd + DB_HDR), and every result must still
+# be bit-exact correct. Safety rests on per-thread parse scratch (S1) +
+# per-thread page slab (S2) + serialized fl_alloc/fl_free (S3); a SHARED handle
+# across reader threads would race DB_HDR + the fd offset, which is why each
+# worker opens its own. Each worker writes only to its OWN error slot (no shared
+# counter), summed after join — no atomics needed. Handles are opened
+# sequentially before the threads spawn (a concurrent wal_recover on open would
+# race the process-global WAL state).
+
+var _rdpath = "/tmp/patra_test_rdconc.patra";
+enum RdCfg { RD_K = 4; RD_M = 250; RD_ROWS = 5; }
+enum RdCtx { RDC_DB = 0; RDC_ERRS = 8; RDC_SZ = 16; }
+var _rd_ctx = 0;
+
+fn _rd_worker(ctx): i64 {
+    var db = load64(ctx + RDC_DB);
+    var e = 0;
+    var i = 0;
+    while (i < RD_M) {
+        # COUNT(*) over the whole table.
+        var rc = patra_query(db, "SELECT COUNT(*) FROM t");
+        if (rc == 0) { e = e + 1; }
+        if (rc != 0) {
+            if (patra_result_get_int(rc, 0, 0) != RD_ROWS) { e = e + 1; }
+            patra_result_free(rc);
+        }
+        # Indexed point lookup returns the known value (id 50 -> v 500).
+        var rp = patra_query(db, "SELECT v FROM t WHERE id = 50");
+        if (rp == 0) { e = e + 1; }
+        if (rp != 0) {
+            if (patra_result_get_int(rp, 0, 0) != 500) { e = e + 1; }
+            patra_result_free(rp);
+        }
+        # Full scan: every row's v must equal id * 10.
+        var rs = patra_query(db, "SELECT id, v FROM t");
+        if (rs == 0) { e = e + 1; }
+        if (rs != 0) {
+            var rows = patra_result_count(rs);
+            for (var r = 0; r < rows; r = r + 1) {
+                if (patra_result_get_int(rs, r, 1) != patra_result_get_int(rs, r, 0) * 10) {
+                    e = e + 1;
+                }
+            }
+            patra_result_free(rs);
+        }
+        i = i + 1;
+    }
+    store64(ctx + RDC_ERRS, e);
+    return 0;
+}
+
+fn test_read_concurrency() {
+    test_group("read concurrency (P2 parallel)");
+    syscall(SYS_UNLINK, _rdpath);
+    var setup = patra_open(_rdpath);
+    assert(setup != 0, "open setup");
+    patra_exec(setup, "CREATE TABLE t (id INT, v INT)");
+    patra_exec(setup, "CREATE INDEX ON t (id)");
+    patra_exec(setup, "INSERT INTO t VALUES (10, 100)");
+    patra_exec(setup, "INSERT INTO t VALUES (20, 200)");
+    patra_exec(setup, "INSERT INTO t VALUES (30, 300)");
+    patra_exec(setup, "INSERT INTO t VALUES (40, 400)");
+    patra_exec(setup, "INSERT INTO t VALUES (50, 500)");
+    patra_close(setup);
+
+    # Open all per-worker handles first (sequential), then spawn the readers.
+    _rd_ctx = fl_alloc(RD_K * RDC_SZ);
+    var ts = fl_alloc(RD_K * 8);
+    for (var k = 0; k < RD_K; k = k + 1) {
+        var ctx = _rd_ctx + k * RDC_SZ;
+        store64(ctx + RDC_DB, patra_open(_rdpath));
+        store64(ctx + RDC_ERRS, 0);
+    }
+    for (var s = 0; s < RD_K; s = s + 1) {
+        store64(ts + s * 8, thread_create(&_rd_worker, _rd_ctx + s * RDC_SZ));
+    }
+    for (var j = 0; j < RD_K; j = j + 1) {
+        thread_join(load64(ts + j * 8));
+    }
+
+    var total = 0;
+    for (var c = 0; c < RD_K; c = c + 1) {
+        var cx = _rd_ctx + c * RDC_SZ;
+        total = total + load64(cx + RDC_ERRS);
+        patra_close(load64(cx + RDC_DB));
+    }
+    fl_free(ts);
+    fl_free(_rd_ctx);
+
+    assert_eq(total, 0, "all parallel reads correct (own handle each)");
+    syscall(SYS_UNLINK, _rdpath);
+}
+
+# -- v1.12.0: connection-per-thread cross-handle visibility (P2) --
+#
+# The P2 topology gives each worker its OWN handle (own fd, own DB_HDR) over one
+# file; the existing per-fd flock (LOCK_SH readers / LOCK_EX writers) arbitrates
+# multi-reader/single-writer across handles, and every op re-reads the header
+# from disk so a committed write on one handle is observed by a later read on
+# another (OS page cache makes the bytes coherent). This is the baseline the
+# shared page cache's generation gate (S10) later relies on. Single-threaded +
+# sequential here — it proves cross-handle VISIBILITY, not concurrency.
+#
+# Writer-only globals _tbl_last_ref / _tbl_lp_idx / _tbl_lp_page (table.cyr) are
+# keyed by table index with no handle component: safe under the single-writer
+# model (only one handle ever writes at a time, serialized by _patra_mtx +
+# LOCK_EX); a future multi-writer relaxation would have to make them per-handle.
+
+var _xhpath = "/tmp/patra_test_xhandle.patra";
+
+fn test_cross_handle_visibility() {
+    test_group("cross-handle visibility (P2 conn-per-thread)");
+    syscall(SYS_UNLINK, _xhpath);
+    # Handle B creates the table.
+    var b = patra_open(_xhpath);
+    assert(b != 0, "open B");
+    patra_exec(b, "CREATE TABLE t (id INT, v INT)");
+    # Handle A opens the SAME file independently (own fd, own DB_HDR).
+    var a = patra_open(_xhpath);
+    assert(a != 0, "open A");
+    # A sees the table B created (committed) — header re-read per query.
+    var rs0 = patra_query(a, "SELECT COUNT(*) FROM t");
+    assert(rs0 != 0, "A sees B's table");
+    assert_eq(patra_result_get_int(rs0, 0, 0), 0, "0 rows initially");
+    patra_result_free(rs0);
+    # B commits two inserts (auto-commit, LOCK_EX).
+    patra_exec(b, "INSERT INTO t VALUES (1, 100)");
+    patra_exec(b, "INSERT INTO t VALUES (2, 200)");
+    # A re-queries → observes B's committed rows.
+    var rs1 = patra_query(a, "SELECT COUNT(*) FROM t");
+    assert_eq(patra_result_get_int(rs1, 0, 0), 2, "A sees B's 2 committed inserts");
+    patra_result_free(rs1);
+    var rs2 = patra_query(a, "SELECT v FROM t WHERE id = 2");
+    assert_eq(patra_result_get_int(rs2, 0, 0), 200, "A reads B's committed value");
+    patra_result_free(rs2);
+    # Reverse direction: A writes, B reads.
+    patra_exec(a, "INSERT INTO t VALUES (3, 300)");
+    var rs3 = patra_query(b, "SELECT COUNT(*) FROM t");
+    assert_eq(patra_result_get_int(rs3, 0, 0), 3, "B sees A's commit");
+    patra_result_free(rs3);
+    patra_close(a);
+    patra_close(b);
+    syscall(SYS_UNLINK, _xhpath);
+}
+
+# -- v1.12.0: commit generation (P2 cache coherence) ---------
+#
+# HDR_COMMITGEN advances by 1 on every committed mutation (the on-disk gen the
+# shared page cache compares against). SELECT and rollback leave it untouched.
+
+var _gpath = "/tmp/patra_test_gen.patra";
+
+# Read the current on-disk commit generation (fresh header read).
+fn _xgen(db): i64 {
+    patra_hdr_read(_db_fd(db), _db_hdr(db));
+    return load64(_db_hdr(db) + HDR_COMMITGEN);
+}
+
+fn test_commit_gen() {
+    test_group("commit generation (P2)");
+    syscall(SYS_UNLINK, _gpath);
+    var db = patra_open(_gpath);
+    assert(db != 0, "open");
+    assert_eq(_xgen(db), 0, "fresh file => gen 0");
+
+    patra_exec(db, "CREATE TABLE t (id INT, v INT)");
+    assert_eq(_xgen(db), 1, "CREATE bumps to 1");
+    patra_exec(db, "INSERT INTO t VALUES (1, 10)");
+    assert_eq(_xgen(db), 2, "INSERT bumps to 2");
+    patra_exec(db, "INSERT INTO t VALUES (2, 20)");
+    assert_eq(_xgen(db), 3, "INSERT bumps to 3");
+
+    # SELECT must NOT advance the generation.
+    var rs = patra_query(db, "SELECT COUNT(*) FROM t");
+    patra_result_free(rs);
+    assert_eq(_xgen(db), 3, "SELECT leaves gen at 3");
+
+    # In-place UPDATE / DELETE advance it (cross-process must detect them).
+    patra_exec(db, "UPDATE t SET v = 99 WHERE id = 1");
+    assert_eq(_xgen(db), 4, "UPDATE bumps to 4");
+    patra_exec(db, "DELETE FROM t WHERE id = 2");
+    assert_eq(_xgen(db), 5, "DELETE bumps to 5");
+    patra_close(db);
+    syscall(SYS_UNLINK, _gpath);
+}
+
+# -- v1.12.0: page cache module (P2 pcache, unwired) ---------
+#
+# Drives src/pcache.cyr directly (single-threaded): hit/miss, dedupe-on-put,
+# page-0-never-cached, evict, generation flush (incl. rewind), full flush.
+# Nothing in the engine wires the cache yet (S8/S9) — this is the unit check.
+
+fn test_pcache() {
+    test_group("page cache (P2 pcache)");
+    patra_cache_enable(1);   # opt-in: off by default
+    assert_eq(patra_cache_enabled(), 1, "cache enabled");
+    var buf = pg_alloc();
+    var out = pg_alloc();
+
+    # Cold miss.
+    assert_eq(_pc_get(100, out), 0, "miss on cold page");
+    # Put then hit returns identical bytes (head + tail markers).
+    memset(buf, 0, PAGE_SIZE);
+    store64(buf, 0xABCD);
+    store64(buf + 4088, 100);
+    _pc_put(100, buf);
+    assert_eq(_pc_get(100, out), 1, "hit after put");
+    assert_eq(load64(out), 0xABCD, "content head matches");
+    assert_eq(load64(out + 4088), 100, "content tail matches");
+    # Dedupe: re-put overwrites in place; exactly one slot holds key 100.
+    store64(buf, 0x1234);
+    _pc_put(100, buf);
+    assert_eq(_pc_get(100, out), 1, "hit after re-put");
+    assert_eq(load64(out), 0x1234, "content updated (dedupe)");
+    var cnt = 0;
+    for (var s = 0; s < PC_CAP; s = s + 1) {
+        if (load64(_pc_keys + s * 8) == 100) { cnt = cnt + 1; }
+    }
+    assert_eq(cnt, 1, "exactly one slot for key 100");
+    # Page 0 (header) is never cached.
+    _pc_put(0, buf);
+    assert_eq(_pc_get(0, out), 0, "page 0 never cached");
+    # Evict -> miss.
+    _pc_evict(100);
+    assert_eq(_pc_get(100, out), 0, "miss after evict");
+    # Generation gate: a changed gen flushes the whole cache.
+    _pc_put(200, buf);
+    assert_eq(_pc_get(200, out), 1, "hit before gen change");
+    _pc_check(_pc_gen + 1);
+    assert_eq(_pc_get(200, out), 0, "flushed by gen change");
+    # Same gen is a no-op.
+    _pc_put(201, buf);
+    _pc_check(_pc_gen);
+    assert_eq(_pc_get(201, out), 1, "same gen leaves cache");
+    # A gen rewind (lower value) also flushes (!= semantics, not >).
+    _pc_check(_pc_gen - 1);
+    assert_eq(_pc_get(201, out), 0, "gen rewind flushes");
+    # Explicit flush clears.
+    _pc_put(202, buf);
+    _pc_flush();
+    assert_eq(_pc_get(202, out), 0, "flush clears");
+    # Disabling makes every op a no-op (a put then get misses).
+    patra_cache_enable(0);
+    assert_eq(patra_cache_enabled(), 0, "cache disabled");
+    _pc_put(300, buf);
+    assert_eq(_pc_get(300, out), 0, "disabled => always miss");
+
+    pg_free(buf);
+    pg_free(out);
+}
+
+# Coherence with the cache ENABLED: a full SQL workload (create/insert/select/
+# update/delete + cross-handle + rollback) must return identical results to the
+# cache-off path. Guards the page_read/page_write/gen-gate wiring.
+fn test_cache_coherence() {
+    test_group("page cache coherence (P2, enabled)");
+    patra_cache_enable(1);
+    syscall(SYS_UNLINK, _gpath);
+    var a = patra_open(_gpath);
+    var b = patra_open(_gpath);   # second handle, shared cache
+    patra_exec(a, "CREATE TABLE t (id INT, v INT)");
+    patra_exec(a, "INSERT INTO t VALUES (1, 10)");
+    patra_exec(a, "INSERT INTO t VALUES (2, 20)");
+    # Warm the cache from b, then mutate from a, then re-read from b.
+    var r0 = patra_query(b, "SELECT COUNT(*) FROM t");
+    assert_eq(patra_result_get_int(r0, 0, 0), 2, "b sees 2 rows");
+    patra_result_free(r0);
+    patra_exec(a, "INSERT INTO t VALUES (3, 30)");
+    var r1 = patra_query(b, "SELECT COUNT(*) FROM t");
+    assert_eq(patra_result_get_int(r1, 0, 0), 3, "b sees a's new row (gen flush)");
+    patra_result_free(r1);
+    # In-place UPDATE visible across handles.
+    patra_exec(a, "UPDATE t SET v = 99 WHERE id = 1");
+    var r2 = patra_query(b, "SELECT v FROM t WHERE id = 1");
+    assert_eq(patra_result_get_int(r2, 0, 0), 99, "b sees a's update");
+    patra_result_free(r2);
+    # DELETE visible.
+    patra_exec(a, "DELETE FROM t WHERE id = 2");
+    var r3 = patra_query(b, "SELECT COUNT(*) FROM t");
+    assert_eq(patra_result_get_int(r3, 0, 0), 2, "b sees a's delete");
+    patra_result_free(r3);
+    # Consecutive writes touching the btree must not read stale cached nodes.
+    var w = 0;
+    while (w < 30) {
+        patra_exec(a, "INSERT INTO t VALUES (100, 1)");
+        w = w + 1;
+    }
+    var r4 = patra_query(b, "SELECT COUNT(*) FROM t");
+    assert_eq(patra_result_get_int(r4, 0, 0), 32, "30 more inserts visible, no stale btree");
+    patra_result_free(r4);
+    patra_close(a);
+    patra_close(b);
+    syscall(SYS_UNLINK, _gpath);
+    patra_cache_enable(0);
 }
 
 fn main() {
@@ -4595,6 +4896,11 @@ fn main() {
 
     # v1.11.0 thread-safety (P1)
     test_concurrency();
+    test_read_concurrency();
+    test_cross_handle_visibility();
+    test_commit_gen();
+    test_pcache();
+    test_cache_coherence();
 
     cleanup();
     return assert_summary();

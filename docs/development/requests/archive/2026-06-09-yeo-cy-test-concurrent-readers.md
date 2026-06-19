@@ -1,14 +1,24 @@
 # P2 — concurrent readers (throughput beyond one-op-at-a-time)
 
+> **SHIPPED v1.12.0 (2026-06-18).** Concurrent `SELECT`s via connection-per-thread
+> + lock-free reads (~3.6× on a 4-thread scan). The "reader/writer lock around the
+> pager" candidate was rejected (no stdlib rwlock; the per-fd flock already does
+> reader/writer arbitration); the deferred P1 option (b) — thread-local
+> parse/exec scratch — was implemented (TLS slots, plus a per-thread page slab and
+> an allocator mutex). A shared page cache shipped opt-in / off-by-default (it
+> regresses warm workloads). See [`../../../../CHANGELOG.md`](../../../../CHANGELOG.md)
+> § 1.12.0, [`../../../adr/0002-connection-per-thread-concurrency.md`](../../../adr/0002-connection-per-thread-concurrency.md),
+> and [`../../../adr/0003-opt-in-page-cache.md`](../../../adr/0003-opt-in-page-cache.md).
+
 **Filed:** 2026-06-09 (yeo-cy-test concurrency milestone)
 **Consumer:** yeo-cy-test (SecureYeoman → Cyrius port probe)
-**Status:** Open — lower priority
+**Status:** Shipped v1.12.0
 **Related:** P1 (shared-handle thread-safety) shipped v1.11.0, consumed v1.11.3,
 mutex migrated to stdlib `lib/sync.cyr` v1.11.4 — see
-[`../completed-phases.md`](../completed-phases.md) and the archived issue
-[`../issues/archive/2026-06-09-cyrius-no-portable-mutex.md`](../issues/archive/2026-06-09-cyrius-no-portable-mutex.md).
+[`../../completed-phases.md`](../../completed-phases.md) and the archived issue
+[`../../issues/archive/2026-06-09-cyrius-no-portable-mutex.md`](../../issues/archive/2026-06-09-cyrius-no-portable-mutex.md).
 Full consumer write-up:
-[`secureyeoman/yeo-cy-test/FINDINGS.md`](../../../../secureyeoman/yeo-cy-test/FINDINGS.md)
+[`secureyeoman/yeo-cy-test/FINDINGS.md`](../../../../../secureyeoman/yeo-cy-test/FINDINGS.md)
 (§ HTTP / networking).
 
 ## The limit
