@@ -5,6 +5,40 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.1] - 2026-06-19
+
+**Dependency-refresh patch — cyrius pin `6.2.22` → `6.2.28`, sakshi `2.2.3` →
+`2.4.0`.** Source-change-free: patra carves out no stdlib modules, and the
+sakshi bump (two minors, additive `sakshi_log_kv` — patra still calls only
+`sakshi_error` / `sakshi_set_level`) introduces no API break. The cyrius bump
+clears the build-time pin-drift warning against the installed toolchain.
+
+### Changed
+
+- **cyrius toolchain pin `6.2.22` → `6.2.28`** (`cyrius.cyml [package].cyrius`).
+  Latest released 6.2.x. Build, 834 tests, 7 fuzz, 38 benchmarks, libro/vidya
+  integration, lint, and the `dist/patra.cyr` regen all green on the new pin.
+- **sakshi dep `2.2.3` → `2.4.0`** (`cyrius.cyml [deps.sakshi].tag`; README
+  consumer-replication block bumped in lockstep). 2.4.0 is additive
+  (`sakshi_log_kv` context-pair logging); patra's `sakshi_error` /
+  `sakshi_set_level` call sites are unchanged. Consumers vendoring
+  `dist/patra.cyr` must bump their replicated `[deps.sakshi]` tag to match.
+
+### Notes
+
+- **Binary size 243,728 → 279,456 bytes** (DCE demo, `programs/demo.cyr`,
+  x86_64). The +35,728 is entirely cyrius codegen drift across the 6.2.22 →
+  6.2.28 toolchain span — zero patra source changed (the `dist/patra.cyr` diff
+  is the one-line version header). Measured on the host's installed 6.2.29
+  (one patch ahead of the 6.2.28 pin); CI/release builds against 6.2.28. Under
+  cyrius 6.2.x, DCE and non-DCE remain byte-identical (NOP-in-place; 373
+  unreachable fns / 70,312 bytes NOPed).
+- **agnos cross-target ABI** (`docs/development/issues/2026-06-18-agnos-cross-target-abi.md`)
+  reviewed this cut — patra's random-access page engine has no agnos-native
+  positional-I/O path (no `lseek`/`pread`/`flock`). Left open pending an
+  architecture decision by the owner (mmap-backed backend vs. kernel
+  positional-I/O ask vs. defer-and-guard); no code change in 1.12.1.
+
 ## [1.12.0] - 2026-06-18
 
 **Concurrent readers (yeo-cy-test P2) + opt-in shared page cache + cyrius pin

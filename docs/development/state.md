@@ -9,22 +9,25 @@
 
 ## Current
 
-- **Version**: 1.12.0 (read `VERSION` for the authoritative number)
-- **Cyrius toolchain**: 6.2.22 (pinned in `cyrius.cyml [package].cyrius`).
+- **Version**: 1.12.1 (read `VERSION` for the authoritative number)
+- **Cyrius toolchain**: 6.2.28 (pinned in `cyrius.cyml [package].cyrius`).
   Progression on the 6.2.x line: 6.1.15 (v1.11.0) → 6.2.1 (v1.11.1, stdlib
-  pin sweep) → 6.2.19 (v1.11.3) → 6.2.21 (v1.11.5) → 6.2.22 (v1.12.0), each
-  clearing the build-time pin-drift warning against the installed toolchain.
+  pin sweep) → 6.2.19 (v1.11.3) → 6.2.21 (v1.11.5) → 6.2.22 (v1.12.0) →
+  6.2.28 (v1.12.1, dep-refresh patch), each clearing the build-time pin-drift
+  warning against the installed toolchain.
   Each bump source-change-free for the toolchain itself — build, tests, fuzz,
   benchmarks, libro/vidya integration, and the `src/lib.cyr` aarch64
   cross-build all green.
-- **sakshi pin**: 2.2.3 (`[deps.sakshi].tag`; modules path
+- **sakshi pin**: 2.4.0 (`[deps.sakshi].tag`; modules path
   `dist/sakshi.cyr` — canonical convention since v1.9.3). Transitive:
   downstream consumers must replicate `[deps.sakshi]` alongside
   `[deps.patra]` (cyrius does not resolve transitive deps) — documented
   in README § Dependencies as of v1.10.0.
-- **Binary**: ~244 KB demo (`programs/demo.cyr`, x86_64; 243,728 bytes at
-  v1.12.0; +3,744 over v1.11.5 — the `pcache.cyr` cache module, TLS scratch
-  accessors, and the `_pt_alloc`/`_pt_free` allocator wrappers). Note:
+- **Binary**: ~279 KB demo (`programs/demo.cyr`, x86_64; 279,456 bytes at
+  v1.12.1; +35,728 over v1.12.0's 243,728 — **entirely cyrius codegen drift**
+  across the 6.2.22 → 6.2.28 toolchain span, zero patra source changed.
+  Measured on the host's installed 6.2.29, one patch ahead of the 6.2.28 pin;
+  CI/release builds against 6.2.28). Note:
   `CYRIUS_DCE=1` and non-DCE builds are **byte-identical** under cyrius 6.2.x —
   DCE NOP-fills the unreachable fns in place but does not strip them, so the
   figure is the same either way (see
@@ -89,7 +92,7 @@
 ## Tests / Fuzz / Bench
 
 - **Unit**: `tests/tcyr/patra.tcyr` — **834 / 834** assertions pass under
-  cyrius 6.2.22 (+39 over v1.11.5: the v1.12.0 P2 groups — `read concurrency`
+  cyrius 6.2.28 (+39 over v1.11.5: the v1.12.0 P2 groups — `read concurrency`
   (4 reader threads, own handle each, lock-free), `cross-handle visibility`,
   `commit generation`, `page cache` (pcache unit) + `page cache coherence`
   (enabled, write/read interleave); the prior concurrency groups stay in, so
@@ -125,9 +128,10 @@
 
 All git-tag pinned in `cyrius.cyml`. No FFI, no C, no libsqlite3.
 
-- **sakshi** 2.2.3 — tracing + error handling. Bumped from 0.9.0 in
+- **sakshi** 2.4.0 — tracing + error handling. Bumped from 0.9.0 in
   v1.9.3 alongside the modules-path correction (`sakshi.cyr` →
-  `dist/sakshi.cyr`).
+  `dist/sakshi.cyr`); 2.2.3 → 2.4.0 in v1.12.1 (additive `sakshi_log_kv`;
+  patra's `sakshi_error` / `sakshi_set_level` call sites unchanged).
 
 **Cyrius stdlib declared explicitly** in `cyrius.cyml [deps].stdlib`:
 `syscalls`, `string`, `alloc`, `freelist`, `io`, `fmt`, `str`, `vec`,
@@ -177,6 +181,7 @@ payload at `BY_DATA_MAX = 4072`.
 
 | Version | Date | Summary |
 |---------|------|---------|
+| 1.12.1 | 2026-06-19 | **Dependency-refresh patch — cyrius `6.2.22` → `6.2.28`, sakshi `2.2.3` → `2.4.0`.** Source-change-free (the `dist/patra.cyr` diff is the one-line version header). sakshi 2.4.0 is additive (`sakshi_log_kv`); patra's `sakshi_error` / `sakshi_set_level` sites unchanged. Binary 243,728 → **279,456 bytes** — entirely cyrius codegen drift across the toolchain span, not a patra change (host-built on 6.2.29, one ahead of the 6.2.28 pin). Gates: **834 tests**, **7 fuzz**, **38 benchmarks** (no regression — `insert_1k` ~22 µs, `read_scan_4t_par` ~156 µs), libro 15/15, vidya 19/19, lint clean. Reviewed the open agnos cross-target ABI issue (no positional I/O on agnos) — left open pending an owner architecture decision; no code change. |
 | 1.12.0 | 2026-06-18 | **Concurrent readers (yeo-cy-test P2) + opt-in page cache + cyrius 6.2.21 → 6.2.22.** `SELECT`s run in parallel — `patra_query`/`patra_query_prepared` no longer take the statement mutex; **~3.6×** read throughput on a 4-thread scan (514 → 143 µs/scan). Model is **connection-per-thread** (each worker its own handle; per-fd flock arbitrates readers/writers across handles + processes; writers single-writer). Made safe by per-thread TLS parse scratch + page slab (`lib/thread_local.cyr`, slots 0–4), a `_pt_alloc_mtx` allocator mutex around the non-thread-safe freelist, and dropping `_patra_lock` from the query path. New module `src/pcache.cyr`: an **opt-in** (`patra_cache_enable`, **default OFF**) shared page cache — Variant I invalidate-on-write + `HDR_COMMITGEN` gen gate; off by default because it's redundant with the OS page cache and its global lock re-serializes readers (~3× slower on tmpfs). `HDR_COMMITGEN` uses reserved header byte 32 (no format break). Old shared-handle model still works. Deferred: eager BYTES/TEXT materialization (pre-existing lazy-read TOCTOU — documented). Gates: **834 tests** (+39), **7 fuzz** (+`fuzz_pcache`), **38 benchmarks** (+2; default path unregressed — `insert_1k` ~21 µs), libro 15/15, vidya 19/19, lint clean. ADRs [0002](../adr/0002-connection-per-thread-concurrency.md) + [0003](../adr/0003-opt-in-page-cache.md), arch notes 001–003. `dist/patra.cyr` at 5682 lines. Binary 243,728 bytes. |
 | 1.11.5 | 2026-06-18 | **Atomic insert-returning-id (yeo-cy-test) + cyrius 6.2.19 → 6.2.21.** `patra_insert_returning(db, stmt, out_id)` (run a prepared INSERT, write its assigned AUTOINCREMENT id to `out_id`) and `patra_exec_returning(db, stmt, out_affected)` (run any prepared write, write its affected-row count) capture the value *inside* the same statement-mutex critical section as the write — closing the v1.11.3 readback race where a concurrent write on a shared handle could land between `patra_exec_prepared` and `patra_last_insert_id`/`patra_rows_affected` and make the echo return another worker's value. Out-param `0` ignores it; a non-`PATRA_OK` status writes `0` (no stale leak). Field semantics unchanged — these are the atomic read-with-the-write variants. cyrius pin clears the build-time drift warning. Gates: **795 tests** (+23: `insert_returning`, `insert_returning OR IGNORE`, `exec_returning`), 6 fuzz, 36 benchmarks (no regression — `insert_1k` ~21 µs, `insert_1k_prepared` ~15.3 µs), libro 15/15, vidya 19/19, lint clean. `dist/patra.cyr` at 5321 lines. Binary 239,984 bytes. |
 | 1.11.4 | 2026-06-17 | **Thread-safety mutex migrated to stdlib `lib/sync.cyr`.** `_patra_lock`/`_patra_unlock` now call the stdlib portable mutex (`mutex_lock`/`mutex_unlock`; `patra_init` → `mutex_new()`) instead of patra's hand-rolled inline futex — behavior identical on Linux (the stdlib Linux backend is the same `atomic_cas` + `FUTEX_WAIT`/`WAKE` 2-state scheme), with Windows `SRWLOCK` / macOS spinlock backends for free. Closes the v1.11.0 P1 workaround loop (patra filed the missing-portable-mutex gap; cyrius 6.2.x shipped `lib/sync.cyr`, header cites patra's issue). Adds `"sync"` to `[deps].stdlib`. Gates: **772 tests** (incl. `test_concurrency` 4×250 shared-handle stress), 6 fuzz, 36 benchmarks (no regression — `insert_1k` ~21 µs, `insert_1k_prepared` ~14.6 µs), libro 15/15, vidya 19/19, lint clean. `dist/patra.cyr` regenerated. Binary 239,520 bytes. |
