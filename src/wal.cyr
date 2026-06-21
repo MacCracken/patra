@@ -36,8 +36,10 @@ enum WalConst {
     WAL_HDR_SZ = 24;
     WAL_MAGIC = 0x41575450;
     WAL_VER = 2;
-    SYS_GETRANDOM = 318;
 }
+# SYS_GETRANDOM comes from the cyrius syscall peer (Linux x86_64 #318, aarch64
+# #278, macos #318, agnos #45) — not redefined here, so it is ABI-correct on
+# every target (a hardcoded #318 traps on agnos, whose getrandom is #45).
 
 # Draw 16 bytes of randomness into (salt1, salt2). Prefers SYS_GETRANDOM;
 # if unavailable (very old kernel / restricted container), falls back to
