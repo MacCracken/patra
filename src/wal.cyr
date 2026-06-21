@@ -51,7 +51,13 @@ fn _wal_gen_salts(): i64 {
         _wal_salt1 = load64(buf);
         _wal_salt2 = load64(buf + 8);
     } else {
+#ifdef CYRIUS_TARGET_AGNOS
+        # agnos: time_unix #46 (unix seconds in rax). Linux time() #201 is
+        # not an agnos syscall — a raw syscall(201) would mis-dispatch.
+        var t = syscall(SYS_TIME_UNIX);
+#else
         var t = syscall(201, 0);
+#endif
         _wal_tx_counter = _wal_tx_counter + 1;
         _wal_salt1 = t * 2654435761 + _wal_tx_counter;
         _wal_salt2 = t + _wal_tx_counter * 1099511628211;

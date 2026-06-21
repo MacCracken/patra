@@ -5,6 +5,21 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.3] - 2026-06-21
+
+**AGNOS syscall-ABI correctness — WAL salt timestamp.** Follow-up to 1.12.2's
+flock / fdatasync / getrandom sweep: the WAL salt-fallback path still issued a
+raw `syscall(201)` (Linux `time()`), which mis-dispatches on the AGNOS ring-3
+target (no #201). Source-only; Linux / macos / aarch64 behavior byte-identical.
+
+### Fixed
+
+- **`src/wal.cyr` — `_wal_gen_salts` time fallback under `#ifdef CYRIUS_TARGET_AGNOS`.**
+  When `getrandom` is unavailable the WAL salt mixes in wall-clock seconds; this
+  used Linux `time()` #201, not an agnos syscall. agnos now reads `time_unix` #46
+  (unix seconds in rax, same ABI shape) from the syscall peer; Linux keeps #201.
+  The last raw Linux syscall number in patra's agnos-reachable path is now gone.
+
 ## [1.12.2] - 2026-06-20
 
 **AGNOS syscall-ABI correctness — flock / fdatasync / getrandom.** patra's
