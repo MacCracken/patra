@@ -5,6 +5,31 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.2] - 2026-06-20
+
+**AGNOS syscall-ABI correctness — flock / fdatasync / getrandom.** patra's
+seek-based storage (WAL + B-tree files) hardcoded Linux x86_64 syscall numbers
+that are wrong on the AGNOS ring-3 target, so `cyrius build --agnos` either
+shadowed the syscall peer with conflicting values or trapped at runtime.
+Source-only; Linux/macos/aarch64 behavior byte-identical.
+
+### Fixed
+
+- **`src/file.cyr` — `flock`/`fdatasync` under `#ifdef CYRIUS_TARGET_AGNOS`.**
+  On agnos `flock` is kernel #59 and `lseek` #58 — both supplied by the cyrius
+  syscall peer (`SYS_FLOCK` / `SYS_LSEEK`), so patra no longer redefines them on
+  agnos (a redefinition shadowed the peer with a duplicate symbol). agnos has no
+  per-fd `fdatasync`; durability maps to whole-FS `sync` #12. Linux/macos keep
+  `SYS_FLOCK` #73 / `SYS_FDATASYNC` #75.
+- **`src/wal.cyr` — removed the hardcoded `SYS_GETRANDOM = 318`.** #318 is the
+  Linux x86_64 number; it collided with the agnos peer's #45 (last-def-wins →
+  trap on agnos) and was redundant on Linux. `SYS_GETRANDOM` now comes from the
+  syscall peer on every target (Linux #318, aarch64 #278, macos #318, agnos #45).
+
+### Changed
+
+- **VERSION `1.12.1` → `1.12.2`.**
+
 ## [1.12.1] - 2026-06-19
 
 **Dependency-refresh patch — cyrius pin `6.2.22` → `6.2.28`, sakshi `2.2.3` →
