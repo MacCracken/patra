@@ -5,6 +5,29 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.4] - 2026-06-23
+
+**Windows syscall-ABI correctness — WAL getrandom.** Completes the 1.12.2
+flock / fdatasync / getrandom sweep for the one target it missed: **Windows**.
+`_wal_gen_salts` drew its CSPRNG salts via a raw `syscall(SYS_GETRANDOM, …)`.
+That resolves on Linux / aarch64 / macos / agnos (their syscall peers define the
+`SYS_GETRANDOM` constant), but **Windows has no raw getrandom syscall** — its peer
+deliberately omits the constant and routes randomness through
+`bcryptprimitives.dll!ProcessPrng` via the `sys_getrandom()` wrapper. So
+`cyrius build --win` failed to link with `undefined variable 'SYS_GETRANDOM'`.
+Source-only; Linux / macos / aarch64 / agnos behavior byte-identical (834 tests
+pass), and `cyrius build --win` now links the WAL path.
+
+### Fixed
+
+- **`src/wal.cyr` — `_wal_gen_salts` getrandom acquisition under `#ifdef CYRIUS_TARGET_WIN`.**
+  Windows now calls the portable `sys_getrandom(buf, len, flags)` wrapper
+  (→ `ProcessPrng`, returns `len` on success); every other target keeps the raw
+  `syscall(SYS_GETRANDOM, …)` with its peer-supplied constant (never a hardcoded
+  number). The stale "ABI-correct on every target" comment that assumed a raw
+  getrandom syscall exists everywhere is corrected. Mirrors the existing
+  `#ifdef CYRIUS_TARGET_AGNOS` guard on the time-fallback path.
+
 ## [1.12.3] - 2026-06-21
 
 **AGNOS syscall-ABI correctness — WAL salt timestamp.** Follow-up to 1.12.2's
