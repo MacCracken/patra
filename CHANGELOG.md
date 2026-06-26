@@ -5,6 +5,65 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.5] - 2026-06-25
+
+**Toolchain pin `6.2.28` → `6.2.44`, and the agnos port finished (last
+syscall-ABI wart cleared).** A dependency-refresh patch that also closes the
+mechanical tail of the 1.12.2 agnos sweep: the WAL's four `sys_unlink` call
+sites now route through the portable `xunlink` wrapper, so `cyrius build
+--agnos` of `src/lib.cyr` cross-compiles **warning-free** (was 4 ×
+`'sys_unlink' expects 2 arguments, got 1` — agnos `sys_unlink` is
+`(path, pathlen)`). Same swap also silences the Windows
+`undefined function 'sys_unlink'` cross-build warning (`xunlink` carries the
+win stub). Linux / macos / aarch64 behavior is byte-identical (834 tests pass) —
+`xunlink` resolves to the same `sys_unlink(path)` on those targets.
+
+With this cut both open upstream-tracking issues are confirmed dead and archived
+(see **Notes**): the agnos cross-target blocker and the `cyrius distlib`
+consecutive-blank-lines warning.
+
+### Changed
+
+- **cyrius toolchain pin `6.2.28` → `6.2.44`** (`cyrius.cyml [package].cyrius`).
+  Latest released 6.2.x (host default). `cyrius lib sync` + `cyrius deps`
+  re-resolved against the new pin; sakshi held at `2.4.0`. Build, 834 tests,
+  7 fuzz, 38 benchmarks, libro 15 / vidya 19 integration, lint (0 warnings),
+  and the `src/lib.cyr` aarch64 + agnos cross-builds all green on the new pin.
+
+### Fixed
+
+- **`src/wal.cyr` — WAL unlink routed through `lib/io.cyr` `xunlink`.** The four
+  `sys_unlink(wal_path)` sites (`wal_commit`, `wal_rollback` ×2, `wal_recover`)
+  hardcoded the 1-arg POSIX shape, which mis-arities on agnos (`(path, pathlen)`)
+  and is undefined on Windows. `xunlink(path)` selects the per-target ABI
+  (`#ifdef CYRIUS_TARGET_AGNOS` computes the length → `sys_unlink(path, len)`;
+  win returns a `-1` stub; Linux/macos/aarch64 keep `sys_unlink(path)`). This was
+  the documented "mechanical part" remaining from the 1.12.2 agnos ABI sweep.
+
+### Notes
+
+- **Issue archived — agnos cross-target ABI**
+  (`docs/development/issues/2026-06-18-agnos-cross-target-abi.md` →
+  `issues/archive/`). The issue's premise — patra has no agnos-native
+  positional I/O, so it needs an architecture decision (mmap backend vs. kernel
+  ask vs. defer) — was overtaken by events: **agnos 1.46 added `lseek` #58 +
+  `flock` #59** via the syscall peer, patra adopted the `#ifdef
+  CYRIUS_TARGET_AGNOS` guards in **1.12.2 / 1.12.3** (flock / fdatasync /
+  getrandom / time), and with the `xunlink` fix above `src/lib.cyr` now
+  cross-compiles for agnos warning-free. The "path 2" the issue named (kernel
+  adds positional I/O) is what happened; no mmap backend was needed.
+- **Issue archived — `cyrius distlib` consecutive blank lines**
+  (`docs/development/issues/2026-05-27-cyrius-distlib-blank-lines.md` →
+  `issues/archive/`). Resolved upstream: regenerating `dist/patra.cyr` under
+  cyrius 6.2.44 and running `cyrius lint dist/patra.cyr` reports **0 warnings**
+  (was 3 × "multiple consecutive blank lines"); distlib now collapses the
+  header-separator and include-strip blank runs.
+- **Binary size 279,728 bytes** (DCE demo, `programs/demo.cyr`, x86_64, under
+  6.2.44) — +272 over 1.12.1's 279,456 (built under 6.2.28); ≈flat, minor
+  codegen drift across the 16-patch toolchain span plus the `xunlink` inline.
+  DCE and non-DCE remain byte-identical under cyrius 6.2.x (NOP-in-place).
+- **`dist/patra.cyr` regenerated** at v1.12.5 via `cyrius distlib`.
+
 ## [1.12.4] - 2026-06-23
 
 **Windows syscall-ABI correctness — WAL getrandom.** Completes the 1.12.2

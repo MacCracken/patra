@@ -1,10 +1,10 @@
 # Patra Development Roadmap
 
-> **Last refreshed**: 2026-06-18 (v1.12.0 cut — P2 concurrent readers)
+> **Last refreshed**: 2026-06-25 (v1.12.5 cut — cyrius 6.2.44 pin + agnos port finished; distlib + agnos issues resolved & archived)
 >
 > Thin **backlog index**, forward-looking only. Open consumer requests live one-file-each in [`requests/`](requests/) (this file points at them); upstream cyrius bugs live in [`issues/`](issues/). Shipped work lives in [`../../CHANGELOG.md`](../../CHANGELOG.md) + [`completed-phases.md`](completed-phases.md); live state (version, sizes, counts, consumers) in [`state.md`](state.md).
 
-> **Current**: v1.12.0 — **P2 concurrent readers shipped.** `SELECT`s run lock-free in parallel (connection-per-thread; ~3.6× on a 4-thread scan); writers stay single-writer. A shared page cache shipped opt-in / off-by-default (it regresses warm workloads — redundant with the OS page cache + its lock re-serializes readers). No open consumer requests. Patra serves libro, vidya, daimon, agnoshi, mela, hoosh, and sit.
+> **Current**: v1.12.5 — **cyrius pin `6.2.28` → `6.2.44`; agnos port finished.** The WAL's four `sys_unlink` sites moved onto `lib/io.cyr`'s portable `xunlink` wrapper, so `cyrius build --agnos src/lib.cyr` cross-compiles **warning-free** — closing the last mechanical wart of the 1.12.2/1.12.3 agnos ABI sweep (and silencing the Windows `sys_unlink` cross-build warning too). Both open upstream-tracking issues are now **resolved & archived**: the agnos cross-target ABI blocker (agnos 1.46 added `lseek` #58 / `flock` #59; no mmap backend needed) and the `cyrius distlib` consecutive-blank-lines warning (gone under 6.2.44). One open consumer request: sit `OR IGNORE` on the BYTES write path (below). Patra serves libro, vidya, daimon, agnoshi, mela, hoosh, and sit.
 
 ## Driven by consumer needs
 
@@ -12,7 +12,9 @@ Patra has no speculative feature backlog. Work lands when a consumer hits a conc
 
 ## Open backlog
 
-**Consumer requests** — none open. (P2 concurrent readers shipped in v1.12.0 — see [`requests/archive/`](requests/archive/).)
+**Consumer requests:**
+
+- **`OR IGNORE` on `patra_insert_row` (BYTES write path)** — sit. `INSERT OR IGNORE` (v1.7.0) and `patra_bind_blob` (deferred 1.10.3) never met, so the only path that writes BYTES has no skip-on-conflict; sit pays a pre-insert SELECT per object on its clone/push/add hot path and stays blocked on **P-11**. Medium priority (throughput, not correctness). → [`requests/2026-06-25-sit-insert-row-or-ignore-bytes.md`](requests/2026-06-25-sit-insert-row-or-ignore-bytes.md)
 
 **Deferred (consumer-driven — land when a consumer hits it):**
 
@@ -23,9 +25,7 @@ Patra has no speculative feature backlog. Work lands when a consumer hits a conc
 
 - **`programs/` aarch64 cross-build** — the three test programs in `programs/` (`demo.cyr`, `test_libro.cyr`, `test_vidya.cyr`) still use raw `syscall(SYS_UNLINK, …)`; the v1.9.1 wrapper migration covered `src/*.cyr` but not the demo harness. The library (`src/lib.cyr`) cross-builds clean; only the test binaries break under `--aarch64`. Folds into the next release if an aarch64-CI consumer asks for it.
 
-**Upstream cyrius** — filed in [`issues/`](issues/):
-
-- **`cyrius distlib` consecutive blank lines** — the generated `dist/patra.cyr` trips cyrlint's "multiple consecutive blank lines" rule. Cosmetic, non-blocking (CI lints `src/` + `programs/`, not `dist/`). → [`issues/2026-05-27-cyrius-distlib-blank-lines.md`](issues/2026-05-27-cyrius-distlib-blank-lines.md)
+**Upstream cyrius** — filed in [`issues/`](issues/): **none open.** Both prior items shipped/resolved and moved to [`issues/archive/`](issues/archive/): the `cyrius distlib` consecutive-blank-lines warning (resolved upstream — `cyrius lint dist/patra.cyr` is 0 warnings under 6.2.44) and the agnos cross-target ABI blocker (agnos 1.46 added `lseek`/`flock`; patra adapted through v1.12.5 — `src/lib.cyr` cross-builds for agnos clean).
 
 ## Shipped
 

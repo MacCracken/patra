@@ -29,4 +29,4 @@ the `issues/` convention.
 
 | File | Filed | Consumer | Blocker |
 |---|---|---|---|
-| _(none open — P2 concurrent readers shipped in v1.12.0; see [`archive/`](archive/))_ | | | |
+| [`2026-06-25-sit-insert-row-or-ignore-bytes.md`](2026-06-25-sit-insert-row-or-ignore-bytes.md) | 2026-06-25 | sit | No `OR IGNORE` (skip-on-conflict) on `patra_insert_row` — the only BYTES write path; forces a pre-insert SELECT per object on clone/push/add. Unblocks sit P-11. |

@@ -1,5 +1,21 @@
 # patra on agnos: blocked on positional I/O (no lseek/pread/flock) — design call
 
+> **ARCHIVED 2026-06-25 — RESOLVED; overtaken by events (no mmap backend needed).**
+> The architecture decision this issue demanded never had to be made: the
+> "request kernel positional I/O" path (option 2) is what happened. **agnos 1.46
+> added `lseek` #58 + `flock` #59**, both supplied via the cyrius syscall peer,
+> so patra's existing seek-based page engine works on agnos with only the
+> per-target ABI guards — no mmap-backed `file.cyr` rewrite. patra adopted the
+> guards across **1.12.2 / 1.12.3** (`flock` / `fdatasync` via whole-FS `sync`
+> #12 / `getrandom` peer constant / `time_unix` #46), and the last mechanical
+> wart this issue listed — the 1-arg `sys_unlink` call sites in `wal.cyr` —
+> was routed through `lib/io.cyr`'s portable `xunlink` in **1.12.5**. As of
+> 1.12.5, `cyrius build --agnos src/lib.cyr` cross-compiles **warning-free**.
+> The remaining `sys_open` lint *note* (prefer `io.cyr` `xopen`) is advisory,
+> not an agnos build warning, and is left as-is (no agnos consumer exercises a
+> path it breaks). Confirmed during the patra 1.12.5 cyrius `6.2.28` → `6.2.44`
+> pin bump. Body below is the original filing (pre-resolution).
+
 **Filed:** 2026-06-18 · **Revised** same day after checking the agnos syscall surface.
 **Severity:** patra runs on `CYRIUS_TARGET_AGNOS` (`owl` deps it) but its core I/O
 model is **incompatible** with agnos's syscall surface — not a simple ABI swap.

@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "Patra — structured storage and SQL queries for Cyrius. The sovereign database."
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.2.28"
+cyrius = "6.2.44"
 repository = "https://github.com/MacCracken/patra"
 
 [build]

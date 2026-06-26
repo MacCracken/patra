@@ -1,5 +1,15 @@
 # cyrius distlib — generated bundle has "multiple consecutive blank lines" (cyrlint)
 
+> **ARCHIVED 2026-06-25 — RESOLVED upstream in cyrius (confirmed at 6.2.44).**
+> `cyrius distlib` now collapses the blank runs it used to leave behind (the
+> 4-line-header→first-module separator and the `include`-strip residue).
+> Regenerating `dist/patra.cyr` under cyrius 6.2.44 and running
+> `cyrius lint dist/patra.cyr` reports **0 warnings** — the 3 "multiple
+> consecutive blank lines" warnings this issue filed against 6.0.3 are gone.
+> The intentionally-NOT-applied source workaround (tidying `src/lib.cyr`'s
+> section-comment blanks) was never needed. Confirmed during the patra 1.12.5
+> cyrius `6.2.28` → `6.2.44` pin bump. Body below is the original filing.
+
 **Filed:** 2026-05-27 (during patra 1.10.x lint review, post-1.10.3)
 **Cyrius version observed:** 6.0.3 (`cyrius distlib` + `cyrius lint`)
 **Tool at fault:** `cyrius distlib` (bundle generator) — surfaced by `cyrius lint`

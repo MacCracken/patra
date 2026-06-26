@@ -164,7 +164,7 @@ fn wal_commit(wal_path): i64 {
     }
     _wal_fd = 0 - 1;
     _wal_nlog = 0;
-    sys_unlink(wal_path);
+    xunlink(wal_path);
     return 0;
 }
 
@@ -192,7 +192,7 @@ fn wal_rollback(wal_path): i64 {
         sys_close(_wal_fd);
         _wal_fd = 0 - 1;
         _wal_nlog = 0;
-        sys_unlink(wal_path);
+        xunlink(wal_path);
         return PATRA_ERR_MAGIC;
     }
     var buf = _pt_alloc(WAL_REC_SZ);
@@ -212,7 +212,7 @@ fn wal_rollback(wal_path): i64 {
     sys_close(_wal_fd);
     _wal_fd = 0 - 1;
     _wal_nlog = 0;
-    sys_unlink(wal_path);
+    xunlink(wal_path);
     return 0;
 }
 
@@ -242,6 +242,6 @@ fn wal_recover(db_fd, wal_path): i64 {
     _pt_free(buf);
     syscall(SYS_FDATASYNC, db_fd);
     sys_close(wfd);
-    sys_unlink(wal_path);
+    xunlink(wal_path);
     return 1;
 }

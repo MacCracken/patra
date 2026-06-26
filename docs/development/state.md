@@ -9,25 +9,27 @@
 
 ## Current
 
-- **Version**: 1.12.1 (read `VERSION` for the authoritative number)
-- **Cyrius toolchain**: 6.2.28 (pinned in `cyrius.cyml [package].cyrius`).
+- **Version**: 1.12.5 (read `VERSION` for the authoritative number)
+- **Cyrius toolchain**: 6.2.44 (pinned in `cyrius.cyml [package].cyrius`).
   Progression on the 6.2.x line: 6.1.15 (v1.11.0) → 6.2.1 (v1.11.1, stdlib
   pin sweep) → 6.2.19 (v1.11.3) → 6.2.21 (v1.11.5) → 6.2.22 (v1.12.0) →
-  6.2.28 (v1.12.1, dep-refresh patch), each clearing the build-time pin-drift
-  warning against the installed toolchain.
-  Each bump source-change-free for the toolchain itself — build, tests, fuzz,
-  benchmarks, libro/vidya integration, and the `src/lib.cyr` aarch64
-  cross-build all green.
+  6.2.28 (v1.12.1) → 6.2.44 (v1.12.5, dep-refresh patch), each clearing the
+  build-time pin-drift warning against the installed toolchain.
+  The toolchain bumps are source-change-free; the v1.12.5 cut also finished the
+  agnos port (WAL `sys_unlink` → `xunlink`) — build, tests, fuzz, benchmarks,
+  libro/vidya integration, and the `src/lib.cyr` aarch64 **and agnos**
+  cross-builds all green.
 - **sakshi pin**: 2.4.0 (`[deps.sakshi].tag`; modules path
   `dist/sakshi.cyr` — canonical convention since v1.9.3). Transitive:
   downstream consumers must replicate `[deps.sakshi]` alongside
   `[deps.patra]` (cyrius does not resolve transitive deps) — documented
   in README § Dependencies as of v1.10.0.
-- **Binary**: ~279 KB demo (`programs/demo.cyr`, x86_64; 279,456 bytes at
-  v1.12.1; +35,728 over v1.12.0's 243,728 — **entirely cyrius codegen drift**
-  across the 6.2.22 → 6.2.28 toolchain span, zero patra source changed.
-  Measured on the host's installed 6.2.29, one patch ahead of the 6.2.28 pin;
-  CI/release builds against 6.2.28). Note:
+- **Binary**: ~280 KB demo (`programs/demo.cyr`, x86_64; 279,728 bytes at
+  v1.12.5 under 6.2.44; +272 over v1.12.1's 279,456 under 6.2.28 — ≈flat:
+  minor cyrius codegen drift across the 6.2.28 → 6.2.44 span plus the v1.12.5
+  `xunlink` inline. The larger +35,728 jump was the earlier 6.2.22 → 6.2.28
+  span at v1.12.1, zero patra source changed. Built on the host's installed
+  6.2.44 pin). Note:
   `CYRIUS_DCE=1` and non-DCE builds are **byte-identical** under cyrius 6.2.x —
   DCE NOP-fills the unreachable fns in place but does not strip them, so the
   figure is the same either way (see
@@ -35,7 +37,13 @@
   re-verified 2026-06-17). aarch64 cross-build of `src/lib.cyr` produces a valid
   ARM ELF — `lib/sync.cyr` + `atomic.cyr` carry aarch64 branches
   (`SYS_FUTEX` = 98 on arm64), so portability holds.
-- **Status**: **v1.12.0 — concurrent readers (yeo-cy-test P2).** `SELECT`s run
+- **Status**: **v1.12.5 — cyrius `6.2.28` → `6.2.44` pin + agnos port finished.**
+  The WAL's four `sys_unlink` sites moved onto `lib/io.cyr`'s portable `xunlink`
+  wrapper, so `cyrius build --agnos src/lib.cyr` cross-compiles warning-free (the
+  Windows `sys_unlink` cross-build warning is gone too); 834 tests unchanged.
+  Both open upstream-tracking issues — agnos cross-target ABI and the `cyrius
+  distlib` blank-lines warning — are resolved and archived. Standing capability
+  since **v1.12.0 — concurrent readers (P2)**: `SELECT`s run
   in parallel instead of serializing on the statement mutex — **~3.6×** read
   throughput on a 4-thread scan (`read_scan_4t` 514 → 143 µs/scan). Model is
   **connection-per-thread**: each worker opens its own handle, and the per-fd
@@ -63,9 +71,10 @@
   accessors touch caller-owned memory; the exception is `patra_result_read_bytes`
   / `read_text`, whose lazy `(page,len)` chain walk can return stale bytes if a
   concurrent writer frees the row (read before yielding to such a writer).
-- **Primary target**: Linux x86_64. aarch64 cross-build best-effort
-  (`src/lib.cyr` cross-builds clean under cyrius 6.1.15; the test
-  programs in `programs/` still use raw `syscall(SYS_UNLINK, …)` and
+- **Primary target**: Linux x86_64. aarch64 **and agnos** cross-builds
+  best-effort (`src/lib.cyr` cross-builds clean under cyrius 6.2.44 — agnos
+  warning-free as of v1.12.5, once the WAL `sys_unlink` sites moved to `xunlink`;
+  the test programs in `programs/` still use raw `syscall(SYS_UNLINK, …)` and
   do not cross-build — host-only x86_64 for those).
 
 ## Source layout
@@ -92,7 +101,7 @@
 ## Tests / Fuzz / Bench
 
 - **Unit**: `tests/tcyr/patra.tcyr` — **834 / 834** assertions pass under
-  cyrius 6.2.28 (+39 over v1.11.5: the v1.12.0 P2 groups — `read concurrency`
+  cyrius 6.2.44 (+39 over v1.11.5: the v1.12.0 P2 groups — `read concurrency`
   (4 reader threads, own handle each, lock-free), `cross-handle visibility`,
   `commit generation`, `page cache` (pcache unit) + `page cache coherence`
   (enabled, write/read interleave); the prior concurrency groups stay in, so
@@ -181,6 +190,10 @@ payload at `BY_DATA_MAX = 4072`.
 
 | Version | Date | Summary |
 |---------|------|---------|
+| 1.12.5 | 2026-06-25 | **cyrius pin `6.2.28` → `6.2.44` + agnos port finished.** The WAL's four `sys_unlink(wal_path)` sites (`wal_commit`, `wal_rollback` ×2, `wal_recover`) routed through `lib/io.cyr` `xunlink` — per-target ABI (agnos `(path,pathlen)`, win `-1` stub, Linux/macos/aarch64 unchanged), so `cyrius build --agnos src/lib.cyr` now cross-builds **warning-free** (was 4× `'sys_unlink' expects 2 arguments, got 1`) and the Windows `undefined function 'sys_unlink'` warning is gone too — the documented mechanical tail of the 1.12.2 agnos sweep. Both upstream-tracking issues confirmed dead & archived: agnos cross-target ABI (agnos 1.46 added `lseek`/`flock` — no mmap backend needed) and `cyrius distlib` blank-lines (`cyrius lint dist/patra.cyr` 0 warnings under 6.2.44). Gates: **834 tests**, **7 fuzz**, **38 benchmarks** (no regression — `insert_1k` ~23 µs, `read_scan_4t_par` ~138 µs), libro 15/15, vidya 19/19, lint 0-warn, aarch64 + agnos cross-builds clean. `dist/patra.cyr` at 5713 lines. Binary 279,728 bytes. |
+| 1.12.4 | 2026-06-23 | **Windows syscall-ABI correctness — WAL getrandom.** Completes the 1.12.2 flock/fdatasync/getrandom sweep for Windows: `_wal_gen_salts` drew CSPRNG salts via a raw `syscall(SYS_GETRANDOM, …)`, but Windows has no raw getrandom syscall (peer omits the constant; randomness routes through `bcryptprimitives.dll!ProcessPrng`). Under `#ifdef CYRIUS_TARGET_WIN` it now calls the `sys_getrandom()` wrapper; every other target keeps the raw syscall with its peer-supplied constant. Source-only; Linux/macos/aarch64/agnos byte-identical (834 tests); `cyrius build --win` now links the WAL path. |
+| 1.12.3 | 2026-06-21 | **agnos syscall-ABI correctness — WAL salt timestamp.** Follow-up to 1.12.2: the WAL salt fallback still issued a raw `syscall(201)` (Linux `time()`), which mis-dispatches on the agnos ring-3 target (no #201). Under `#ifdef CYRIUS_TARGET_AGNOS` it now reads `time_unix` #46 from the syscall peer; Linux keeps #201. The last raw Linux syscall number in patra's agnos-reachable path is gone. Source-only; Linux/macos/aarch64 byte-identical. |
+| 1.12.2 | 2026-06-20 | **agnos syscall-ABI correctness — flock/fdatasync/getrandom.** patra's seek-based storage hardcoded Linux x86_64 syscall numbers wrong on the agnos ring-3 target. Under `#ifdef CYRIUS_TARGET_AGNOS`: `flock` #59 / `lseek` #58 now come from the cyrius syscall peer (patra no longer redefines them — a redefinition shadowed the peer); agnos has no per-fd `fdatasync` so durability maps to whole-FS `sync` #12; removed the hardcoded `SYS_GETRANDOM = 318` (Linux number, collided with agnos #45) so it comes from the peer on every target. Linux/macos keep #73/#75. Source-only; Linux/macos/aarch64 byte-identical. First step of the agnos port the 2026-06-18 issue called for. |
 | 1.12.1 | 2026-06-19 | **Dependency-refresh patch — cyrius `6.2.22` → `6.2.28`, sakshi `2.2.3` → `2.4.0`.** Source-change-free (the `dist/patra.cyr` diff is the one-line version header). sakshi 2.4.0 is additive (`sakshi_log_kv`); patra's `sakshi_error` / `sakshi_set_level` sites unchanged. Binary 243,728 → **279,456 bytes** — entirely cyrius codegen drift across the toolchain span, not a patra change (host-built on 6.2.29, one ahead of the 6.2.28 pin). Gates: **834 tests**, **7 fuzz**, **38 benchmarks** (no regression — `insert_1k` ~22 µs, `read_scan_4t_par` ~156 µs), libro 15/15, vidya 19/19, lint clean. Reviewed the open agnos cross-target ABI issue (no positional I/O on agnos) — left open pending an owner architecture decision; no code change. |
 | 1.12.0 | 2026-06-18 | **Concurrent readers (yeo-cy-test P2) + opt-in page cache + cyrius 6.2.21 → 6.2.22.** `SELECT`s run in parallel — `patra_query`/`patra_query_prepared` no longer take the statement mutex; **~3.6×** read throughput on a 4-thread scan (514 → 143 µs/scan). Model is **connection-per-thread** (each worker its own handle; per-fd flock arbitrates readers/writers across handles + processes; writers single-writer). Made safe by per-thread TLS parse scratch + page slab (`lib/thread_local.cyr`, slots 0–4), a `_pt_alloc_mtx` allocator mutex around the non-thread-safe freelist, and dropping `_patra_lock` from the query path. New module `src/pcache.cyr`: an **opt-in** (`patra_cache_enable`, **default OFF**) shared page cache — Variant I invalidate-on-write + `HDR_COMMITGEN` gen gate; off by default because it's redundant with the OS page cache and its global lock re-serializes readers (~3× slower on tmpfs). `HDR_COMMITGEN` uses reserved header byte 32 (no format break). Old shared-handle model still works. Deferred: eager BYTES/TEXT materialization (pre-existing lazy-read TOCTOU — documented). Gates: **834 tests** (+39), **7 fuzz** (+`fuzz_pcache`), **38 benchmarks** (+2; default path unregressed — `insert_1k` ~21 µs), libro 15/15, vidya 19/19, lint clean. ADRs [0002](../adr/0002-connection-per-thread-concurrency.md) + [0003](../adr/0003-opt-in-page-cache.md), arch notes 001–003. `dist/patra.cyr` at 5682 lines. Binary 243,728 bytes. |
 | 1.11.5 | 2026-06-18 | **Atomic insert-returning-id (yeo-cy-test) + cyrius 6.2.19 → 6.2.21.** `patra_insert_returning(db, stmt, out_id)` (run a prepared INSERT, write its assigned AUTOINCREMENT id to `out_id`) and `patra_exec_returning(db, stmt, out_affected)` (run any prepared write, write its affected-row count) capture the value *inside* the same statement-mutex critical section as the write — closing the v1.11.3 readback race where a concurrent write on a shared handle could land between `patra_exec_prepared` and `patra_last_insert_id`/`patra_rows_affected` and make the echo return another worker's value. Out-param `0` ignores it; a non-`PATRA_OK` status writes `0` (no stale leak). Field semantics unchanged — these are the atomic read-with-the-write variants. cyrius pin clears the build-time drift warning. Gates: **795 tests** (+23: `insert_returning`, `insert_returning OR IGNORE`, `exec_returning`), 6 fuzz, 36 benchmarks (no regression — `insert_1k` ~21 µs, `insert_1k_prepared` ~15.3 µs), libro 15/15, vidya 19/19, lint clean. `dist/patra.cyr` at 5321 lines. Binary 239,984 bytes. |
@@ -196,7 +209,7 @@ payload at `BY_DATA_MAX = 4072`.
 | 1.9.5 | 2026-05-21 | **Cyrius 6.0 toolchain bump (pin-only patch).** `cyrius` pin 5.11.4 → 6.0.1 — patra's first major-version cyrius bump. Cyrius 6.0 renames the named compiler (`cc5` → `cycc`, `cc5_aarch64` → `cycc_aarch64`); patra's CI invokes the `cyrius` CLI wrapper, so no workflow surgery was required (pattern-matched against agnosys commits `4588938` + `b1e9eca`, which had to migrate `cc5 --version` + `cc5_aarch64` call sites). All gates green: lint 0, 620 tests, 6 fuzz, 35 benchmarks (no regression), libro 15/15, vidya 19/19, `src/lib.cyr` aarch64 cross-build clean. `dist/patra.cyr` regenerated at 4785 lines. |
 | 1.9.4 | 2026-05-11 | **Stdlib `: i64` return-type annotation pass.** Every public fn in `src/*.cyr` carries a `: i64` return-type annotation. Mechanical parse-only pass tracking cyrius's v5.11.x annotation arc (REAL TYPE SYSTEM); zero runtime / codegen change. Pin 5.8.64 → 5.11.4. |
 | 1.9.3 | 2026-05-05 | **sakshi tag + path corrections; pin 5.7.48 → 5.8.64** ahead of cyrius's v5.8.65 stdlib foldin. sakshi dep tag 0.9.0 → 2.2.3 and `modules` path `"sakshi.cyr"` → `"dist/sakshi.cyr"` (canonical convention). 620 / 620 asserts pass against the new pin. |
-| 1.9.2 | 2026-04-30 | **Lint / fmt clean surface — pre-existing pollution flushed.** Banner-comment unicode → ASCII across `tests/tcyr/patra.tcyr` + `tests/bcyr/patra.bcyr` + four `fuzz/*.fcyr` files (1558 `─` + 39 `—` + 27 `→`). Kills 38 byte-length lint warnings; brings `patra.tcyr` 134,107 → ~131,000 bytes under cyrfmt/cyrlint's 128 KB buffer cap (root cause filed at [`issues/2026-04-30-cyrius-cyrfmt-cyrlint-buffer-truncation.md`](issues/2026-04-30-cyrius-cyrfmt-cyrlint-buffer-truncation.md)). 27 more `SYS_CLOSE/READ/WRITE` callsites migrated to stdlib wrappers. |
+| 1.9.2 | 2026-04-30 | **Lint / fmt clean surface — pre-existing pollution flushed.** Banner-comment unicode → ASCII across `tests/tcyr/patra.tcyr` + `tests/bcyr/patra.bcyr` + four `fuzz/*.fcyr` files (1558 `─` + 39 `—` + 27 `→`). Kills 38 byte-length lint warnings; brings `patra.tcyr` 134,107 → ~131,000 bytes under cyrfmt/cyrlint's 128 KB buffer cap (root cause filed at [`issues/2026-04-30-cyrius-cyrfmt-cyrlint-buffer-truncation.md`](issues/archive/2026-04-30-cyrius-cyrfmt-cyrlint-buffer-truncation.md)). 27 more `SYS_CLOSE/READ/WRITE` callsites migrated to stdlib wrappers. |
 | 1.9.1 | 2026-04-27 | **aarch64 portability + pin 5.7.8 → 5.7.48** (40 patches; the longest minor in cyrius history). Migrated 9 raw `syscall(SYS_OPEN/SYS_UNLINK, …)` sites in `src/{jsonl,file,wal}.cyr` onto `sys_open` / `sys_unlink` stdlib wrappers — aarch64's syscall table omits both legacy numbers (kernel exposes only AT-variants on arm64). `build/patra-aarch64` first produces a valid ARM aarch64 ELF — unblocks downstream consumers (yukti, vidya, sit, libro) that need to cross-compile through patra. Pass-through on x86_64. |
 | 1.9.0 | 2026-04-25 | **BREAKING: `json_build` → `patra_json_build` rename.** Clears a silent collision with `lib/json.cyr::json_build/1` (the general pairs-vec utility) — cyrius v5.7.9 surfaces this as a `warning: duplicate fn` at registration time. Toolchain pin 5.6.39 → 5.7.8. New `scripts/version-bump.sh` keeps `VERSION` + `cyrius.cyml package.version` + `CLAUDE.md` Version line + a CHANGELOG stub in lockstep. |
 | 1.8.3 | 2026-04-24 | Release-prep pass — fmt clean, lint 0 warnings across 11 src files, `dist/patra.cyr` regenerated at 4771 lines. |
@@ -218,11 +231,12 @@ Full history in [`../../CHANGELOG.md`](../../CHANGELOG.md). Pre-1.6 narrative in
 
 ## Known footguns / latent issues
 
-- **`programs/` aarch64 cross-build** — `programs/demo.cyr`, `test_libro.cyr`, `test_vidya.cyr` still use raw `syscall(SYS_UNLINK, …)`. The library proper is aarch64-clean; the test harness isn't. Folding into the wrapper migration is queued behind the next consumer-driven release.
-- **`cyrius distlib` consecutive blank lines (upstream)** — the generated `dist/patra.cyr` carries 3 cyrlint "multiple consecutive blank lines" warnings (header separator + `include`-strip residue); src/programs lint clean. Non-blocking (CI lints `src/` + `programs/`, not `dist/`); visible to downstream consumers who lint the vendored bundle. Filed at [`issues/2026-05-27-cyrius-distlib-blank-lines.md`](issues/2026-05-27-cyrius-distlib-blank-lines.md) for the cyrius/language agent.
+- **`programs/` aarch64 cross-build** — `programs/demo.cyr`, `test_libro.cyr`, `test_vidya.cyr` still use raw `syscall(SYS_UNLINK, …)`. The library proper is aarch64-clean (and agnos-clean as of v1.12.5); the test harness isn't. Folding into the wrapper migration is queued behind the next consumer-driven release.
 
 ## Resolved (archived)
 
+- **agnos cross-target ABI — no positional I/O (`lseek`/`pread`/`flock`)** — **resolved; overtaken by events (agnos 1.46 + patra 1.12.2–1.12.5).** The 2026-06-18 issue demanded an architecture call (mmap-backed page store vs. kernel positional-I/O ask vs. defer-and-guard). agnos 1.46 added `lseek` #58 / `flock` #59 via the syscall peer — the issue's "path 2" — so patra's existing seek engine works behind per-target `#ifdef` guards, adopted across 1.12.2 (flock/fdatasync/getrandom), 1.12.3 (`time_unix`), and 1.12.5 (WAL `sys_unlink` → `io.cyr` `xunlink`). `cyrius build --agnos src/lib.cyr` now cross-builds warning-free; no mmap backend needed. Moved to [`issues/archive/2026-06-18-agnos-cross-target-abi.md`](issues/archive/2026-06-18-agnos-cross-target-abi.md).
+- **`cyrius distlib` consecutive blank lines** — **resolved upstream (confirmed cyrius 6.2.44).** distlib now collapses the blank runs it used to leave (4-line-header separator + `include`-strip residue); regenerating `dist/patra.cyr` under 6.2.44 and running `cyrius lint dist/patra.cyr` reports 0 warnings (was 3). The deliberately-skipped source workaround was never needed. Moved to [`issues/archive/2026-05-27-cyrius-distlib-blank-lines.md`](issues/archive/2026-05-27-cyrius-distlib-blank-lines.md).
 - **`cyrius deps --lock` 0-byte lockfile (cyrius 6.0.1)** — **resolved in cyrius 6.0.3.** `cyrius deps` now serializes the full lock (`cyrius.lock` 81-byte stub → 6595 bytes / 81 deps) instead of the empty stub 6.0.1 emitted. Confirmed during the v1.10.0 pin bump; the regenerated lock ships with v1.10.0.
 - **`cyrfmt` / `cyrlint` 128 KB buffer cap** — **resolved upstream in cyrius 6.0.1.** Internal buffer raised 131,072 → 524,288 bytes (4× bump, verified by feeding a 6.6 MB input to `cyrfmt`: output now caps at 524,289 bytes, not 131,072). Patra's largest source file (`tests/tcyr/patra.tcyr`, 130,692 bytes) is now ~4× under the new cap. Issue moved to [`issues/archive/2026-04-30-cyrius-cyrfmt-cyrlint-buffer-truncation.md`](issues/archive/2026-04-30-cyrius-cyrfmt-cyrlint-buffer-truncation.md). The fixed-buffer shape still exists at the larger size; re-file if any patra test file ever crosses 512 KB.
 
