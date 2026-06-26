@@ -3331,6 +3331,156 @@ fn test_str_index_or_ignore_dedup() {
     patra_close(db);
 }
 
+# Helper: insert (hash STR, ty INT, content BYTES) — sit's object-store shape —
+# via patra_insert_row (or_ignore == 0) or patra_insert_row_or_ignore (== 1).
+fn _oi_insert(db, tname, tnlen, hash, ty, content, clen, or_ignore) {
+    var types = fl_alloc(3 * 8);
+    var ivals = fl_alloc(3 * 8);
+    var sptrs = fl_alloc(3 * 8);
+    var slens = fl_alloc(3 * 8);
+    var bptrs = fl_alloc(3 * 8);
+    var blens = fl_alloc(3 * 8);
+    memset(ivals, 0, 24); memset(sptrs, 0, 24); memset(slens, 0, 24);
+    memset(bptrs, 0, 24); memset(blens, 0, 24);
+    store64(types + 0 * 8, COL_STR);
+    store64(sptrs + 0 * 8, hash); store64(slens + 0 * 8, strlen(hash));
+    store64(types + 1 * 8, COL_INT); store64(ivals + 1 * 8, ty);
+    store64(types + 2 * 8, COL_BYTES);
+    store64(bptrs + 2 * 8, content); store64(blens + 2 * 8, clen);
+    var r = 0;
+    if (or_ignore != 0) {
+        r = patra_insert_row_or_ignore(db, tname, tnlen, 3, types, ivals, sptrs, slens, bptrs, blens);
+    } else {
+        r = patra_insert_row(db, tname, tnlen, 3, types, ivals, sptrs, slens, bptrs, blens);
+    }
+    fl_free(types); fl_free(ivals); fl_free(sptrs);
+    fl_free(slens); fl_free(bptrs); fl_free(blens);
+    return r;
+}
+
+fn test_insert_row_or_ignore() {
+    test_group("patra_insert_row OR IGNORE");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE objects (hash STR, ty INT, content BYTES)");
+    patra_exec(db, "CREATE INDEX ON objects (hash)");
+
+    var p1 = fl_alloc(64); _bytes_fill(p1, 40, 7);
+    var p2 = fl_alloc(64); _bytes_fill(p2, 40, 9);
+
+    # Fresh key inserts; rows_affected == 1.
+    assert_eq(_oi_insert(db, "objects", 7, "deadbeef", 1, p1, 40, 1), PATRA_OK, "fresh insert ok");
+    assert_eq(patra_rows_affected(db), 1, "fresh => 1 inserted");
+
+    # Same key ignored: PATRA_OK, rows_affected == 0, original row untouched
+    # (ty stays 1, content stays p1 — the conflicting payload p2 is discarded).
+    assert_eq(_oi_insert(db, "objects", 7, "deadbeef", 2, p2, 40, 1), PATRA_OK, "dup insert ok");
+    assert_eq(patra_rows_affected(db), 0, "dup => 0 ignored");
+    var rs = patra_query(db, "SELECT * FROM objects");
+    assert_eq(patra_result_count(rs), 1, "still 1 row after dup");
+    assert_eq(patra_result_get_int(rs, 0, 1), 1, "original ty preserved");
+    var out = fl_alloc(64); memset(out, 0, 64);
+    assert_eq(patra_result_read_bytes(db, rs, 0, 2, out), PATRA_OK, "read content ok");
+    assert_eq(_bytes_eq(p1, out, 40), 1, "original content preserved");
+    patra_result_free(rs);
+
+    # Different key inserts; rows_affected == 1.
+    assert_eq(_oi_insert(db, "objects", 7, "cafef00d", 3, p2, 40, 1), PATRA_OK, "new key ok");
+    assert_eq(patra_rows_affected(db), 1, "new key => 1");
+    var rs2 = patra_query(db, "SELECT * FROM objects");
+    assert_eq(patra_result_count(rs2), 2, "2 rows total");
+    patra_result_free(rs2);
+
+    # Plain patra_insert_row (no OR IGNORE) still inserts unconditionally — the
+    # secondary index is non-unique, so the key duplicates.
+    assert_eq(_oi_insert(db, "objects", 7, "deadbeef", 5, p2, 40, 0), PATRA_OK, "plain insert ok");
+    var rs3 = patra_query(db, "SELECT * FROM objects WHERE hash = 'deadbeef'");
+    assert_eq(patra_result_count(rs3), 2, "plain insert duplicated the key");
+    patra_result_free(rs3);
+
+    # No index => nothing to dedup => OR IGNORE always inserts.
+    patra_exec(db, "CREATE TABLE noidx (hash STR, ty INT, content BYTES)");
+    assert_eq(_oi_insert(db, "noidx", 5, "k", 1, p1, 40, 1), PATRA_OK, "noidx insert 1");
+    assert_eq(patra_rows_affected(db), 1, "noidx => 1");
+    assert_eq(_oi_insert(db, "noidx", 5, "k", 2, p1, 40, 1), PATRA_OK, "noidx insert 2");
+    assert_eq(patra_rows_affected(db), 1, "noidx dup still inserts => 1");
+    var rsn = patra_query(db, "SELECT * FROM noidx");
+    assert_eq(patra_result_count(rsn), 2, "noidx kept both rows");
+    patra_result_free(rsn);
+    patra_close(db);
+
+    # Persistence: index survives reopen, OR IGNORE still dedups.
+    var db2 = patra_open(_tpath);
+    assert_eq(_oi_insert(db2, "objects", 7, "cafef00d", 9, p1, 40, 1), PATRA_OK, "reopen dup ok");
+    assert_eq(patra_rows_affected(db2), 0, "reopen => still ignored");
+    patra_close(db2);
+}
+
+# Helper: insert (id INT, content BYTES) via patra_insert_row[_or_ignore].
+fn _io_insert(db, tname, tnlen, id, content, clen, or_ignore) {
+    var types = fl_alloc(16); var ivals = fl_alloc(16);
+    var sptrs = fl_alloc(16); var slens = fl_alloc(16);
+    var bptrs = fl_alloc(16); var blens = fl_alloc(16);
+    memset(ivals, 0, 16); memset(sptrs, 0, 16); memset(slens, 0, 16);
+    memset(bptrs, 0, 16); memset(blens, 0, 16);
+    store64(types + 0, COL_INT); store64(ivals + 0, id);
+    store64(types + 8, COL_BYTES); store64(bptrs + 8, content); store64(blens + 8, clen);
+    var r = 0;
+    if (or_ignore != 0) {
+        r = patra_insert_row_or_ignore(db, tname, tnlen, 2, types, ivals, sptrs, slens, bptrs, blens);
+    } else {
+        r = patra_insert_row(db, tname, tnlen, 2, types, ivals, sptrs, slens, bptrs, blens);
+    }
+    fl_free(types); fl_free(ivals); fl_free(sptrs);
+    fl_free(slens); fl_free(bptrs); fl_free(blens);
+    return r;
+}
+
+fn test_insert_row_or_ignore_int() {
+    test_group("patra_insert_row OR IGNORE (INT index, tombstone)");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE iobj (id INT, content BYTES)");
+    patra_exec(db, "CREATE INDEX ON iobj (id)");
+
+    var q1 = fl_alloc(64); _bytes_fill(q1, 32, 3);
+    var q2 = fl_alloc(64); _bytes_fill(q2, 32, 8);
+
+    # Fresh INT key inserts; dup ignored.
+    assert_eq(_io_insert(db, "iobj", 4, 5, q1, 32, 1), PATRA_OK, "int fresh ok");
+    assert_eq(patra_rows_affected(db), 1, "int fresh => 1");
+    assert_eq(_io_insert(db, "iobj", 4, 5, q2, 32, 1), PATRA_OK, "int dup ok");
+    assert_eq(patra_rows_affected(db), 0, "int dup => 0 ignored");
+
+    # DELETE then OR IGNORE must RE-INSERT. Regression guard: a lazy-deleted INT
+    # key keeps a -1 tombstone in the index; a count-only probe used to false-hit
+    # it and silently drop this write.
+    assert_eq(patra_exec(db, "DELETE FROM iobj WHERE id = 5"), PATRA_OK, "delete ok");
+    assert_eq(_io_insert(db, "iobj", 4, 5, q2, 32, 1), PATRA_OK, "reinsert ok");
+    assert_eq(patra_rows_affected(db), 1, "reinsert after delete => 1");
+    var rs = patra_query(db, "SELECT * FROM iobj WHERE id = 5");
+    assert_eq(patra_result_count(rs), 1, "row present after reinsert");
+    var out = fl_alloc(64); memset(out, 0, 64);
+    assert_eq(patra_result_read_bytes(db, rs, 0, 1, out), PATRA_OK, "read reinserted content");
+    assert_eq(_bytes_eq(q2, out, 32), 1, "reinserted content is the new payload");
+    patra_result_free(rs);
+
+    # Same tombstone path on the SQL INSERT OR IGNORE INT probe (pre-existing).
+    patra_exec(db, "CREATE TABLE r (id INT, val STR)");
+    patra_exec(db, "CREATE INDEX ON r (id)");
+    patra_exec(db, "INSERT INTO r VALUES (7, 'a')");
+    assert_eq(patra_exec(db, "INSERT OR IGNORE INTO r VALUES (7, 'b')"), PATRA_OK, "sql dup ok");
+    assert_eq(patra_rows_affected(db), 0, "sql dup => 0 ignored");
+    patra_exec(db, "DELETE FROM r WHERE id = 7");
+    assert_eq(patra_exec(db, "INSERT OR IGNORE INTO r VALUES (7, 'c')"), PATRA_OK, "sql reinsert ok");
+    assert_eq(patra_rows_affected(db), 1, "sql reinsert after delete => 1");
+    var rs2 = patra_query(db, "SELECT * FROM r WHERE id = 7");
+    assert_eq(patra_result_count(rs2), 1, "sql row present after reinsert");
+    assert_eq(patra_result_get_int(rs2, 0, 0), 7, "sql id correct");
+    patra_result_free(rs2);
+    patra_close(db);
+}
+
 fn test_str_index_update_maintains() {
     test_group("STR index UPDATE keeps tree consistent");
     cleanup();
@@ -4825,6 +4975,8 @@ fn main() {
     # v1.7.1 STR-keyed B+ tree (hash-keyed, verify on hit)
     test_str_index_create();
     test_str_index_or_ignore_dedup();
+    test_insert_row_or_ignore();
+    test_insert_row_or_ignore_int();
     test_str_index_update_maintains();
     test_str_index_delete_maintains();
     test_str_index_persistence();

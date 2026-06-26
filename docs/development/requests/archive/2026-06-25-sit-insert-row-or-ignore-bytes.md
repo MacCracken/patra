@@ -1,8 +1,19 @@
 # `OR IGNORE` (skip-on-conflict) for `patra_insert_row` — BYTES-column write path
 
+> **SHIPPED v1.12.6 (2026-06-25).** Added `patra_insert_row_or_ignore(...)` — same
+> signature as `patra_insert_row`, returns `PATRA_OK` with `patra_rows_affected`
+> `0` (ignored) / `1` (inserted). It probes the indexed key **before** allocating
+> the content chain, so a duplicate costs one index probe and no chain work —
+> `dedup_insert_row_or_ignore_500` **10.4 µs** vs the SELECT-then-insert
+> workaround's **272.6 µs** (~26×). sit drops its `db_object_has` pre-flight
+> SELECT on the object-ingest path; unblocks P-11. The broader `patra_bind_blob`
+> alternative remains unshipped — this sibling delivered the skip-on-conflict
+> without widening the SQL/bind surface. See CHANGELOG [1.12.6]. Body below is the
+> original request.
+
 **Filed:** 2026-06-25 (sit P-11 dep-consumption pass)
 **Consumer:** sit (Cyrius-native git replacement; B+ tree object store)
-**Status:** Open
+**Status:** Shipped v1.12.6
 **Related:** `INSERT OR IGNORE` SQL shipped v1.7.0 (`dedup_insert_or_ignore_500`
 14 µs, ~18× vs workaround) but only on the SQL / prepared path; `patra_bind_blob`
 deferred at v1.10.3 ("BYTES stays `patra_insert_row`-only"). This request is the

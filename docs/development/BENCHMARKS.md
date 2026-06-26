@@ -11,15 +11,18 @@ Benches under `/tmp` (tmpfs, fdatasync is a no-op) are noted explicitly.
 The group-commit comparison uses a real-disk path (`./bench_groupcommit.patra`,
 btrfs/NVMe under the repo) to avoid hiding the win.
 
-> **Currency note (2026-06-17).** This table is the v1.9.5 / cyrius 6.0.1
-> baseline. Patra is now at **v1.11.3** (cyrius pin **6.2.19**) and the suite
-> has grown to **36 benchmarks** (this table reflects the 35-bench v1.9.5
-> sweep). The 1.10.x / 1.11.x arcs added SQL/data-model surface (column-list
-> INSERT, AUTOINCREMENT, TEXT, bind params, write-readback) and a thread-safety
-> mutex, but no hot-path rewrite since the v1.8.2 perf work — spot re-runs at
-> each release stay within noise of these numbers (e.g. v1.11.3: `insert_1k`
-> ~22 µs, `insert_1k_prepared` ~14.7 µs). A full re-baseline is deferred to the
-> next perf-driven cut; until then read these as the standing reference.
+> **Currency note (updated 2026-06-25, v1.12.6).** The bulk of this table is the
+> v1.9.5 / cyrius 6.0.1 baseline. Patra is now at **v1.12.6** (cyrius pin
+> **6.2.44**) and the suite has grown to **40 benchmarks**. Since the v1.9.5
+> sweep: the 1.10.x / 1.11.x arcs added SQL/data-model surface (column-list
+> INSERT, AUTOINCREMENT, TEXT, bind params, write-readback); v1.12.0 added the
+> concurrent-reader benches (`read_scan_4t_par` ~140 µs); and **v1.12.6 added the
+> BYTES-path dedup benches** below (`dedup_insert_row_or_ignore_500` ~10 µs vs the
+> `dedup_select_then_insert_row_500` workaround ~273 µs, **~26×**). No hot-path
+> rewrite since v1.8.2 — spot re-runs at each release stay within noise (v1.12.6:
+> `insert_1k` ~22 µs). A full re-baseline of the legacy rows is still deferred:
+> read the un-dated rows as the standing v1.9.5 reference and the dated additions
+> as current.
 
 ## SQL parsing
 
@@ -97,6 +100,8 @@ btrfs/NVMe under the repo) to avoid hiding the win.
 | `dedup_select_then_insert_500`     | 250µs         | Consumer-side workaround: SELECT WHERE key=…, conditional INSERT |
 | `dedup_insert_or_ignore_500`       | 14µs          | INT-keyed `INSERT OR IGNORE`. **~18× faster** than workaround |
 | `str_dedup_insert_or_ignore_500`   | 15µs          | STR-keyed `INSERT OR IGNORE` (1.7.1 hash + verify). Matches INT |
+| `dedup_select_then_insert_row_500` | 273µs *(1.12.6)* | **BYTES path** workaround: `patra_query` SELECT then conditional `patra_insert_row` |
+| `dedup_insert_row_or_ignore_500`   | 10µs *(1.12.6)*  | **BYTES path** `patra_insert_row_or_ignore` (probe-before-chain). **~26×** faster than the SELECT workaround; beats SQL `OR IGNORE` by skipping tokenize/parse |
 
 ## STR-indexed equality (1.7.1)
 

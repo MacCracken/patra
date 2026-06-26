@@ -27,6 +27,5 @@ the `issues/` convention.
 
 ## Open requests
 
-| File | Filed | Consumer | Blocker |
-|---|---|---|---|
-| [`2026-06-25-sit-insert-row-or-ignore-bytes.md`](2026-06-25-sit-insert-row-or-ignore-bytes.md) | 2026-06-25 | sit | No `OR IGNORE` (skip-on-conflict) on `patra_insert_row` — the only BYTES write path; forces a pre-insert SELECT per object on clone/push/add. Unblocks sit P-11. |
+**None open.** The sit BYTES `OR IGNORE` request shipped in v1.12.6
+(`patra_insert_row_or_ignore`) — see [`archive/`](archive/).

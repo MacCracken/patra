@@ -5,6 +5,77 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.6] - 2026-06-25
+
+**`patra_insert_row_or_ignore` — `OR IGNORE` (skip-on-conflict) on the BYTES
+write path (sit).** `patra_insert_row` is the only path that can write a `BYTES`
+column, and it had no conflict handling — so sit's content-addressed object store
+(`objects(hash STR, …, content BYTES)`) guarded every idempotent insert with a
+pre-flight `SELECT` (`db_object_has`), paying **two B+ tree ops per object** on
+the clone / fetch / push / `add` hot path. The new sibling probes the indexed key
+and skips duplicates itself. Crucially it probes **before allocating the content
+chain**, so a duplicate costs a single index probe and *zero* chain work — making
+it a real win over the consumer's SELECT-then-insert (which a naive write-then-
+free-on-conflict port would not have been, since the common case is a hit).
+
+### Added
+
+- **`patra_insert_row_or_ignore(db, tname, tnlen, ncols, types, ivals, sptrs, slens, bptrs, blens)`**
+  — same signature as `patra_insert_row` (additive, non-breaking). If the table's
+  indexed column already holds the row's key, the insert is skipped and the call
+  returns `PATRA_OK` with `patra_rows_affected(db) == 0`; a fresh key inserts and
+  reports `1` — the same ignored-vs-inserted split SQL `INSERT OR IGNORE` exposes
+  via `patra_rows_affected` (v1.11.3). Requires an index on the conflict column
+  (no index ⇒ nothing to dedup ⇒ always inserts, matching SQL `OR IGNORE`). The
+  conflict probe (INT: direct `btree_search`; STR: hash candidates +
+  `_memeq256` collision filter) runs before the `BYTES`/`TEXT` chain is written,
+  so a duplicate never allocates or frees an overflow chain. Internal
+  `_patra_insert_row_impl` gained an `or_ignore` flag; `patra_insert_row` is
+  unchanged (passes `0`).
+
+### Performance
+
+- **Dup-hit object insert ~26× faster on the BYTES path.** New benchmarks
+  (`tests/bcyr/patra.bcyr`, sit's `objects(hash STR, content BYTES)` workload, 500
+  all-colliding re-inserts): `dedup_select_then_insert_row_500` (the SELECT-probe
+  workaround) **272.6 µs** vs `dedup_insert_row_or_ignore_500` **10.4 µs**
+  (~26×). The native path also edges the SQL `dedup_insert_or_ignore_500`
+  (17.7 µs) by skipping tokenize/parse. No regression elsewhere (`insert_1k`
+  ~23 µs).
+
+### Fixed
+
+- **`INSERT OR IGNORE` on an INT-indexed column no longer drops a write after a
+  `DELETE`.** Both the new `patra_insert_row_or_ignore` and the pre-existing SQL
+  `INSERT OR IGNORE` decided an INT conflict by *counting* index hits
+  (`btree_search(...) > 0`). But `DELETE` lazy-tombstones the index entry (value
+  → `-1`, key retained until VACUUM/compaction), so a deleted-then-reinserted INT
+  key false-hit and the re-insert was **silently skipped** (`patra_rows_affected`
+  `0`, row absent). The INT probe now filters tombstones — requiring a live
+  (`!= -1`) ref — exactly as the STR/hash branch already did, applied to both
+  probe sites. The STR path (sit's actual hash-keyed workload) was never
+  affected. Surfaced by this release's adversarial review; regression-tested by
+  the `patra_insert_row OR IGNORE (INT index, tombstone)` group.
+
+### Notes
+
+- **Request shipped — sit BYTES `OR IGNORE`**
+  (`docs/development/requests/2026-06-25-sit-insert-row-or-ignore-bytes.md` →
+  `requests/archive/`). Removes the last redundant lookup on sit's object-ingest
+  path and unblocks sit **P-11** (index upsert without a full rewrite, which
+  shares this BYTES-skip-on-conflict mechanism). `patra_bind_blob` (the broader
+  deferred 1.10.3 alternative) remains unshipped — this sibling delivers the
+  skip-on-conflict sit needed without widening the SQL/bind surface.
+- **Gates:** **870 tests** (+36 over v1.12.5: the `patra_insert_row OR IGNORE`
+  group — fresh/dup/new-key, content + rows_affected preservation, plain-insert
+  still duplicates, no-index always-inserts, reopen persistence — plus the
+  INT-index tombstone regression group covering delete-then-reinsert on both the
+  programmatic and SQL paths), **7 fuzz**, **40 benchmarks** (+2), libro 15/15,
+  vidya 19/19, lint 0-warn, aarch64 + agnos cross-builds clean. `dist/patra.cyr`
+  regenerated at v1.12.6 (5803 lines). Binary 281,728 bytes (DCE demo, x86_64,
+  6.2.44; +2,000 over v1.12.5's 279,728 — the new probe + public fn + tombstone
+  filter).
+
 ## [1.12.5] - 2026-06-25
 
 **Toolchain pin `6.2.28` → `6.2.44`, and the agnos port finished (last

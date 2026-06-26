@@ -527,6 +527,72 @@ fn main() {
     patra_close(_bdb);
     _bcleanup();
 
+    # --- BYTES dedup: patra_insert_row_or_ignore vs SELECT-then-insert_row ---
+    # sit's object-store hot path: objects(hash STR, content BYTES), idempotent
+    # re-inserts of already-present objects. Compares the consumer workaround
+    # (db_object_has SELECT then conditional patra_insert_row) against native
+    # patra_insert_row_or_ignore, which probes the hash index BEFORE allocating
+    # the content chain — a duplicate costs one index probe and zero chain work.
+    _bcleanup();
+    _bdb = patra_open(_bpath);
+    patra_exec(_bdb, "CREATE TABLE bobj (hash STR, content BYTES)");
+    patra_exec(_bdb, "CREATE INDEX ON bobj (hash)");
+
+    # Reusable 2-col insert arrays (hash STR, content BYTES); fixed 64-byte
+    # payload, only the hash varies per row.
+    var _bpayload = fl_alloc(64);
+    memset(_bpayload, 42, 64);
+    var _btypes = fl_alloc(16); var _bivals = fl_alloc(16);
+    var _bsptrs = fl_alloc(16); var _bslens = fl_alloc(16);
+    var _bbptrs = fl_alloc(16); var _bblens = fl_alloc(16);
+    memset(_bivals, 0, 16); memset(_bsptrs, 0, 16); memset(_bslens, 0, 16);
+    memset(_bbptrs, 0, 16); memset(_bblens, 0, 16);
+    store64(_btypes + 0, COL_STR);
+    store64(_btypes + 8, COL_BYTES);
+    store64(_bbptrs + 8, _bpayload); store64(_bblens + 8, 64);
+
+    var _bh[32];
+    for (var bsi = 0; bsi < 500; bsi = bsi + 1) {
+        var _bsa = vec_new(); vec_push(_bsa, bsi);
+        fmt_sprintf(&_bh, 32, "obj%d", _bsa);
+        store64(_bsptrs + 0, &_bh); store64(_bslens + 0, strlen(&_bh));
+        patra_insert_row(_bdb, "bobj", 4, 2, _btypes, _bivals, _bsptrs, _bslens, _bbptrs, _bblens);
+    }
+
+    # Baseline: SELECT probe then conditional insert_row (the sit workaround).
+    var b_stir = bench_new("dedup_select_then_insert_row_500");
+    bench_batch_start(b_stir);
+    for (var bw = 0; bw < 500; bw = bw + 1) {
+        var _bwa = vec_new(); vec_push(_bwa, bw);
+        var _bwq[48];
+        fmt_sprintf(&_bwq, 48, "SELECT * FROM bobj WHERE hash = 'obj%d'", _bwa);
+        var rsw = patra_query(_bdb, &_bwq);
+        if (patra_result_count(rsw) == 0) {
+            var _bwa3 = vec_new(); vec_push(_bwa3, bw);
+            fmt_sprintf(&_bh, 32, "obj%d", _bwa3);
+            store64(_bsptrs + 0, &_bh); store64(_bslens + 0, strlen(&_bh));
+            patra_insert_row(_bdb, "bobj", 4, 2, _btypes, _bivals, _bsptrs, _bslens, _bbptrs, _bblens);
+        }
+        patra_result_free(rsw);
+    }
+    bench_batch_stop(b_stir, 500);
+    vec_push(benches, b_stir);
+
+    # Native: patra_insert_row_or_ignore — all 500 keys collide, all ignored.
+    var b_ioir = bench_new("dedup_insert_row_or_ignore_500");
+    bench_batch_start(b_ioir);
+    for (var bo = 0; bo < 500; bo = bo + 1) {
+        var _boa = vec_new(); vec_push(_boa, bo);
+        fmt_sprintf(&_bh, 32, "obj%d", _boa);
+        store64(_bsptrs + 0, &_bh); store64(_bslens + 0, strlen(&_bh));
+        patra_insert_row_or_ignore(_bdb, "bobj", 4, 2, _btypes, _bivals, _bsptrs, _bslens, _bbptrs, _bblens);
+    }
+    bench_batch_stop(b_ioir, 500);
+    vec_push(benches, b_ioir);
+
+    patra_close(_bdb);
+    _bcleanup();
+
     # --- STR-indexed dedup (1.7.1: hash-keyed STR B-tree) ---
     # Sit's actual workload: hash STR primary key + INSERT OR IGNORE.
     # Seed 500 unique hash strings then attempt 500 conflicting inserts.

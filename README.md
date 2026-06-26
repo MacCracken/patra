@@ -81,7 +81,7 @@ at patra's pinned tag, or the link fails on the undefined `sakshi_*` symbols:
 ```toml
 [deps.patra]
 git = "https://github.com/MacCracken/patra.git"
-tag = "1.12.5"
+tag = "1.12.6"
 
 # Required alongside patra — patra calls into it but cyrius won't pull it for you.
 [deps.sakshi]
@@ -177,7 +177,7 @@ CREATE TABLE objects (hash STR, content BYTES)
 CREATE TABLE notes (id INT AUTOINCREMENT, body TEXT)
 ```
 
-Column types are `INT` (i64), `STR` (256-byte fixed), `TEXT` (variable-length text), and `BYTES` (variable-length binary; `BLOB` accepted as alias). No floating point. `TEXT` and `BYTES` share the same chain-page storage (the row holds a 16-byte ref; the payload spills across pages) and neither is comparable in `WHERE` or indexable. They differ at the SQL surface: `TEXT` is written from a string literal in `INSERT`/`UPDATE` and read via `patra_result_get_text_len` / `patra_result_read_text`; `BYTES` is binary and write/read only via the `patra_insert_row` / `patra_result_read_bytes` programmatic API. (Mirrors SQLite's TEXT vs BLOB.)
+Column types are `INT` (i64), `STR` (256-byte fixed), `TEXT` (variable-length text), and `BYTES` (variable-length binary; `BLOB` accepted as alias). No floating point. `TEXT` and `BYTES` share the same chain-page storage (the row holds a 16-byte ref; the payload spills across pages) and neither is comparable in `WHERE` or indexable. They differ at the SQL surface: `TEXT` is written from a string literal in `INSERT`/`UPDATE` and read via `patra_result_get_text_len` / `patra_result_read_text`; `BYTES` is binary and write/read only via the `patra_insert_row` / `patra_result_read_bytes` programmatic API. (Mirrors SQLite's TEXT vs BLOB.) For idempotent BYTES writes, `patra_insert_row_or_ignore` (same arguments as `patra_insert_row`) skips a row whose indexed key already exists — `patra_rows_affected(db)` then reads `0` (ignored) or `1` (inserted), the same split as SQL `INSERT OR IGNORE`. It probes the key *before* allocating the content chain, so a duplicate costs one index probe and no chain work; it needs an index on the conflict column (no index ⇒ always inserts).
 
 An `INSERT` may name its columns — `INSERT INTO t (b, a) VALUES (...)` — to bind values by name in any order; columns left unnamed take their zero/empty default. Without a column list, values are positional in `CREATE TABLE` order.
 

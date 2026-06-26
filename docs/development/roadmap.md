@@ -1,10 +1,10 @@
 # Patra Development Roadmap
 
-> **Last refreshed**: 2026-06-25 (v1.12.5 cut — cyrius 6.2.44 pin + agnos port finished; distlib + agnos issues resolved & archived)
+> **Last refreshed**: 2026-06-25 (v1.12.6 cut — `patra_insert_row_or_ignore`: sit BYTES `OR IGNORE`; request archived)
 >
 > Thin **backlog index**, forward-looking only. Open consumer requests live one-file-each in [`requests/`](requests/) (this file points at them); upstream cyrius bugs live in [`issues/`](issues/). Shipped work lives in [`../../CHANGELOG.md`](../../CHANGELOG.md) + [`completed-phases.md`](completed-phases.md); live state (version, sizes, counts, consumers) in [`state.md`](state.md).
 
-> **Current**: v1.12.5 — **cyrius pin `6.2.28` → `6.2.44`; agnos port finished.** The WAL's four `sys_unlink` sites moved onto `lib/io.cyr`'s portable `xunlink` wrapper, so `cyrius build --agnos src/lib.cyr` cross-compiles **warning-free** — closing the last mechanical wart of the 1.12.2/1.12.3 agnos ABI sweep (and silencing the Windows `sys_unlink` cross-build warning too). Both open upstream-tracking issues are now **resolved & archived**: the agnos cross-target ABI blocker (agnos 1.46 added `lseek` #58 / `flock` #59; no mmap backend needed) and the `cyrius distlib` consecutive-blank-lines warning (gone under 6.2.44). One open consumer request: sit `OR IGNORE` on the BYTES write path (below). Patra serves libro, vidya, daimon, agnoshi, mela, hoosh, and sit.
+> **Current**: v1.12.6 — **`patra_insert_row_or_ignore` (sit BYTES `OR IGNORE`).** Skip-on-conflict on the only BYTES write path: the indexed key is probed *before* the content chain is allocated, so a duplicate costs one index probe and no chain work (`dedup_insert_row_or_ignore_500` **10.4 µs** vs the SELECT-then-insert workaround **272.6 µs**, ~26×); `patra_rows_affected` reads `0` (ignored) / `1` (inserted). Drops sit's pre-flight `db_object_has` SELECT on the object-ingest hot path and unblocks **P-11**. **No open consumer requests.** (Prior: v1.12.5 — cyrius `6.2.44` pin + agnos port finished; agnos + `cyrius distlib` issues archived.) Patra serves libro, vidya, daimon, agnoshi, mela, hoosh, and sit.
 
 ## Driven by consumer needs
 
@@ -12,9 +12,7 @@ Patra has no speculative feature backlog. Work lands when a consumer hits a conc
 
 ## Open backlog
 
-**Consumer requests:**
-
-- **`OR IGNORE` on `patra_insert_row` (BYTES write path)** — sit. `INSERT OR IGNORE` (v1.7.0) and `patra_bind_blob` (deferred 1.10.3) never met, so the only path that writes BYTES has no skip-on-conflict; sit pays a pre-insert SELECT per object on its clone/push/add hot path and stays blocked on **P-11**. Medium priority (throughput, not correctness). → [`requests/2026-06-25-sit-insert-row-or-ignore-bytes.md`](requests/2026-06-25-sit-insert-row-or-ignore-bytes.md)
+**Consumer requests** — none open. (sit's BYTES `OR IGNORE` shipped in v1.12.6 as `patra_insert_row_or_ignore` — see [`requests/archive/`](requests/archive/). `patra_bind_blob`, the broader deferred 1.10.3 alternative, stays deferred — unneeded for the skip-on-conflict ask.)
 
 **Deferred (consumer-driven — land when a consumer hits it):**
 
