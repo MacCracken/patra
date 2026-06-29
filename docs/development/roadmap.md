@@ -14,6 +14,10 @@ Patra has no speculative feature backlog. Work lands when a consumer hits a conc
 
 **Consumer requests** — none open. (sit's BYTES `OR IGNORE` shipped in v1.12.6 as `patra_insert_row_or_ignore` — see [`requests/archive/`](requests/archive/). `patra_bind_blob`, the broader deferred 1.10.3 alternative, stays deferred — unneeded for the skip-on-conflict ask.)
 
+**Consumer-filed bug (2026-06-28, yeo-cy-test):**
+
+- **Concurrent SELECTs race the process-global table-lookup cache.** `_tbl_lp_idx` / `_tbl_lp_page` (`src/table.cyr:4-5`) is still a process-global single-entry cache, written on every query's table resolution, so two reader threads — even on *separate* connection-per-thread handles — race it and one reads the other's cached page → garbled rows. P2 (1.12.0) moved the parse scratch + page slab to TLS but left this cache global, so the connection-per-thread parallel-read invariant isn't actually race-free. Fix: make the cache per-handle or thread-local. See [`issues/2026-06-28-concurrent-read-table-lookup-cache-race.md`](issues/2026-06-28-concurrent-read-table-lookup-cache-race.md). (Distinct from the BYTES/TEXT TOCTOU below — this is reader-vs-reader, no writer.)
+
 **Deferred (consumer-driven — land when a consumer hits it):**
 
 - **Eager BYTES/TEXT result materialization.** A result set's `BYTES`/`TEXT` `(page,len)` ref is materialized lazily *after* the read lock releases, so a concurrent writer that frees the row can make the read return stale bytes (pre-existing TOCTOU, documented in README + [`../architecture/003-page-cache-coherence.md`](../architecture/003-page-cache-coherence.md)). The fix (snapshot payloads into the result set at query time) is a breaking change to result-set memory; defer until a BYTES consumer hits it under concurrent writers.
