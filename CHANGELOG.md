@@ -5,6 +5,53 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.7] - 2026-06-29
+
+**Per-handle tail-page cache — fixes the P2 connection-per-thread table-cache
+race + cyrius `6.2.44` → `6.3.5`, sakshi `2.4.0` → `2.4.2`.** The insert
+tail-page cache (`_tbl_lp_idx` / `_tbl_lp_page` in `src/table.cyr`) was a
+**process-global single entry** shared by every db handle. Under the v1.12.0 P2
+connection-per-thread model — each reader/writer on its own handle — that meant
+one handle's insert could read **another handle's** cached `(table-index, page)`
+entry. The page number is meaningful only within a specific file, so a second
+handle over a *different* file with a table at the same directory index would
+hit the stale entry and write outside its own page chain (the row vanished from
+a later scan). This broke the connection-per-thread isolation invariant
+[ADR 0002](docs/adr/0002-connection-per-thread-concurrency.md) relies on. Filed
+by the `yeo-cy-test` consumer
+([issue](docs/development/issues/2026-06-28-concurrent-read-table-lookup-cache-race.md)).
+
+### Fixed
+
+- **Table-insert tail-page cache moved into the db handle** (`DB_LP_IDX` /
+  `DB_LP_PAGE` / `DB_LP_GEN`; handle grows 64 → 88 bytes) and **gen-gated**
+  against `HDR_COMMITGEN`. `tbl_insert` now takes the handle's 3-word cache
+  pointer and trusts a cached page only when it is for the same table index
+  **and** stamped at the current on-disk commit generation that `_pc_refresh`
+  re-reads on every locked op. A commit by another handle or process advances
+  the generation, so a stale entry misses and the chain is walked afresh —
+  closing both the cross-handle race and a latent cross-process staleness the
+  old per-process global also had. `_db_hdr_commit` carries the cache's
+  generation forward across the handle's own commit so consecutive single-row
+  inserts still hit (O(n), no regression); `DELETE` / `DROP` / `ALTER` reset the
+  per-handle entry since they free or shift pages within one generation.
+
+### Changed
+
+- **cyrius toolchain pin `6.2.44` → `6.3.5`** — clears the build-time pin-drift
+  warning against the installed compiler. Source-compatible.
+- **sakshi dep `2.4.0` → `2.4.2`** — additive agnos-only fixes (syscall-ABI
+  routing + clock calibration under `#ifdef CYRIUS_TARGET_AGNOS`); patra's
+  `sakshi_error` / `sakshi_set_level` / `sakshi_log_kv` call sites unchanged.
+
+### Notes
+
+- Gates: **879 tests** (+9: `tail-page cache per-handle` — same-file
+  cross-handle interleave + cross-file isolation; verified to fail against a
+  simulated process-global cache), **7 fuzz**, **40 benchmarks** (no regression
+  — `insert_1k` 22.3 µs, `read_scan_4t_par` 139 µs), libro 15/15, vidya 19/19.
+  Binary 282,240 bytes (+512 over v1.12.6 — the wider handle struct + gen logic).
+
 ## [1.12.6] - 2026-06-25
 
 **`patra_insert_row_or_ignore` — `OR IGNORE` (skip-on-conflict) on the BYTES

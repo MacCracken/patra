@@ -14,9 +14,10 @@ Patra has no speculative feature backlog. Work lands when a consumer hits a conc
 
 **Consumer requests** — none open. (sit's BYTES `OR IGNORE` shipped in v1.12.6 as `patra_insert_row_or_ignore` — see [`requests/archive/`](requests/archive/). `patra_bind_blob`, the broader deferred 1.10.3 alternative, stays deferred — unneeded for the skip-on-conflict ask.)
 
-**Consumer-filed bug (2026-06-28, yeo-cy-test):**
-
-- **Concurrent SELECTs race the process-global table-lookup cache.** `_tbl_lp_idx` / `_tbl_lp_page` (`src/table.cyr:4-5`) is still a process-global single-entry cache, written on every query's table resolution, so two reader threads — even on *separate* connection-per-thread handles — race it and one reads the other's cached page → garbled rows. P2 (1.12.0) moved the parse scratch + page slab to TLS but left this cache global, so the connection-per-thread parallel-read invariant isn't actually race-free. Fix: make the cache per-handle or thread-local. See [`issues/2026-06-28-concurrent-read-table-lookup-cache-race.md`](issues/2026-06-28-concurrent-read-table-lookup-cache-race.md). (Distinct from the BYTES/TEXT TOCTOU below — this is reader-vs-reader, no writer.)
+**Consumer-filed bugs** — none open. (The 2026-06-28 yeo-cy-test
+table-lookup-cache race shipped fixed in **v1.12.7** — the tail-page cache is now
+per-handle (`DB_LP_*`) and gen-gated against `HDR_COMMITGEN`; issue archived at
+[`issues/archive/2026-06-28-concurrent-read-table-lookup-cache-race.md`](issues/archive/2026-06-28-concurrent-read-table-lookup-cache-race.md).)
 
 **Deferred (consumer-driven — land when a consumer hits it):**
 

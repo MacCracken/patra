@@ -66,9 +66,16 @@ concurrent reads.
   purely additive). Existing single-handle consumers need no change; they
   simply don't get read parallelism.
 - **Negative** — writer-only globals stay process-global under the
-  single-writer lock (`_tbl_lp_idx` / `_tbl_lp_page` / `_tbl_last_ref` in
-  `src/table.cyr`, WAL state in `src/wal.cyr`). Safe for single-writer; a
-  future multi-writer story would have to make them per-handle.
+  single-writer lock (`_tbl_last_ref` in `src/table.cyr`, WAL state in
+  `src/wal.cyr`). Safe for single-writer; a future multi-writer story would
+  have to make them per-handle.
+  - **Update (v1.12.7):** the tail-page cache `_tbl_lp_idx` / `_tbl_lp_page`
+    was found to break this ADR's isolation even under single-writer — a
+    process-global `(table-index, page)` entry shared across handles let one
+    handle read another's cached page (acute across *different files* at the
+    same table index). It is now **per-handle** (`DB_LP_IDX` / `DB_LP_PAGE` /
+    `DB_LP_GEN` in the db struct) and **gen-gated** on `HDR_COMMITGEN`. See
+    [`../development/issues/archive/2026-06-28-concurrent-read-table-lookup-cache-race.md`](../development/issues/archive/2026-06-28-concurrent-read-table-lookup-cache-race.md).
 - **Negative** — each worker thread retains its own page slab (up to
   `PG_SLAB_MAX` 4KB buffers) and parse buffers, so a large reader pool
   multiplies retained memory.

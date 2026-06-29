@@ -1,5 +1,24 @@
 # Concurrent SELECTs race the process-global table-lookup cache (`_tbl_lp_idx`/`_tbl_lp_page`)
 
+> **RESOLVED in patra 1.12.7 (2026-06-29).** The tail-page cache moved out of the
+> process-global `_tbl_lp_idx` / `_tbl_lp_page` into the db handle (`DB_LP_IDX` /
+> `DB_LP_PAGE` / `DB_LP_GEN`, `src/lib.cyr`) and is **gen-gated** against the
+> on-disk `HDR_COMMITGEN` that `_pc_refresh` re-reads on every locked op:
+> `tbl_insert` trusts a cached page only for the same table index at the current
+> generation, so cross-handle (and the latent cross-process) staleness misses and
+> walks the chain afresh. `_db_hdr_commit` carries the gen forward across a
+> handle's own commit (no perf regression); DELETE/DROP/ALTER reset the entry.
+> Regression test `tail-page cache per-handle` (tests/tcyr/patra.tcyr) covers the
+> same-file interleave + cross-file isolation and was confirmed to fail against a
+> simulated process-global cache. The fix took the "per-handle" direction below.
+>
+> Note: the original "reader-vs-reader" framing was imprecise — the cache is
+> written only on the (serialized) insert path, never read by `SELECT`; the real
+> defect was cross-*handle* inserts reading a stale entry (acute across different
+> files sharing a table index). The probe's persistence under full app-level
+> serialization pointed at the co-reported cyrius-core `str_builder` bug, which is
+> independent of patra.
+
 **Filed:** 2026-06-28 (by the `yeo-cy-test` consumer — toolchain bump to patra
 1.12.6, on cyrius 6.3.x)
 **Severity:** High for the P2 parallel-read story — patra 1.12.0's headline

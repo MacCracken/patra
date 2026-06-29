@@ -81,12 +81,12 @@ at patra's pinned tag, or the link fails on the undefined `sakshi_*` symbols:
 ```toml
 [deps.patra]
 git = "https://github.com/MacCracken/patra.git"
-tag = "1.12.6"
+tag = "1.12.7"
 
 # Required alongside patra — patra calls into it but cyrius won't pull it for you.
 [deps.sakshi]
 git = "https://github.com/MacCracken/sakshi.git"
-tag = "2.4.0"
+tag = "2.4.2"
 modules = ["dist/sakshi.cyr"]
 ```
 

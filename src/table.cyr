@@ -1,8 +1,14 @@
 # table.cyr — table metadata, create, insert, scan, update, delete
 
 var _tbl_last_ref = 0;
-var _tbl_lp_idx = 0 - 1;
-var _tbl_lp_page = 0;
+
+# The table-insert tail-page cache lives in the db handle (DB_LP_IDX /
+# DB_LP_PAGE / DB_LP_GEN, lib.cyr). tbl_insert takes a pointer `lpc` to those
+# three contiguous i64 words: [0]=cached table idx (-1 = empty), [1]=cached
+# tail data-page number, [2]=the commit-gen the cache was stamped at. Per-handle
+# (was process-global pre-v1.12.7) so connection-per-thread readers/writers
+# don't race a shared cache; gen-gated against HDR_COMMITGEN so a commit on
+# another handle/process invalidates it.
 
 # Rows matched by the most recent tbl_update / tbl_delete. lib.cyr lifts this
 # into the db handle's DB_ROWS_AFFECTED after a successful exec (the DB struct
@@ -120,9 +126,9 @@ fn tbl_create(fd, hdr, name, nlen, col_names, col_types, ncols, autoinc): i64 {
     return PATRA_OK;
 }
 
-# Drop table: free data pages, schema page, compact directory
+# Drop table: free data pages, schema page, compact directory.
+# Caller (lib.cyr _exec_drop) invalidates the per-handle tail-page cache.
 fn tbl_drop(fd, hdr, idx): i64 {
-    _tbl_lp_idx = 0 - 1;
     var entry = _tbl_entry(hdr, idx);
     var spg = load64(entry + TBL_SCHEMA);
 
@@ -181,15 +187,25 @@ fn tbl_drop(fd, hdr, idx): i64 {
     return PATRA_OK;
 }
 
-# Insert a row into table
-fn tbl_insert(fd, hdr, idx, row_data, row_sz): i64 {
+# Insert a row into table. `lpc` -> the handle's 3-word tail-page cache
+# (idx, page, gen); see the note at the top of this file.
+fn tbl_insert(fd, hdr, idx, row_data, row_sz, lpc): i64 {
     var entry = _tbl_entry(hdr, idx);
     var buf = pg_alloc();
 
-    # Use cached last page if available for this table
+    # Trust the cached tail page only if it is for THIS table AND stamped at the
+    # current commit generation. _pc_refresh re-read the on-disk header (and its
+    # HDR_COMMITGEN) at the top of this locked op, so a stale gen here means a
+    # commit landed on another handle/process since we cached — walk afresh.
+    var gen = load64(hdr + HDR_COMMITGEN);
+    var hit = 0;
+    if (load64(lpc) == idx) {
+        if (load64(lpc + 16) == gen) { hit = 1; }
+    }
+
     var cur = 0;
-    if (_tbl_lp_idx == idx) {
-        cur = _tbl_lp_page;
+    if (hit == 1) {
+        cur = load64(lpc + 8);
         page_read(fd, cur, buf);
     } else {
         cur = load64(entry + TBL_ROOT);
@@ -208,8 +224,9 @@ fn tbl_insert(fd, hdr, idx, row_data, row_sz): i64 {
         memcpy(buf + used, row_data, row_sz);
         store64(buf + DP_NROWS, nrows + 1);
         page_write(fd, cur, buf);
-        _tbl_lp_idx = idx;
-        _tbl_lp_page = cur;
+        store64(lpc, idx);
+        store64(lpc + 8, cur);
+        store64(lpc + 16, gen);
     } else {
         var npg = page_alloc(fd, hdr);
         store64(buf + DP_NEXT, npg);
@@ -220,8 +237,9 @@ fn tbl_insert(fd, hdr, idx, row_data, row_sz): i64 {
         memcpy(buf + DP_DATA, row_data, row_sz);
         store64(buf + DP_NROWS, 1);
         page_write(fd, npg, buf);
-        _tbl_lp_idx = idx;
-        _tbl_lp_page = npg;
+        store64(lpc, idx);
+        store64(lpc + 8, npg);
+        store64(lpc + 16, gen);
     }
 
     var rc = load64(entry + TBL_NROWS);
@@ -378,7 +396,6 @@ fn tbl_update(fd, hdr, idx, row_sz, schema, ncols, pr): i64 {
 # Delete matching rows with page compaction. Returns PATRA_OK.
 # Delete matching rows with page compaction
 fn tbl_delete(fd, hdr, idx, row_sz, schema, ncols, pr): i64 {
-    _tbl_lp_idx = 0 - 1;
     var entry = _tbl_entry(hdr, idx);
     var cur = load64(entry + TBL_ROOT);
     var buf = pg_alloc();

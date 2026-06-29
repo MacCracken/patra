@@ -4591,10 +4591,12 @@ fn test_read_concurrency() {
 # shared page cache's generation gate (S10) later relies on. Single-threaded +
 # sequential here — it proves cross-handle VISIBILITY, not concurrency.
 #
-# Writer-only globals _tbl_last_ref / _tbl_lp_idx / _tbl_lp_page (table.cyr) are
-# keyed by table index with no handle component: safe under the single-writer
-# model (only one handle ever writes at a time, serialized by _patra_mtx +
-# LOCK_EX); a future multi-writer relaxation would have to make them per-handle.
+# The tail-page cache (DB_LP_IDX / DB_LP_PAGE / DB_LP_GEN) is per-handle as of
+# v1.12.7 and gen-gated against HDR_COMMITGEN, so cross-handle inserts can't read
+# another handle's cached page (see test_tail_cache_per_handle below). The
+# remaining writer-only global, _tbl_last_ref (table.cyr), is read back into the
+# handle immediately after each insert under _patra_mtx + LOCK_EX, so it stays
+# safe under the single-writer model.
 
 var _xhpath = "/tmp/patra_test_xhandle.patra";
 
@@ -4672,6 +4674,83 @@ fn test_commit_gen() {
     assert_eq(_xgen(db), 5, "DELETE bumps to 5");
     patra_close(db);
     syscall(SYS_UNLINK, _gpath);
+}
+
+# -- v1.12.7: per-handle tail-page cache (table-cache race fix) -----
+#
+# The insert tail-page cache (DB_LP_IDX/DB_LP_PAGE/DB_LP_GEN) used to be a
+# process-global single entry (_tbl_lp_idx/_tbl_lp_page in table.cyr), shared
+# across every handle. Under connection-per-thread that let one handle's insert
+# read another handle's cached page — a different file's page number for the same
+# table index — and write to the wrong place. Regression for
+# issues/2026-06-28-concurrent-read-table-lookup-cache-race.md.
+
+var _tc1path = "/tmp/patra_test_tcache1.patra";
+var _tc2path = "/tmp/patra_test_tcache2.patra";
+
+fn test_tail_cache_per_handle() {
+    test_group("tail-page cache per-handle (v1.12.7)");
+    syscall(SYS_UNLINK, _tc1path);
+    syscall(SYS_UNLINK, _tc2path);
+
+    # Part 1: two handles on the SAME file, interleaved inserts. Each handle's
+    # cache must track its own appends; the interleave must not drop or misplace
+    # rows. (Single-threaded + serialized — proves cache isolation, not racing.)
+    var a = patra_open(_tc1path);
+    var b = patra_open(_tc1path);
+    assert(a != 0, "open a");
+    assert(b != 0, "open b");
+    patra_exec(a, "CREATE TABLE t (id INT, v INT)");
+    patra_exec(a, "INSERT INTO t VALUES (1, 10)");
+    patra_exec(b, "INSERT INTO t VALUES (2, 20)");
+    patra_exec(a, "INSERT INTO t VALUES (3, 30)");
+    patra_exec(b, "INSERT INTO t VALUES (4, 40)");
+    var rc = patra_query(a, "SELECT COUNT(*) FROM t");
+    assert_eq(patra_result_get_int(rc, 0, 0), 4, "all 4 interleaved rows present");
+    patra_result_free(rc);
+    var rv = patra_query(b, "SELECT v FROM t WHERE id = 3");
+    assert_eq(patra_result_get_int(rv, 0, 0), 30, "id=3 reads correct value");
+    patra_result_free(rv);
+    patra_close(a);
+    patra_close(b);
+
+    # Part 2: two handles on DIFFERENT files, table `t` at the same index (0).
+    # f1's handle gets a HOT cache pointing at a high tail-page number (many
+    # rows). f2's table is tiny, so that page number does not exist in f2. With
+    # the old process-global cache, f2's insert would hit f1's (idx 0, high page)
+    # entry and write to a page outside f2's chain — the row would vanish from a
+    # scan. Per-handle + gen-gating, f2 walks its own short chain instead.
+    var f1 = patra_open(_tc1path);   # reuse: already has table t with 4 rows
+    var f2 = patra_open(_tc2path);
+    assert(f1 != 0, "open f1");
+    assert(f2 != 0, "open f2");
+    patra_exec(f2, "CREATE TABLE t (id INT, v INT)");
+
+    # Heat f1's cache: enough inserts to span several data pages (tail page far
+    # beyond anything f2 has allocated).
+    for (var i = 0; i < 1500; i = i + 1) {
+        patra_exec(f1, "INSERT INTO t VALUES (100, 7)");
+    }
+    # Now insert into f2 through ITS handle. Must land in f2's table t.
+    patra_exec(f2, "INSERT INTO t VALUES (5, 50)");
+    patra_exec(f2, "INSERT INTO t VALUES (6, 60)");
+
+    var r2 = patra_query(f2, "SELECT COUNT(*) FROM t");
+    assert_eq(patra_result_get_int(r2, 0, 0), 2, "f2 rows landed in f2's table");
+    patra_result_free(r2);
+    var r2v = patra_query(f2, "SELECT v FROM t WHERE id = 6");
+    assert_eq(patra_result_get_int(r2v, 0, 0), 60, "f2 id=6 value correct");
+    patra_result_free(r2v);
+
+    # f1 stays intact (4 original + 1500).
+    var r1 = patra_query(f1, "SELECT COUNT(*) FROM t");
+    assert_eq(patra_result_get_int(r1, 0, 0), 1504, "f1 table unaffected");
+    patra_result_free(r1);
+
+    patra_close(f1);
+    patra_close(f2);
+    syscall(SYS_UNLINK, _tc1path);
+    syscall(SYS_UNLINK, _tc2path);
 }
 
 # -- v1.12.0: page cache module (P2 pcache, unwired) ---------
@@ -5051,6 +5130,7 @@ fn main() {
     test_read_concurrency();
     test_cross_handle_visibility();
     test_commit_gen();
+    test_tail_cache_per_handle();
     test_pcache();
     test_cache_coherence();
 
