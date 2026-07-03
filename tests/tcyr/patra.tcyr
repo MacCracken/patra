@@ -4239,6 +4239,42 @@ fn test_text_delete_frees() {
     patra_close(db);
 }
 
+# Regression for the v1.12.8 flock-window fix: a result set's TEXT/BLOB payload
+# must be a SNAPSHOT taken under the query's shared flock, not a lazy on-disk read
+# after the flock was dropped. Deterministically reproduces the readback race in a
+# single thread: query, then free + reuse the row's payload pages, then read the
+# still-open result. Pre-fix the read returned the reused-page bytes; post-fix it
+# returns the original snapshot.
+fn test_text_readback_snapshot() {
+    test_group("text readback snapshot (flock-window fix)");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE bigt (id INT AUTOINCREMENT, body TEXT)");
+    # Row 1: 9000 bytes of 'A' -> a multi-page chain.
+    _text_big_insert(db, 65, 9000);
+    # Capture the result set. Pre-fix this held only an on-disk byte-ref; post-fix
+    # _rs_materialize snapshots the payload into an owned buffer under the flock.
+    var rs = patra_query(db, "SELECT * FROM bigt WHERE id = 1");
+    assert_eq(patra_result_count(rs), 1, "1 row captured");
+    assert_eq(patra_result_get_text_len(rs, 0, 1), 9000, "snapshot len 9000");
+    # Churn the pages the row occupied: DELETE frees the 'A' chain to the freelist,
+    # then reinserting the same size REUSES those exact pages, overwriting them
+    # with 'B'. Pre-fix, the still-open rs reads these reused pages and returns 'B'
+    # (or PATRA_ERR_PAGE); post-fix it returns the original 'A' snapshot.
+    assert_eq(patra_exec(db, "DELETE FROM bigt WHERE id = 1"), PATRA_OK, "delete row 1");
+    assert_eq(load64(_db_hdr(db) + HDR_FREEHEAD) != 0, 1, "chain freed to freelist");
+    _text_big_insert(db, 66, 9000);   # 'B' — reuses the just-freed pages
+    _text_big_insert(db, 66, 9000);   # a second, to consume the freelist head
+    # Read the OLD result set: must be the original 'A' snapshot, never reused 'B'.
+    var out = fl_alloc(9000);
+    memset(out, 0, 9000);
+    assert_eq(patra_result_read_text(db, rs, 0, 1, out), PATRA_OK, "read snapshot ok");
+    assert_eq(_all_byte(out, 65, 9000), 1, "snapshot is original 'A', not reused-page 'B'");
+    fl_free(out);
+    patra_result_free(rs);
+    patra_close(db);
+}
+
 fn test_text_where_and_index_rejected() {
     test_group("text where + index rejected");
     cleanup();
@@ -5112,6 +5148,7 @@ fn main() {
     test_text_empty();
     test_text_update();
     test_text_delete_frees();
+    test_text_readback_snapshot();
     test_text_where_and_index_rejected();
     test_text_alter_add();
 

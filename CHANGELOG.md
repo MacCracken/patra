@@ -5,6 +5,55 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.8] - 2026-07-03
+
+**TEXT/BLOB result readback no longer escapes the query's flock window — result
+sets are now true snapshots.** Filed by the `yeo-cy-test` consumer
+([issue](docs/development/issues/archive/2026-07-03-text-blob-readback-escapes-query-flock-window.md)).
+
+### Fixed
+
+- **Concurrent read/write on a TEXT/BLOB column could return a torn or stale
+  value.** `patra_query` took a shared flock, copied each variable-length cell's
+  on-disk **byte-reference** (page + len) into the result set, then **released the
+  flock before returning**. The payload itself was read **lazily and unlocked** by
+  `patra_result_read_text` / `patra_result_read_bytes` → `_bytes_read_chain`. In
+  the v1.12.0 connection-per-thread model, a writer on another handle could take
+  the exclusive flock and `UPDATE`/`DELETE` the row between the query returning and
+  the readback — freeing or overwriting exactly those payload pages — so the reader
+  got another row's bytes (or a freed-page chain), returned as `PATRA_OK` with no
+  error. This defeated the "separate handles → lock-free parallel reads" promise
+  ([ADR 0002](docs/adr/0002-connection-per-thread-concurrency.md)) for any table
+  with a `TEXT`/`BYTES` column; fixed-width (`INT`) columns were always safe (read
+  straight out of the in-memory result row).
+- **Fix: materialize variable-length payloads into the result set under the
+  query's flock.** New `_rs_materialize` (`src/lib.cyr`) snapshots every `TEXT`/
+  `BYTES` cell of the final result into an owned heap buffer *while the shared
+  flock is still held* (the flock now stays held through `ORDER BY` / `LIMIT` /
+  projection — all in-memory — and is released at each return). A chain field's
+  `BR_PAGE` slot then holds a heap pointer, so `patra_result_read_text` /
+  `patra_result_read_bytes` become pure memory copies (safe against any later
+  writer; the `db` arg is now unused but kept for API compatibility), and
+  `patra_result_free` frees the per-cell buffers. No API or signature change; no
+  new lock lifetime exposed to callers (the flock is fully released before
+  `patra_query` returns, so there is no read-lock-held-across-iteration liveness
+  cost and no risk of a leaked lock on an unfreed result set).
+- **Trade-off:** payloads are now read eagerly at query time rather than on first
+  access, so a `SELECT` that returns `TEXT`/`BYTES` cells the caller never reads
+  pays their disk read + a transient heap copy up front. This is the standard
+  snapshot cost and matches the caller-owned result-set model; fixed-width result
+  sets are unchanged.
+
+### Testing
+
+- New regression `test_text_readback_snapshot` (`tests/tcyr/patra.tcyr`)
+  deterministically reproduces the race single-threaded: query a multi-page TEXT
+  row, `DELETE` it (freeing the chain to the freelist), reinsert the same size to
+  **reuse** those pages with different bytes, then read the still-open result set —
+  asserting it returns the original snapshot, not the reused-page bytes. Verified
+  to **fail against the pre-fix code** and pass after. Full suite **885 / 885**
+  (+6 assertions), 0 failures.
+
 ## [1.12.7] - 2026-06-29
 
 **Per-handle tail-page cache — fixes the P2 connection-per-thread table-cache
