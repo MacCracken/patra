@@ -5,6 +5,41 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.9] - 2026-07-06
+
+**`.patra` file opens now work on agnos (and any non-Linux target) — routed
+through the stdlib `file_open` ABI bridge instead of raw `sys_open`.** Surfaced
+by the `owl` consumer: its sit-backed VCS change-marker gutter failed on the
+agnos kernel with `patra: cannot open or create file`, reading every line as
+"added" because the object store never opened.
+
+### Fixed
+
+- **Every `.patra` open/create failed off Linux.** patra opened the object
+  store, WAL, and JSONL files with raw `sys_open(path, flags, mode)` — Linux
+  argument order and Linux `O_*` flag *values*. agnos's `sys_open` is
+  length-carrying: `(name, namelen, flags)`, with its own `AO_*` flag bits. So
+  the Linux `flags` argument (e.g. `2 + O_NOFOLLOW` = `131074`) landed in the
+  `namelen` slot, the kernel's path-length check rejected the bogus length, and
+  the open returned `-1`. A silent ABI miscompile — no `ud2`, green build,
+  broke at runtime on the target. (The stdlib flags this exact shape at
+  `io.cyr`; patra simply wasn't using the bridge.)
+- **Fix: route all five path-taking opens through `file_open` (stdlib `io`).**
+  `file_open` computes `namelen` and translates Linux `O_CREAT` / `O_TRUNC` /
+  `O_APPEND` / write bits → agnos `AO_*` per target; on Linux it is a verbatim
+  passthrough. Sites converted: `_pt_file_create` + `_pt_file_open`
+  (`src/file.cyr`), `wal_start` + `wal_recover` (`src/wal.cyr`), `jsonl_open`
+  (`src/jsonl.cyr`).
+
+### Notes
+
+- **Linux behavior is unchanged** — `file_open` compiles to the identical
+  `sys_open(path, flags, mode)` there; full suite green (885/885).
+- **Hardening on agnos:** `O_EXCL` / `O_NOFOLLOW` are Linux-only bits that
+  `file_open` does not carry to agnos, so on agnos the create is not
+  `O_EXCL`-guarded at the syscall — it stays correct because `_pt_file_create`
+  only runs after `_pt_file_open` has already failed (target absent).
+
 ## [1.12.8] - 2026-07-03
 
 **TEXT/BLOB result readback no longer escapes the query's flock window — result

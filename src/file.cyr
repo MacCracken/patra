@@ -210,8 +210,13 @@ enum OpenFlag { O_NOFOLLOW = 131072; }
 # Create new .patra file (O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW,
 # mode 0644 = 420). O_EXCL already refuses an existing target; O_NOFOLLOW
 # additionally refuses a symlink pointed at the target path.
+# Routed through file_open (io) not raw sys_open: agnos's sys_open is
+# length-carrying (name, namelen, flags) and uses its own AO_* flag bits,
+# so file_open bridges the ABI (Linux: verbatim passthrough). O_EXCL /
+# O_NOFOLLOW hardening is preserved on Linux; on agnos those bits are
+# dropped (create is already guarded by the prior open-fail path).
 fn _pt_file_create(path): i64 {
-    var fd = sys_open(path, 194 + O_NOFOLLOW, 420);
+    var fd = file_open(path, 194 + O_NOFOLLOW, 420);
     if (fd < 0) { return 0 - 1; }
     var buf = pg_alloc();
     patra_hdr_init(buf);
@@ -222,9 +227,10 @@ fn _pt_file_create(path): i64 {
     return fd;
 }
 
-# Open existing .patra file (O_RDWR | O_NOFOLLOW). Refuses symlinked targets.
+# Open existing .patra file (O_RDWR | O_NOFOLLOW). Refuses symlinked targets
+# on Linux. file_open bridges the agnos ABI (namelen + AO_* flags).
 fn _pt_file_open(path): i64 {
-    return sys_open(path, 2 + O_NOFOLLOW, 0);
+    return file_open(path, 2 + O_NOFOLLOW, 0);
 }
 
 # ── Allocator serialization (v1.12.0 P2) ───────────

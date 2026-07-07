@@ -6,9 +6,10 @@
 # ── Open / Close ────────────────────
 
 # O_RDWR | O_CREAT | O_APPEND | O_NOFOLLOW = 2 + 64 + 1024 + 131072 = 132162
-# O_NOFOLLOW added in 1.5.2 (audit §2.8).
+# O_NOFOLLOW added in 1.5.2 (audit §2.8). file_open (io) bridges the agnos
+# ABI (namelen + AO_* flags); Linux passthrough keeps O_APPEND/O_NOFOLLOW.
 fn jsonl_open(path): i64 {
-    return sys_open(path, 132162, 420);
+    return file_open(path, 132162, 420);
 }
 
 # Close JSONL file

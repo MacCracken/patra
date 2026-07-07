@@ -92,8 +92,9 @@ fn _wal_hash(pg, page_data, salt1, salt2): i64 {
 
 # Begin WAL logging for a transaction
 fn wal_start(db_fd, wal_path): i64 {
-    _wal_fd = sys_open(wal_path, 578, 420);
+    _wal_fd = file_open(wal_path, 578, 420);
     # O_RDWR | O_CREAT | O_TRUNC = 2 + 64 + 512 = 578
+    # file_open (io): portable — bridges agnos's namelen + AO_* flag ABI.
     if (_wal_fd < 0) { _wal_fd = 0 - 1; return PATRA_ERR_IO; }
     _wal_db_fd = db_fd;
     if (_wal_pages == 0) { _wal_pages = alloc(WAL_MAX_PAGES * 8); }
@@ -219,7 +220,7 @@ fn wal_rollback(wal_path): i64 {
 # Recover from crash: if WAL file exists, replay it. Returns 1 on replay
 # attempt (even if bad magic — the file is then left for inspection).
 fn wal_recover(db_fd, wal_path): i64 {
-    var wfd = sys_open(wal_path, 0, 0);
+    var wfd = file_open(wal_path, 0, 0);
     if (wfd < 0) { return 0; }
     if (_wal_hdr_verify(wfd) != PATRA_OK) {
         # Bad magic / stale format: refuse to replay. Leave the file on disk
