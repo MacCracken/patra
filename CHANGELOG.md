@@ -5,6 +5,50 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.10] - 2026-07-13
+
+**A single quote in a consumer-built `INSERT`/`WHERE` value no longer corrupts or
+drops the row — the SQL tokenizer now implements standard `''` escaping, plus a new
+`patra_quote_str` helper for string-building consumers.** Filed P1 by argonaut
+(PID 1) via **libro**'s `patrastore_append`: a `'` in an audit field made the
+generated `INSERT` malformed → `PATRA_ERR_SYNTAX` → the record was silently lost, so
+the on-disk audit chain diverged from the in-memory one with no error surfaced to the
+caller. Third consumer to hit this wall; latent for any statement built from string
+values.
+
+### Fixed
+- **SQL string literals now unescape a doubled `''` to one `'` (standard SQL).** The
+  tokenizer (`src/sql.cyr`) previously ended a `'...'` literal at the first inner
+  quote with no lookahead, so `'it''s'` lexed to `STR_LIT "it"` + a stray `IDENT` →
+  `PATRA_ERR_SYNTAX`. It now treats `''` as an escaped quote, spans the whole
+  literal, and collapses `''`→`'` **in place** — the write cursor only trails after
+  the first escape, so a literal with no `''` is never rewritten and stays a
+  zero-copy slice. `INSERT`, `UPDATE … SET`, and `WHERE` string literals all benefit.
+- **`patra_exec` / `patra_query` copy the SQL before tokenizing when it contains a
+  `''`**, so the in-place unescape never mutates the caller's buffer (prepared
+  statements already tokenize an owned copy). The common no-`''` path is unchanged
+  and still zero-copy, gated by a single linear `_sql_has_dq` scan.
+
+### Added
+- **`patra_quote_str(dst, src, srclen) -> nbytes`** — escapes a raw value for safe
+  inclusion in a single-quoted SQL literal (doubles each `'`); with the tokenizer's
+  `''` unescaping, a value written as `'<quoted>'` round-trips byte-for-byte. Prefer
+  `patra_bind_text` (prepared statements) where possible — it needs no escaping and
+  no scratch buffer; `patra_quote_str` is for consumers that must build SQL as
+  strings (e.g. libro's audit chain). `patra_bind_blob` remains deferred;
+  `patra_bind_text` already covers all-TEXT rows.
+
+### Notes
+- Binds are unaffected — a `patra_bind_text` value never passes through the SQL
+  string, so a bound `a'b` still stores verbatim (guarded by the existing
+  `test_bind_text_quotes`).
+- Gates: **893 tests** (was 885; new `test_exec_quote_escaping` adds a `''`
+  round-trip through STR + TEXT columns, a `''` `WHERE` match, and a
+  `patra_quote_str` check), 7 fuzz harnesses (incl. the SQL parser fuzzer),
+  libro 15/15, vidya 19/19 — all green. `dist/patra.cyr` regenerated.
+- Resolves `docs/development/requests/2026-07-13-argonaut-audit-insert-value-escaping.md`
+  (moved to `requests/archive/`). Cyrius toolchain pin unchanged (source-only fix).
+
 ## [1.12.9] - 2026-07-06
 
 **`.patra` file opens now work on agnos (and any non-Linux target) — routed

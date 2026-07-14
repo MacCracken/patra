@@ -347,15 +347,35 @@ fn sql_tokenize(input): i64 {
             continue;
         }
 
-        # String literal: 'content'
+        # String literal: 'content'. A doubled '' inside the literal is a standard
+        # SQL escaped single-quote: it does NOT terminate the string, and is
+        # collapsed to one ' IN PLACE. The write cursor wpos trails pos only after
+        # the first escape, so a literal with no '' is never written (stays a
+        # zero-copy slice). The in-place rewrite mutates `input`, so the non-owned
+        # callers (patra_exec / patra_query) copy the SQL first when a '' is present
+        # — this only ever rewrites patra-owned memory (prepare's sbuf, or the copy).
         if (c == 39) {
             pos = pos + 1;
             var start = pos;
+            var wpos = pos;
             while (pos < slen) {
-                if (load8(input + pos) == 39) { break; }
+                var sc = load8(input + pos);
+                if (sc == 39) {
+                    if (pos + 1 < slen) {
+                        if (load8(input + pos + 1) == 39) {
+                            store8(input + wpos, 39);
+                            wpos = wpos + 1;
+                            pos = pos + 2;
+                            continue;
+                        }
+                    }
+                    break;
+                }
+                if (wpos != pos) { store8(input + wpos, sc); }
+                wpos = wpos + 1;
                 pos = pos + 1;
             }
-            _tok_set(n, SQLT_STR_LIT, input + start, pos - start);
+            _tok_set(n, SQLT_STR_LIT, input + start, wpos - start);
             if (pos < slen) { pos = pos + 1; }
             n = n + 1;
             continue;

@@ -4366,6 +4366,50 @@ fn test_bind_text_quotes() {
     patra_close(db);
 }
 
+# A value containing a single quote, written through a consumer-built SQL string
+# (patra_exec / patra_query), no longer drops the record: a doubled '' is standard
+# SQL for one literal quote and the tokenizer now unescapes it in place. Before
+# this fix, INSERT ... VALUES ('it''s') returned PATRA_ERR_SYNTAX and the row was
+# silently lost (the P1 corruption libro's audit chain hit). Binds are unaffected
+# (they never pass through the SQL string) — covered by test_bind_text_quotes.
+fn test_exec_quote_escaping() {
+    test_group("exec '' escaping (quote-in-value INSERT via patra_exec)");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (id INT, name STR, body TEXT)");
+
+    # One-shot patra_exec with escaped '' — previously PATRA_ERR_SYNTAX + dropped.
+    assert_eq(patra_exec(db, "INSERT INTO t VALUES (1, 'it''s', 'a ''b'' c')"),
+              PATRA_OK, "insert with '' ok");
+
+    var rs = patra_query(db, "SELECT id, name, body FROM t WHERE id = 1");
+    assert_eq(patra_result_count(rs), 1, "row landed");
+    assert_streq(patra_result_get_str(rs, 0, 1), "it's", "STR '' unescaped");
+    # TEXT column read by length: a 'b' c  (7 bytes)
+    var blen = patra_result_get_text_len(rs, 0, 2);
+    assert_eq(blen, 7, "TEXT '' unescaped len");
+    var tb = fl_alloc(blen + 1);
+    patra_result_read_text(db, rs, 0, 2, tb);
+    store8(tb + blen, 0);
+    assert_streq(tb, "a 'b' c", "TEXT '' unescaped bytes");
+    fl_free(tb);
+    patra_result_free(rs);
+
+    # A '' literal in a WHERE clause unescapes and matches the stored STR value.
+    var rs2 = patra_query(db, "SELECT id FROM t WHERE name = 'it''s'");
+    assert_eq(patra_result_count(rs2), 1, "WHERE '' matches STR");
+    patra_result_free(rs2);
+
+    # patra_quote_str doubles single-quotes: O'Brien (7) -> O''Brien (8).
+    var q = fl_alloc(64);
+    assert_eq(patra_quote_str(q, "O'Brien", 7), 8, "quote_str len");
+    store8(q + 8, 0);
+    assert_streq(q, "O''Brien", "quote_str doubles quote");
+    fl_free(q);
+
+    patra_close(db);
+}
+
 fn test_bind_where() {
     test_group("bind where");
     cleanup();
@@ -5156,6 +5200,7 @@ fn main() {
     test_parse_bind();
     test_bind_insert();
     test_bind_text_quotes();
+    test_exec_quote_escaping();
     test_bind_where();
     test_bind_update();
     test_bind_rebind();

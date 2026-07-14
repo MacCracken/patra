@@ -1,10 +1,10 @@
 # Patra Development Roadmap
 
-> **Last refreshed**: 2026-06-25 (v1.12.6 cut — `patra_insert_row_or_ignore`: sit BYTES `OR IGNORE`; request archived)
+> **Last refreshed**: 2026-07-13 (v1.12.10 cut — SQL `''` escaping + `patra_quote_str`; argonaut/libro P1 request archived)
 >
 > Thin **backlog index**, forward-looking only. Open consumer requests live one-file-each in [`requests/`](requests/) (this file points at them); upstream cyrius bugs live in [`issues/`](issues/). Shipped work lives in [`../../CHANGELOG.md`](../../CHANGELOG.md) + [`completed-phases.md`](completed-phases.md); live state (version, sizes, counts, consumers) in [`state.md`](state.md).
 
-> **Current**: v1.12.6 — **`patra_insert_row_or_ignore` (sit BYTES `OR IGNORE`).** Skip-on-conflict on the only BYTES write path: the indexed key is probed *before* the content chain is allocated, so a duplicate costs one index probe and no chain work (`dedup_insert_row_or_ignore_500` **10.4 µs** vs the SELECT-then-insert workaround **272.6 µs**, ~26×); `patra_rows_affected` reads `0` (ignored) / `1` (inserted). Drops sit's pre-flight `db_object_has` SELECT on the object-ingest hot path and unblocks **P-11**. **No open consumer requests.** (Prior: v1.12.5 — cyrius `6.2.44` pin + agnos port finished; agnos + `cyrius distlib` issues archived.) Patra serves libro, vidya, daimon, agnoshi, mela, hoosh, and sit.
+> **Current**: v1.12.10 — **SQL `''` escaping + `patra_quote_str` (argonaut/libro P1).** A single quote in a consumer-built `INSERT`/`WHERE` value no longer corrupts or drops the row: the tokenizer unescapes a doubled `''` to one `'` **in place** (no-`''` literals stay zero-copy), and `patra_exec`/`patra_query` copy the SQL when a `''` is present so the caller's buffer is never mutated. New `patra_quote_str(dst, src, srclen)` doubles quotes for string-building consumers; bind parameters (`patra_bind_text` + prepared statements) were already quote-proof and remain **preferred** (libro is migrating `patrastore_append` to it). **No open consumer requests.** (Prior: v1.12.9 — agnos `file_open` bridge (owl); v1.12.8 — TEXT/BLOB readback snapshot (yeo-cy-test); v1.12.7 — per-handle tail-page cache.) Patra serves libro, vidya, daimon, agnoshi, mela, hoosh, sit, and argonaut.
 
 ## Driven by consumer needs
 
@@ -12,7 +12,14 @@ Patra has no speculative feature backlog. Work lands when a consumer hits a conc
 
 ## Open backlog
 
-**Consumer requests** — none open. (sit's BYTES `OR IGNORE` shipped in v1.12.6 as `patra_insert_row_or_ignore` — see [`requests/archive/`](requests/archive/). `patra_bind_blob`, the broader deferred 1.10.3 alternative, stays deferred — unneeded for the skip-on-conflict ask.)
+**Consumer requests:** none open.
+
+(The argonaut/libro **P1** — safe value path for consumer-built `INSERT` — shipped
+in **v1.12.10**: standard `''` escaping in the tokenizer + `patra_quote_str`; issue
+archived at [`requests/archive/2026-07-13-argonaut-audit-insert-value-escaping.md`](requests/archive/2026-07-13-argonaut-audit-insert-value-escaping.md).
+sit's BYTES `OR IGNORE` shipped in v1.12.6 as `patra_insert_row_or_ignore`.
+`patra_bind_blob` stays deferred — `patra_bind_text` covers all-TEXT rows and is the
+preferred quote-proof path.)
 
 **Consumer-filed bugs** — none open. (The 2026-06-28 yeo-cy-test
 table-lookup-cache race shipped fixed in **v1.12.7** — the tail-page cache is now
