@@ -5,6 +5,22 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.12] - 2026-07-17
+
+**Migrate the five thread-local slots off hardcoded indices.** `src/sql.cyr`
+(`TLS_TOKS`/`TLS_PR`/`TLS_NTOKS`, was 0/1/2) and `src/file.cyr`
+(`TLS_SLAB_STACK`/`TLS_SLAB_TOP`, was 3/4) no longer hardcode integer slots in
+cyrius's shared thread-local namespace — they are now claimed from cyrius's slot
+allocator (`thread_local_alloc`, cyrius ≥ 6.4.65) exactly once at runtime via a
+CAS-gated `_patra_tls_ensure()`, called at the head of `_sql_ensure` and
+`_pg_slab_init`. This closes the shared-namespace collision class that produced
+the v6.3.25 sigil↔patra `RECORD_LAYER_FAILURE` (cyrius issue
+`2026-07-01-thread-local-slot-namespace-no-allocator`): allocator-managed slots
+are always ≥ 16, so patra's slots can never alias sigil's or any app's frozen
+0-15 slot. Behaviour is otherwise identical (same per-thread lazy buffer init).
+Full suite (893 tests incl. P1/P2 concurrency) green. Toolchain pin `6.4.64` →
+`6.4.65`.
+
 ## [1.12.11] - 2026-07-16
 
 **Toolchain-pin patch — cyrius `6.3.5` → `6.4.64`.** Source-change-free (the

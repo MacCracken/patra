@@ -182,7 +182,12 @@ enum WhLim { WH_MAX = 32; }
 # Accessors: _stoks()/_spr()/_sntoks() read; _set_sntoks() writes ntoks.
 # _sql_ensure() lazily allocates this thread's buffers on first use.
 
-enum SqlTls { TLS_TOKS = 0; TLS_PR = 1; TLS_NTOKS = 2; }
+# v6.4.65: was `enum SqlTls { TLS_TOKS=0; TLS_PR=1; TLS_NTOKS=2; }`. These three
+# SQL-parse thread-local slots are now allocator-managed (claimed once by
+# _patra_tls_ensure in src/file.cyr), not hardcoded literals. -1 = not yet.
+var TLS_TOKS = 0 - 1;
+var TLS_PR = 0 - 1;
+var TLS_NTOKS = 0 - 1;
 
 fn _stoks(): i64 { return thread_local_get(TLS_TOKS); }
 fn _spr(): i64 { return thread_local_get(TLS_PR); }
@@ -194,6 +199,7 @@ fn _set_sntoks(n): i64 { thread_local_set(TLS_NTOKS, n); return 0; }
 # under _patra_lock today, so the fl_alloc is serialized (S3 adds an allocator
 # mutex before the read lock is dropped).
 fn _sql_ensure(): i64 {
+    _patra_tls_ensure();     # v6.4.65: claim the slot indices before any get/set
     if (thread_local_get(TLS_PR) == 0) {
         thread_local_set(TLS_TOKS, _pt_alloc(MAX_TOKENS * TOK_SZ));
         thread_local_set(TLS_PR, _pt_alloc(4096));
