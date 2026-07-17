@@ -19,4 +19,4 @@ Competing approaches with real trade-offs, adopting or rejecting a dependency, c
 
 | # | Title | Status | Hook |
 |---|---|---|---|
-| [0001](0001-cyrius-5-5-dce-toolchain-limitation.md) | Cyrius 5.5.x DCE is a toolchain no-op | Accepted — re-verified under 6.2.19 | DCE never shrinks the binary: 5.5.x didn't wire the pass at all; 6.2.x NOP-fills unreachable fns in place (DCE-on/off builds byte-identical). Keep `CYRIUS_DCE=1` for forward-compat. Re-verified 2026-06-17; re-check only if a future cyrius actually strips. |
+| [0001](0001-cyrius-5-5-dce-toolchain-limitation.md) | Cyrius 5.5.x DCE is a toolchain no-op | Accepted — re-verified under 6.4.64 | DCE never shrinks the binary: 5.5.x didn't wire the pass at all; 6.2.x claimed NOP-fill but was byte-identical; 6.4.x genuinely NOP-fills (`0x90`) in place — DCE-on/off builds size-identical, still no strip. Keep `CYRIUS_DCE=1` for forward-compat. Re-verified 2026-06-17 + 2026-07-16; re-check at each pin bump. |

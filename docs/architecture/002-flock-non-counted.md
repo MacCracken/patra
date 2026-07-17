@@ -41,11 +41,18 @@ needs to be coherent *across the lock boundary* — never concurrent with a
 live same-file writer. The only contention that remains on the cache mutex
 is reader-vs-reader.
 
-## The result-read gap
+## The result-read gap — CLOSED in v1.12.8
 
-Post-query `patra_result_read_bytes` / `patra_result_read_text`
-(`src/lib.cyr:1986`, `:2014`) walk the BYTES/TEXT chain with **no lock
-held** — they run *after* the query's `LOCK_SH` was released by
-`_patra_query_exec`. So the property-(3) exclusion does **not** cover the
-lazy materialization of BYTES/TEXT result values. See note 003 and the
-documented BYTES/TEXT result caveat for the TOCTOU this opens.
+*(Historical — as written at v1.12.0:)* Post-query `patra_result_read_bytes` /
+`patra_result_read_text` walked the BYTES/TEXT chain with **no lock
+held** — they ran *after* the query's `LOCK_SH` was released by
+`_patra_query_exec`. So the property-(3) exclusion did **not** cover the
+lazy materialization of BYTES/TEXT result values.
+
+**Update 2026-07-03 (v1.12.8, annotated 2026-07-16):** the gap is closed.
+`_rs_materialize` (`src/lib.cyr`) snapshots every BYTES/TEXT cell of the final
+result set into an owned heap buffer **while the shared flock is still held**;
+the flock is now held through ORDER BY / LIMIT / projection and released only
+at return. `read_bytes` / `read_text` are pure memcpys from the snapshot — no
+chain walk escapes the lock window anymore. See note 003's matching update and
+CHANGELOG [1.12.8].

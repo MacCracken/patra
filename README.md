@@ -81,7 +81,7 @@ at patra's pinned tag, or the link fails on the undefined `sakshi_*` symbols:
 ```toml
 [deps.patra]
 git = "https://github.com/MacCracken/patra.git"
-tag = "1.12.7"
+tag = "1.12.11"
 
 # Required alongside patra — patra calls into it but cyrius won't pull it for you.
 [deps.sakshi]
@@ -128,12 +128,12 @@ RAM-resident data and its global lock re-serializes the concurrent readers, so i
 is a **net loss on warm workloads** — enable it only for cold / slow-disk
 read-heavy workloads where avoiding real I/O outweighs the lock cost.
 
-**BYTES/TEXT result reads under concurrent writers**: a result set stores
-`BYTES` / `TEXT` columns as a `(page, len)` reference materialized lazily by
-`patra_result_read_bytes` / `patra_result_read_text` *after* the query returns.
-A concurrent writer that deletes (frees + reuses) those rows in the gap can make
-the lazy read return stale/foreign bytes. Read a result set's `BYTES`/`TEXT`
-values before yielding to a writer that may delete those rows, or serialize.
+**BYTES/TEXT result reads under concurrent writers**: safe — result sets are
+true snapshots as of v1.12.8. Every `BYTES` / `TEXT` cell is materialized into
+an owned buffer *while the query still holds its shared flock*;
+`patra_result_read_bytes` / `patra_result_read_text` are pure copies from that
+snapshot, unaffected by any writer that later updates or deletes the rows.
+(Buffers are freed by `patra_result_free`.)
 
 ## Consumers
 
@@ -146,6 +146,7 @@ values before yielding to a writer that may delete those rows, or serialize.
 | **mela** | Marketplace listings |
 | **hoosh** | Model registry, token budgets |
 | **sit** | git-format object store (`hash STR` + `content BYTES`) |
+| **argonaut** | audit-record persistence via libro's `patrastore_append` |
 
 ## SQL Supported
 

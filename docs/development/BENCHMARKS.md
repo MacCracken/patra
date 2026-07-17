@@ -11,16 +11,18 @@ Benches under `/tmp` (tmpfs, fdatasync is a no-op) are noted explicitly.
 The group-commit comparison uses a real-disk path (`./bench_groupcommit.patra`,
 btrfs/NVMe under the repo) to avoid hiding the win.
 
-> **Currency note (updated 2026-06-25, v1.12.6).** The bulk of this table is the
-> v1.9.5 / cyrius 6.0.1 baseline. Patra is now at **v1.12.6** (cyrius pin
-> **6.2.44**) and the suite has grown to **40 benchmarks**. Since the v1.9.5
+> **Currency note (updated 2026-07-16, v1.12.11).** The bulk of this table is the
+> v1.9.5 / cyrius 6.0.1 baseline. Patra is now at **v1.12.11** (cyrius pin
+> **6.4.64**) and the suite stands at **40 benchmarks**. Since the v1.9.5
 > sweep: the 1.10.x / 1.11.x arcs added SQL/data-model surface (column-list
 > INSERT, AUTOINCREMENT, TEXT, bind params, write-readback); v1.12.0 added the
 > concurrent-reader benches (`read_scan_4t_par` ~140 µs); and **v1.12.6 added the
 > BYTES-path dedup benches** below (`dedup_insert_row_or_ignore_500` ~10 µs vs the
 > `dedup_select_then_insert_row_500` workaround ~273 µs, **~26×**). No hot-path
-> rewrite since v1.8.2 — spot re-runs at each release stay within noise (v1.12.6:
-> `insert_1k` ~22 µs). A full re-baseline of the legacy rows is still deferred:
+> rewrite since v1.8.2 — spot re-runs at each release stay within noise (v1.12.11
+> full 40-bench run under 6.4.64: `insert_1k` 21.6 µs, `read_scan_4t_par`
+> 135.1 µs, `dedup_insert_row_or_ignore_500` 9.7 µs — all at or under the prior
+> cut). A full re-baseline of the legacy rows is still deferred:
 > read the un-dated rows as the standing v1.9.5 reference and the dated additions
 > as current.
 

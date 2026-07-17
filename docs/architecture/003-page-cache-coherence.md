@@ -3,7 +3,8 @@
 > v1.12.0 "P2 concurrent readers". *What can't I derive from the code alone?*
 > The shared page cache (`src/pcache.cyr`) is correct only because of five
 > invariants wired in `page.cyr` / `lib.cyr`, not in the cache module itself —
-> plus one pre-existing TOCTOU it does not fix.
+> plus one pre-existing TOCTOU it did not fix (closed independently in
+> v1.12.8 — see the dated update below).
 
 The process-global shared page cache (`src/pcache.cyr`) is **OFF by
 default**. Enable with `patra_cache_enable(1)` once at startup (process-wide,
@@ -53,17 +54,26 @@ durability is unchanged from the no-cache baseline — a crash loses unsynced
 commits *and* the in-memory cache together, so no committed-but-cached page
 ever survives a write that didn't.
 
-## The BYTES/TEXT result caveat (pre-existing TOCTOU)
+## The BYTES/TEXT result caveat (pre-existing TOCTOU) — CLOSED in v1.12.8
 
-A result set stores a BYTES/TEXT column as a `(page, len)` reference and
-materializes the payload **lazily** in `patra_result_read_bytes` /
-`patra_result_read_text` (`src/lib.cyr:1986`, `:2014`), which run **after**
-the query's `LOCK_SH` has been released (note 002). If a concurrent writer
-deletes that row and frees+reuses its chain pages in the window between query
-completion and the lazy read, the read can return stale or foreign bytes.
+*(Historical — as written at v1.12.0:)* A result set stored a BYTES/TEXT
+column as a `(page, len)` reference and materialized the payload **lazily** in
+`patra_result_read_bytes` / `patra_result_read_text`, which ran **after**
+the query's `LOCK_SH` had been released (note 002). If a concurrent writer
+deleted that row and freed+reused its chain pages in the window between query
+completion and the lazy read, the read could return stale or foreign bytes.
 
-This is **pre-existing** — the shared cache neither introduces nor worsens it
-(invalidate-on-write keeps the *cache* coherent; the race is the unlocked
-disk read of a reused page). Contract: read a result set's BYTES/TEXT values
-**before** yielding to a concurrent writer that may delete those rows, or
-serialize. Eager materialization is deferred (consumer-driven).
+**Update 2026-07-03 (v1.12.8, annotated 2026-07-16):** closed by
+`_rs_materialize` (`src/lib.cyr`) — every BYTES/TEXT cell is snapshotted to an
+owned heap buffer while the query's shared flock is held; the chain-ref's
+`BR_PAGE` slot then holds a heap pointer and `read_bytes` / `read_text` are
+pure memcpys, safe against any later writer. Non-breaking (no API change;
+buffers freed by `patra_result_free`). See note 002's matching update and
+CHANGELOG [1.12.8].
+
+The race was **pre-existing** — the shared cache neither introduced nor
+worsened it (invalidate-on-write keeps the *cache* coherent; the race was the
+unlocked disk read of a reused page). The old contract — read a result set's
+BYTES/TEXT values before yielding to a concurrent writer, or serialize — is
+**obsolete** since v1.12.8's eager materialization (update above): no
+read-ordering discipline is required anymore.

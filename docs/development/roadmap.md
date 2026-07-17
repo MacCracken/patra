@@ -1,10 +1,10 @@
 # Patra Development Roadmap
 
-> **Last refreshed**: 2026-07-13 (v1.12.10 cut — SQL `''` escaping + `patra_quote_str`; argonaut/libro P1 request archived)
+> **Last refreshed**: 2026-07-16 (v1.12.11 cut — toolchain-pin patch cyrius 6.3.5 → 6.4.64 + doc-sync debt flush)
 >
 > Thin **backlog index**, forward-looking only. Open consumer requests live one-file-each in [`requests/`](requests/) (this file points at them); upstream cyrius bugs live in [`issues/`](issues/). Shipped work lives in [`../../CHANGELOG.md`](../../CHANGELOG.md) + [`completed-phases.md`](completed-phases.md); live state (version, sizes, counts, consumers) in [`state.md`](state.md).
 
-> **Current**: v1.12.10 — **SQL `''` escaping + `patra_quote_str` (argonaut/libro P1).** A single quote in a consumer-built `INSERT`/`WHERE` value no longer corrupts or drops the row: the tokenizer unescapes a doubled `''` to one `'` **in place** (no-`''` literals stay zero-copy), and `patra_exec`/`patra_query` copy the SQL when a `''` is present so the caller's buffer is never mutated. New `patra_quote_str(dst, src, srclen)` doubles quotes for string-building consumers; bind parameters (`patra_bind_text` + prepared statements) were already quote-proof and remain **preferred** (libro is migrating `patrastore_append` to it). **No open consumer requests.** (Prior: v1.12.9 — agnos `file_open` bridge (owl); v1.12.8 — TEXT/BLOB readback snapshot (yeo-cy-test); v1.12.7 — per-handle tail-page cache.) Patra serves libro, vidya, daimon, agnoshi, mela, hoosh, sit, and argonaut.
+> **Current**: v1.12.11 — **toolchain-pin patch (cyrius `6.3.5` → `6.4.64`, latest released) + doc-sync debt flush.** Source-change-free; binary 282,240 → 273,752 bytes (−8,488, all 6.4.x codegen). A full state audit at this cut flushed accumulated doc staleness: README `[deps.patra]` tag (sat at 1.12.7 through three cuts), doc-health.md ledger, requests/README open-list, state.md Status line. sakshi stays 2.4.2 (2.4.6 upstream is additive; deferred, no consumer need). **No open consumer requests.** (Prior: v1.12.10 — SQL `''` escaping + `patra_quote_str` (argonaut/libro P1; bind params remain the preferred quote-proof path, libro migrating `patrastore_append`); v1.12.9 — agnos `file_open` bridge (owl); v1.12.8 — TEXT/BLOB readback snapshot (yeo-cy-test).) Patra serves libro, vidya, daimon, agnoshi, mela, hoosh, sit, and argonaut.
 
 ## Driven by consumer needs
 
@@ -28,7 +28,7 @@ per-handle (`DB_LP_*`) and gen-gated against `HDR_COMMITGEN`; issue archived at
 
 **Deferred (consumer-driven — land when a consumer hits it):**
 
-- **Eager BYTES/TEXT result materialization.** A result set's `BYTES`/`TEXT` `(page,len)` ref is materialized lazily *after* the read lock releases, so a concurrent writer that frees the row can make the read return stale bytes (pre-existing TOCTOU, documented in README + [`../architecture/003-page-cache-coherence.md`](../architecture/003-page-cache-coherence.md)). The fix (snapshot payloads into the result set at query time) is a breaking change to result-set memory; defer until a BYTES consumer hits it under concurrent writers.
+- ~~**Eager BYTES/TEXT result materialization.**~~ **Shipped v1.12.8** (yeo-cy-test hit it): `_rs_materialize` snapshots every `BYTES`/`TEXT` cell under the query's flock — result sets are true snapshots, and the change landed non-breaking (no API change; `patra_result_free` frees the buffers). The lazy-read TOCTOU this item tracked is closed.
 - **Sharded page-cache lock.** The opt-in cache's single global mutex re-serializes readers; striped locks would cut that, but the cache is still copy-out overhead vs the OS page cache on warm data — only worth it if a cold/slow-disk read-heavy consumer adopts the cache and profiles the lock.
 
 **Internal / toolchain** (not consumer-filed):

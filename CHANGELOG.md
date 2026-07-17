@@ -5,6 +5,47 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.11] - 2026-07-16
+
+**Toolchain-pin patch — cyrius `6.3.5` → `6.4.64`.** Source-change-free (the
+`dist/patra.cyr` diff is the one-line version header). Clears the build-time
+pin-drift warning against the installed toolchain; 6.4.64 is the latest released
+cyrius (verified a published release with tarball assets — CI-safe). sakshi stays
+at 2.4.2 (2.4.6 exists upstream; deferred — additive only, no consumer need).
+
+### Changed
+- cyrius toolchain pin `6.3.5` → `6.4.64` (`cyrius.cyml [package].cyrius`);
+  `cyrius.lock` re-resolved under the new pin (105 → 106 deps).
+- DCE demo binary 282,240 → **273,752 bytes** (−8,488) — entirely cyrius codegen
+  improvement across the 6.3.5 → 6.4.64 span; zero patra source changed.
+
+### Fixed
+- **Doc-sync debt flushed** (all clerical; a full state audit at this cut, then an
+  adversarial review of the release diff that caught a second stratum the first
+  pass missed): README `[deps.patra]` example tag `1.12.7` → current (had missed
+  the 1.12.8–1.12.10 cuts — a repeat of the earlier 1.12.2–1.12.5 miss);
+  `docs/doc-health.md` ledger refreshed (was stale at v1.12.6 with its VERSION row
+  at 1.11.3 and a shipped request listed as open); `docs/development/requests/README.md`
+  open-requests list synced (the argonaut P1 was archived at the v1.12.10 ship but
+  still listed as open with a broken link); `docs/development/state.md` interior
+  current-claims re-anchored (Status bullet stale at v1.12.7, Tests/cross-build
+  bullets still citing pin 6.3.5, deps section still sakshi 2.4.0, source-layout
+  line counts three cuts stale, consumers table missing argonaut).
+- **v1.12.8 snapshot-fix ripple closed**: four docs still described the
+  lazy-readback TOCTOU as a *live* hazard though v1.12.8's `_rs_materialize`
+  closed it — README's concurrency caveat, roadmap's deferred-items list,
+  `docs/architecture/002` / `003` (resolution notes added), and state.md's
+  thread-safety contract. `docs/adr/0001` also gained the 6.4.64 re-check
+  annotation this cut's records cite (DCE now genuinely NOP-fills — ~70.7 KB of
+  `0x90` — builds size-identical but no longer byte-identical as under 6.2.x;
+  still no strip, conclusion stands).
+
+Gates: **893 tests**, **7 fuzz**, **40 benchmarks** (no regression — `insert_1k`
+21.6 µs vs 22.3 µs at v1.12.7, `read_scan_4t_par` 135.1 µs vs 139 µs,
+`dedup_insert_row_or_ignore_500` 9.7 µs vs ~10 µs at v1.12.6), libro 15/15, vidya 19/19,
+lint 0-warn (src + dist), aarch64 + agnos cross-builds of `src/lib.cyr` clean,
+clean-tree `CYRIUS_DCE=1` build. `dist/patra.cyr` regenerated at 6083 lines.
+
 ## [1.12.10] - 2026-07-13
 
 **A single quote in a consumer-built `INSERT`/`WHERE` value no longer corrupts or

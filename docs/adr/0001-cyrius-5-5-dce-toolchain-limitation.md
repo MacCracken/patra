@@ -1,8 +1,27 @@
 # ADR 0001 — Cyrius 5.5.x DCE is a Toolchain No-op
 
-**Status**: Accepted (workaround in place) — re-verified under cyrius 6.2.19 (2026-06-17); behavior changed, conclusion unchanged
-**Date**: 2026-04-21 (re-verified 2026-06-17)
+**Status**: Accepted (workaround in place) — re-verified under cyrius 6.4.64 (2026-07-16); behavior changed again, conclusion unchanged
+**Date**: 2026-04-21 (re-verified 2026-06-17, 2026-07-16)
 **Affects**: Patra 1.1.0+ (CI/release pipelines), all `cyrius build` invocations
+
+## Update 2026-07-16 — re-verified under cyrius 6.4.64 (v1.12.11 pin bump)
+
+Re-ran the DCE-on vs DCE-off comparison on `programs/demo.cyr` under the new
+pin (cyrius **6.4.64**):
+
+- DCE-off: `note: 386 unreachable fns (70763 bytes — set CYRIUS_DCE=1 to eliminate)`
+- DCE-on (`CYRIUS_DCE=1`): `note: 386 unreachable fns (70763 bytes NOPed)`
+- **Both binaries are size-identical (273,752 bytes) but no longer
+  byte-identical**: `cmp -l` shows 70,721 differing bytes, all `0x90` (x86 NOP)
+  in the DCE build — under 6.2.x the "NOPed" wording was cosmetic (builds were
+  byte-identical, DCE effectively a no-op); under 6.4.x the pass now genuinely
+  overwrites the unreachable function bodies in place.
+
+Still **no strip** — the image does not shrink, so the size regression this ADR
+documents persists and the decision stands unchanged: keep `CYRIUS_DCE=1`
+(now real NOP-fill, harmless, forward-compatible). **Not** superseded —
+annotate again at the next pin bump, or re-file if a future cyrius actually
+shrinks the output.
 
 ## Update 2026-06-17 — re-verified under cyrius 6.2.19
 
@@ -80,6 +99,8 @@ toolchain-side concern, not a Patra defect.
 
 - Patra CHANGELOG entries for 1.1.0 (DCE introduced) and 1.3.0
   (regression first noted).
-- Cyrius 5.5.18 / 5.5.22 toolchain (pinned at filing time; current pin is 6.2.19 — see the 2026-06-17 re-verification above).
+- Cyrius 5.5.18 / 5.5.22 toolchain (pinned at filing time; re-verified under
+  6.2.19 and 6.4.64 — see the dated Update sections above. The pin at any
+  moment lives in `cyrius.cyml [package].cyrius`).
 - Compiler diagnostic: `note: N unreachable fns (B bytes — set
   CYRIUS_DCE=1 to eliminate)`.

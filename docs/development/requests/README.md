@@ -27,11 +27,9 @@ the `issues/` convention.
 
 ## Open requests
 
-- **P1 —** [`2026-07-13-argonaut-audit-insert-value-escaping.md`](2026-07-13-argonaut-audit-insert-value-escaping.md)
-  — argonaut (via libro): a metacharacter-safe value path for consumer-built
-  `INSERT`. patra's lack of bind parameters forces libro to interpolate audit-row
-  values into SQL; a `'` yields `PATRA_ERR_SYNTAX` and silently drops the record.
-  Data-integrity priority.
+*None.*
 
-(The sit BYTES `OR IGNORE` request shipped in v1.12.6 (`patra_insert_row_or_ignore`)
-— see [`archive/`](archive/).)
+(The argonaut audit-value escaping P1 shipped in v1.12.10 — tokenizer `''`
+escaping + `patra_quote_str`; the sit BYTES `OR IGNORE` request shipped in
+v1.12.6 (`patra_insert_row_or_ignore`); the yeo-cy-test concurrent-readers P2
+shipped in v1.12.0 — see [`archive/`](archive/).)
