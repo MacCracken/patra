@@ -234,7 +234,7 @@ fn _db_record_insert(db, schema, ncols, row): i64 {
         var acol = aic - 1;
         if (acol < ncols) {
             store64(db + DB_LAST_ID,
-                row_read_int(row, row_field_offset(schema, ncols, acol)));
+            row_read_int(row, row_field_offset(schema, ncols, acol)));
         }
     }
     return 0;

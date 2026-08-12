@@ -9,8 +9,8 @@
 
 ## Current
 
-- **Version**: 1.12.11 (read `VERSION` for the authoritative number)
-- **Cyrius toolchain**: 6.4.64 (pinned in `cyrius.cyml [package].cyrius`).
+- **Version**: 1.13.0 (read `VERSION` for the authoritative number)
+- **Cyrius toolchain**: 6.5.19 (pinned in `cyrius.cyml [package].cyrius`).
   Progression: 6.1.15 (v1.11.0) → 6.2.1 (v1.11.1, stdlib
   pin sweep) → 6.2.19 (v1.11.3) → 6.2.21 (v1.11.5) → 6.2.22 (v1.12.0) →
   6.2.28 (v1.12.1) → 6.2.44 (v1.12.5, dep-refresh patch) → 6.3.5 (v1.12.7,
@@ -21,11 +21,25 @@
   agnos port (WAL `sys_unlink` → `xunlink`) — build, tests, fuzz, benchmarks,
   libro/vidya integration, and the `src/lib.cyr` aarch64 **and agnos**
   cross-builds all green.
-- **sakshi pin**: 2.4.2 (`[deps.sakshi].tag`; modules path
-  `dist/sakshi.cyr` — canonical convention since v1.9.3). Transitive:
-  downstream consumers must replicate `[deps.sakshi]` alongside
-  `[deps.patra]` (cyrius does not resolve transitive deps) — documented
-  in README § Dependencies as of v1.10.0.
+- **sakshi**: **no pin — it comes from the stdlib.** `[deps.sakshi]` was
+  removed in **v1.13.0**; `sakshi` is declared in `[deps].stdlib` and tracks
+  whatever the toolchain folds (**2.4.10** under 6.5.19). **patra now has ZERO
+  `[deps.*]` blocks**, which is what "Zero deps. Pure Cyrius." should have meant
+  all along.
+
+  ⚠ **The old pin was not inert — it downgraded consumers.** It sat at 2.4.2
+  while the snapshot shipped 2.4.10, and its comment claimed "cyrius does not
+  resolve transitive deps". That is false: `cyrius deps` overlays a git dep's
+  resolution **on top of** the `lib sync --full` snapshot, recursing through
+  sibling manifests, on **every `cyrius build`**. Since patra is **itself folded
+  into the stdlib**, this was a folded module forcing an eight-releases-stale
+  sakshi onto anything that reached it — measured four levels up as
+  `agnosai -> bote -> [deps.libro] -> [deps.patra] -> [deps.sakshi] 2.4.2`.
+  agnosai carried a defensive counter-pin for several releases because of it.
+
+  ⚠ **Do not re-add it**, and do not repeat the v1.12.11 reasoning that deferred
+  a bump as "additive only, no consumer need" — for a folded module that test is
+  wrong, because the pin *overrides* what consumers resolve.
 - **Binary**: ~274 KB demo (`programs/demo.cyr`, x86_64; **273,752 bytes** at
   v1.12.11 under 6.4.64 — **−8,488** vs v1.12.7's 282,240 under 6.3.5, entirely
   cyrius codegen improvement across the 6.3.5 → 6.4.64 span, zero patra source
@@ -177,12 +191,14 @@
 
 All git-tag pinned in `cyrius.cyml`. No FFI, no C, no libsqlite3.
 
-- **sakshi** 2.4.2 — tracing + error handling. Bumped from 0.9.0 in
-  v1.9.3 alongside the modules-path correction (`sakshi.cyr` →
-  `dist/sakshi.cyr`); 2.2.3 → 2.4.0 in v1.12.1 (additive `sakshi_log_kv`);
-  2.4.0 → 2.4.2 in v1.12.7 (additive agnos-only fixes). Patra's
-  `sakshi_error` / `sakshi_set_level` call sites unchanged throughout.
-  2.4.6 exists upstream (additive; deferred — no consumer need).
+**There are none as of v1.13.0** — `cyrius.cyml` has zero `[deps.*]` blocks.
+
+- **sakshi** — *was* a git dep at 2.4.2, removed in v1.13.0 and moved to
+  `[deps].stdlib`, where it now resolves to the folded **2.4.10**. History:
+  0.9.0 → 2.2.3 in v1.9.3 (with the modules-path correction `sakshi.cyr` →
+  `dist/sakshi.cyr`), 2.2.3 → 2.4.0 in v1.12.1, 2.4.0 → 2.4.2 in v1.12.7.
+  Patra's `sakshi_error` / `sakshi_set_level` call sites are unchanged
+  throughout, including across this removal.
 
 **Cyrius stdlib declared explicitly** in `cyrius.cyml [deps].stdlib`:
 `syscalls`, `string`, `alloc`, `freelist`, `io`, `fmt`, `str`, `vec`,
@@ -191,8 +207,14 @@ thread-safety mutex; `sync` in v1.11.4 (portable `lib/sync.cyr` mutex);
 `thread_local` in **v1.12.0** for the per-thread parse scratch + page slab
 (`thread_local_init` / `_get` / `_set`, 16 slots via `%fs` / `TPIDR_EL0`).
 **Consumers vendoring `dist/patra.cyr` must replicate `"atomic"`, `"sync"`,
-and `"thread_local"` in their own `[deps].stdlib`** (cyrius doesn't resolve
-transitive deps — same constraint as `sakshi`). The unit test also pulls
+and `"thread_local"` in their own `[deps].stdlib`.**
+
+⚠ **`sakshi` is NO LONGER an instance of that constraint** — it is a folded
+stdlib module now, and cyrius resolves it automatically. Verified rather than
+assumed: `dist/patra.cyr` references `sakshi_error` / `sakshi_set_level` without
+defining them, and `dist/patra.deps` does not list `sakshi` (it never did) — yet
+a clean-room build from the bundle plus only the sidecar's declared leaves
+compiles and runs `patra_init()`. The unit test also pulls
 `thread` + `mmap`, but those are test-only (not a runtime dep of the library;
 worker threads spawned via `lib/thread.cyr` inherit a TLS block free).
 
@@ -233,6 +255,7 @@ payload at `BY_DATA_MAX = 4072`.
 
 | Version | Date | Summary |
 |---------|------|---------|
+| 1.13.0 | 2026-08-12 | **Zero `[deps.*]` blocks — `[deps.sakshi]` (2.4.2) removed and moved to `[deps].stdlib` (folded 2.4.10); cyrius `6.4.65` → `6.5.19`.** The old pin was actively downgrading consumers: patra is itself folded into the stdlib, and `cyrius deps` overlays a git dep on top of the snapshot on *every build*, so a folded module was forcing an eight-releases-stale sakshi onto anything reaching it transitively (`agnosai -> bote -> libro -> patra -> sakshi 2.4.2`). agnosai carried a defensive counter-pin for several releases because of it; bote still does until this is folded into a cyrius release. Nine-minor toolchain jump needed no source changes to build or pass. `src/lib.cyr` + `src/wal.cyr` reformatted for the 6.5.19 formatter (pre-existing drift) — the `wal.cyr` hunk indents `#ifdef`/`#else`/`#endif`, **probed first** since a column-sensitive preprocessor would silently pick the wrong branch in `_wal_gen_salts`'s getrandom/agnos selection, which no Linux test run would catch; both forms take the same branch. Gates: **893 tests**, **7/7 fuzz**, benchmarks clean, fmt+lint 0-warn across 15 files, vet/deny clean, `lib/` diffs clean against the 6.5.19 snapshot after sync *and* after build. `dist/patra.cyr` regenerated at 6081 lines (v1.13.0). |
 | 1.12.11 | 2026-07-16 | **Toolchain-pin patch — cyrius `6.3.5` → `6.4.64` (first 6.4.x; latest released, verified published with tarball assets).** Source-change-free (the `dist/patra.cyr` diff is the one-line version header); `cyrius.lock` re-resolved under the new pin (105 → 106 deps). Binary 282,240 → **273,752 bytes** (−8,488 — entirely cyrius codegen improvement across the 6.3.5 → 6.4.64 span, zero patra source changed). Also flushed audit-found doc-sync debt (two passes — an adversarial diff review caught a second stratum the first pass missed): README `[deps.patra]` example tag (sat at 1.12.7 through three cuts — a repeat of the 1.12.2–1.12.5 miss), doc-health.md ledger (stale at v1.12.6), requests/README.md open-list (argonaut P1 archived but still listed), this file's Status line (stale at v1.12.7) plus its interior current-claims (Tests/cross-build pins, sakshi dep row, source line counts, consumers table missing argonaut), the v1.12.8 snapshot-fix ripple (README / roadmap / arch notes 002–003 / this file's thread-safety contract still described the closed lazy-readback TOCTOU as live), and ADR-0001's missing 6.4.64 annotation. sakshi stays 2.4.2 (2.4.6 upstream is additive; deferred, no consumer need). Gates: **893 tests**, **7 fuzz**, **40 benchmarks** (no regression — `insert_1k` 21.6 µs vs 22.3 at v1.12.7, `read_scan_4t_par` 135.1 µs vs 139, `dedup_insert_row_or_ignore_500` 9.7 µs vs ~10 at v1.12.6), libro 15/15, vidya 19/19, lint 0-warn (src + dist), aarch64 + agnos cross-builds clean, clean-tree `CYRIUS_DCE=1` build. `dist/patra.cyr` at 6083 lines. |
 | 1.12.10 | 2026-07-13 | **A single quote in a consumer-built `INSERT`/`WHERE` value no longer corrupts or drops the row — the SQL tokenizer now implements standard `''` escaping, plus a new `patra_quote_str` helper (argonaut/libro, P1).** libro's `patrastore_append` builds each audit row by raw string interpolation; a `'` in a service/action/detail field made the `INSERT` malformed → `PATRA_ERR_SYNTAX` → the record was silently dropped, diverging the on-disk audit chain from the in-memory one (third consumer to hit this wall). Fix: the tokenizer (`src/sql.cyr`) treats a doubled `''` as one escaped quote, spans the whole literal, and collapses `''`→`'` **in place** (only trails after the first escape → no-`''` literals stay zero-copy); `patra_exec`/`patra_query` copy the SQL first when a `''` is present (via a linear `_sql_has_dq` scan) so the caller's buffer is never mutated (prepare already owns its copy). New `patra_quote_str(dst, src, srclen)` doubles quotes for string-building consumers; binds (`patra_bind_text`) are unaffected — they never pass through the SQL string. `INSERT`, `UPDATE … SET`, and `WHERE` literals all benefit. Gates: **893 tests** (+8, `test_exec_quote_escaping`), 7 fuzz (incl. the SQL parser fuzzer), libro 15/15, vidya 19/19. `dist/patra.cyr` at 6083 lines. Toolchain pin unchanged (6.3.5). Resolves + archives `requests/2026-07-13-argonaut-audit-insert-value-escaping.md`. |
 | 1.12.9 | 2026-07-06 | **`.patra` file opens now work on agnos (and any non-Linux target) — routed through the stdlib `file_open` ABI bridge instead of raw `sys_open` (owl).** owl's sit-backed VCS change-marker gutter failed on the agnos kernel with `patra: cannot open or create file`, reading every line as "added" because the object store never opened. |

@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "Patra — structured storage and SQL queries for Cyrius. The sovereign database."
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.4.65"
+cyrius = "6.5.19"
 repository = "https://github.com/MacCracken/patra"
 
 [build]
@@ -30,14 +30,46 @@ modules = [
     "src/lib.cyr",
 ]
 
+# Order mirrors the include order at the top of src/lib.cyr — `sakshi` last,
+# matching `include "lib/sakshi.cyr"` there.
 [deps]
-stdlib = ["syscalls", "string", "alloc", "freelist", "io", "fmt", "str", "vec", "atomic", "sync", "thread_local"]
+stdlib = ["syscalls", "string", "alloc", "freelist", "io", "fmt", "str", "vec", "atomic", "sync", "thread_local", "sakshi"]
 
-# Patra's sole external dep (structured logging: sakshi_error / sakshi_set_level,
-# used in src/file.cyr + src/lib.cyr). Cyrius does not resolve transitive deps,
-# so downstream consumers must replicate this block alongside [deps.patra] —
-# see README § Dependencies. Keep the tag in sync there if it moves.
-[deps.sakshi]
-git = "https://github.com/MacCracken/sakshi.git"
-tag = "2.4.2"
-modules = ["dist/sakshi.cyr"]
+# ⚠ **`[deps.sakshi]` was REMOVED at 1.13.0, and patra having it was an active
+# defect for every downstream consumer — not a neutral pin.**
+#
+# It read: "Patra's sole external dep … Cyrius does not resolve transitive deps,
+# so downstream consumers must replicate this block alongside [deps.patra]."
+# **Both halves were wrong by the time it mattered.** sakshi is now FOLDED INTO
+# the cyrius stdlib snapshot, so there is nothing external to declare; and
+# `cyrius deps` very much DOES walk transitive deps — it overlays a git dep's
+# resolution ON TOP OF the `lib sync --full` snapshot, recursing through sibling
+# manifests, on **every `cyrius build`** and not only on `deps`.
+#
+# The consequence, measured 2026-08-12 from four levels up:
+#
+#     agnosai -> bote -> [deps.libro] -> [deps.patra] -> [deps.sakshi] 2.4.2
+#
+# patra is **itself folded into the stdlib** (`lib/patra.cyr` ships in the cyrius
+# snapshot), so this block had a folded module pinning a sakshi **eight patch
+# releases behind the sakshi the same snapshot ships** — and silently
+# downgrading `lib/sakshi.cyr` in anything that reached patra transitively. The
+# only signal is an unnamed "1 bundled lib(s) differ" shadow warning, and
+# `deps --verify` cannot catch it: the lock is written *from disk*, so it simply
+# records the downgraded file's hash.
+#
+# ⚠ **The 1.12.11 reasoning is what to avoid repeating.** That release deferred
+# 2.4.2 -> 2.4.6 as "additive only, no consumer need". For a module that is
+# folded into the toolchain, "no consumer need" is not the test — a stale pin
+# here is not inert, it *overrides* what every consumer resolves. agnosai carried
+# a defensive counter-pin for several releases because of this block, and bote
+# still carries one until this fix is folded.
+#
+# ⚠ **Do NOT re-add this as a git dep.** patra publishes `dist/patra.cyr`, and on
+# a bundle-publishing library a git dep makes `cyrius distlib` reclassify the
+# module OUT of the stdlib leaves, dropping it from the `.deps` sidecar and
+# breaking clean-room consumers. kavach hit exactly that; majra and bote both
+# carry the same warning.
+#
+# patra uses exactly two sakshi symbols — `sakshi_error` (src/file.cyr) and
+# `sakshi_set_level` (src/lib.cyr).

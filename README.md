@@ -72,36 +72,48 @@ patra_close(db);
 
 ### Dependencies
 
-Patra's only external dependency is
-[sakshi](https://github.com/MacCracken/sakshi) — structured logging, called from
-`sakshi_error` / `sakshi_set_level`. Cyrius does not yet resolve **transitive**
-deps, so a consumer that declares `[deps.patra]` must also declare `[deps.sakshi]`
-at patra's pinned tag, or the link fails on the undefined `sakshi_*` symbols:
+**Patra has no external dependencies.** As of **v1.13.0** `cyrius.cyml` carries
+zero `[deps.*]` blocks — everything patra needs, including
+[sakshi](https://github.com/MacCracken/sakshi) (structured logging, called from
+`sakshi_error` / `sakshi_set_level`), is folded into the cyrius stdlib and comes
+from the version-pinned snapshot.
 
 ```toml
 [deps.patra]
 git = "https://github.com/MacCracken/patra.git"
-tag = "1.12.11"
-
-# Required alongside patra — patra calls into it but cyrius won't pull it for you.
-[deps.sakshi]
-git = "https://github.com/MacCracken/sakshi.git"
-tag = "2.4.2"
-modules = ["dist/sakshi.cyr"]
+tag = "1.13.0"
 ```
 
-The single-include bundle (`dist/patra.cyr`) carries the same requirement:
-include `dist/sakshi.cyr` next to it.
+> ⚠ **If you are carrying a `[deps.sakshi]` block "required alongside patra",
+> DELETE IT.** This README used to instruct exactly that, at `tag = "2.4.2"`, on
+> the premise that "cyrius does not resolve transitive deps". **That premise is
+> false and the instruction was harmful.** `cyrius deps` overlays a git dep's
+> resolution *on top of* the `lib sync --full` snapshot, recursing through
+> sibling manifests, on **every `cyrius build`** — so a pin at 2.4.2 does not
+> merely fail to help, it **downgrades** `lib/sakshi.cyr` from whatever the
+> toolchain folds (2.4.10 under cyrius 6.5.19) to 2.4.2, silently. The only
+> signal is an unnamed "1 bundled lib(s) differ" shadow warning, and
+> `cyrius deps --verify` cannot catch it because the lock is written *from disk*
+> and records the downgraded file's hash.
+>
+> Patra is itself folded into the stdlib, so this affected consumers several
+> levels away — measured as
+> `agnosai -> bote -> [deps.libro] -> [deps.patra] -> [deps.sakshi] 2.4.2`.
 
-patra's threading primitives come from the cyrius stdlib. Replicate this
-`[deps].stdlib` list (cyrius does not resolve transitive deps, so a consumer
-vendoring `dist/patra.cyr` must declare them) or the link fails on undefined
-`atomic_*` / `mutex_*` / `thread_local_*`:
+patra's threading primitives come from the cyrius stdlib. A consumer vendoring
+`dist/patra.cyr` must declare these in its own `[deps].stdlib`, or the link fails
+on undefined `atomic_*` / `mutex_*` / `thread_local_*`:
 
 ```toml
 [deps]
-stdlib = ["syscalls", "string", "alloc", "freelist", "io", "fmt", "str", "vec", "atomic", "sync", "thread_local"]
+stdlib = ["syscalls", "string", "alloc", "freelist", "io", "fmt", "str", "vec", "atomic", "sync", "thread_local", "sakshi"]
 ```
+
+The single-include bundle (`dist/patra.cyr`) needs the same list. It references
+`sakshi_*` without defining them and `dist/patra.deps` does not list `sakshi`,
+but cyrius resolves the folded module automatically — verified with a clean-room
+build from the bundle plus only the sidecar's declared leaves, which compiles and
+runs `patra_init()`.
 
 **Thread-safety**: a patra db handle is safe to share across threads — auto-commit
 statement calls (`patra_exec` / `patra_query` / the prepared variants /

@@ -5,6 +5,80 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.0] - 2026-08-12
+
+**Patra now has zero `[deps.*]` blocks — sakshi moves to the stdlib, and the pin
+it replaced was silently downgrading every downstream consumer.** Toolchain
+`6.4.65` → `6.5.19`. Full suite green (893 tests), 7/7 fuzz harnesses, benchmarks
+clean, `dist/patra.cyr` regenerated at v1.13.0.
+
+### Removed
+
+- **`[deps.sakshi]` (was pinned at `2.4.2`).** `sakshi` is now declared in
+  `[deps].stdlib`, where it tracks whatever the toolchain folds — **2.4.10** as of
+  the 6.5.19 snapshot. `src/lib.cyr`'s `include "lib/sakshi.cyr"` is unchanged,
+  and patra still uses exactly two symbols: `sakshi_error` (`src/file.cyr`) and
+  `sakshi_set_level` (`src/lib.cyr`).
+
+  **This was not an inert pin — it was an active defect for consumers.** The
+  block's own comment claimed "Cyrius does not resolve transitive deps, so
+  downstream consumers must replicate this block". Both halves were wrong by the
+  time it mattered: sakshi is folded into the cyrius stdlib, and `cyrius deps`
+  *does* walk transitive deps — it overlays a git dep's resolution **on top of**
+  the `lib sync --full` snapshot, recursing through sibling manifests, on **every
+  `cyrius build`** and not only on `deps`.
+
+  ⚠ **Patra is itself folded into the cyrius stdlib** (`lib/patra.cyr` ships in
+  the snapshot), so this block had a folded module pinning a sakshi **eight patch
+  releases behind the sakshi the same snapshot ships** — and pushing it onto
+  anything that reached patra transitively. Measured from four levels up:
+
+  ```
+  agnosai -> bote -> [deps.libro] -> [deps.patra] -> [deps.sakshi] 2.4.2
+  ```
+
+  The only signal is an unnamed "1 bundled lib(s) differ" shadow warning, and
+  `deps --verify` cannot catch it: the lock is written *from disk*, so it records
+  the downgraded file's hash. agnosai carried a defensive counter-pin for several
+  releases because of this; bote still carries one until this fix is folded into
+  a cyrius release.
+
+  ⚠ **The 1.12.11 reasoning is the thing to avoid repeating.** That release
+  deferred `2.4.2 → 2.4.6` as *"additive only, no consumer need"*. For a module
+  folded into the toolchain, "no consumer need" is the wrong test — a stale pin
+  here is not inert, it **overrides** what every consumer resolves.
+
+  ⚠ **Do not re-add this as a git dep.** patra publishes `dist/patra.cyr`, and on
+  a bundle-publishing library a git dep makes `cyrius distlib` reclassify the
+  module out of the stdlib leaves, dropping it from the `.deps` sidecar. kavach
+  hit exactly that.
+
+  ✅ Verified the clean-room case rather than assuming it: `dist/patra.cyr`
+  references `sakshi_error`/`sakshi_set_level` without defining them, and
+  `dist/patra.deps` does not list `sakshi` (it did not before this change
+  either). A clean-room consumer built from the bundle plus only the sidecar's
+  declared leaves **compiles and runs `patra_init()` successfully** — cyrius
+  resolves the folded stdlib module automatically. No packaging break.
+
+### Changed
+
+- **Toolchain pin `6.4.65` → `6.5.19`** — nine minor releases. Source needed no
+  changes to build or pass; `lib/` diffs clean against the 6.5.19 snapshot after
+  the sync **and** after a build.
+
+- **`src/lib.cyr` and `src/wal.cyr` reformatted** for the 6.5.19 formatter, which
+  was pre-existing drift surfaced by the pin bump rather than anything in this
+  release. Two hunks: a continuation-line indent in `lib.cyr`, and `#ifdef` /
+  `#else` / `#endif` directives indented to their surrounding block in `wal.cyr`.
+
+  ⚠ **The `wal.cyr` hunk was verified before applying, not assumed.** Indenting
+  preprocessor directives would silently select the wrong branch if cyrius's
+  preprocessor were column-sensitive — and `_wal_gen_salts` uses `#ifdef` to pick
+  between `sys_getrandom`, a raw `syscall(SYS_GETRANDOM)` and the agnos
+  `SYS_TIME_UNIX` fallback, none of which a Linux test run would catch. Probed
+  directly with column-0 and indented directives in one file: **both take the
+  same branch.** Cosmetic, safe.
+
 ## [1.12.12] - 2026-07-17
 
 **Migrate the five thread-local slots off hardcoded indices.** `src/sql.cyr`
