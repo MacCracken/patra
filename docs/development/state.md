@@ -9,8 +9,21 @@
 
 ## Current
 
-- **Version**: 1.13.0 (read `VERSION` for the authoritative number)
-- **Cyrius toolchain**: 6.5.19 (pinned in `cyrius.cyml [package].cyrius`).
+> **v1.13.1 (2026-08-18)** — **every query allocated a result buffer sized for the
+> WHOLE TABLE.** `_patra_query_exec` used `nrows * rsz` — allocated *and* memset —
+> on every query, including a single-row indexed equality hit, making lookups
+> O(table rows). Phase-profiling settled it: on a 4,000-row / 32 MB table the
+> B-tree lookup cost **14.8 µs** while the buffer cost **1,902 µs** — 128× more
+> than the lookup it served (~19 MB allocated and zeroed to return one row).
+> The index planning moved into `_idx_plan`, which runs before the allocation and
+> reports the ref count, so the buffer is sized by the actual result and the
+> B-tree is descended once. **41× faster at 32 MB (1,989,206 → 47,977 ns) and the
+> curve is now FLAT** across 1.2 / 4.8 / 32 MB. Scan-path queries unchanged (no
+> index means the worst case really is every row). Filed by sit. 894 tests / 7
+> fuzz harnesses green.
+
+- **Version**: 1.13.1 (read `VERSION` for the authoritative number)
+- **Cyrius toolchain**: 6.5.27 (pinned in `cyrius.cyml [package].cyrius`; 6.5.19 → 6.5.27 at v1.13.1, source-change-free).
   Progression: 6.1.15 (v1.11.0) → 6.2.1 (v1.11.1, stdlib
   pin sweep) → 6.2.19 (v1.11.3) → 6.2.21 (v1.11.5) → 6.2.22 (v1.12.0) →
   6.2.28 (v1.12.1) → 6.2.44 (v1.12.5, dep-refresh patch) → 6.3.5 (v1.12.7,

@@ -1,5 +1,17 @@
 # sit — every query allocates and zeroes a result buffer sized for the WHOLE TABLE
 
+**SHIPPED v1.13.1** (2026-08-18). Fixed via shape (1) below — `_idx_plan` runs the
+index planning before the allocation and returns the ref count, so the buffer is
+sized by the actual result and the B-tree is descended once. **41× at 32 MB
+(1,989,206 → 47,977 ns), and flat across 1.2 / 4.8 / 32 MB.** 894 tests / 7 fuzz
+harnesses green.
+
+⚠ **Two wrong turns are recorded below on purpose** — the page-cache misdiagnosis,
+and a prototype that measured "3%" because it was benchmarked through a consumer's
+`lib/` copy that `cyrius build` silently re-resolved from the stdlib snapshot,
+so the unmodified engine was being measured. Both cost real time; both are cheap
+to avoid once named.
+
 **Consumer:** sit 1.4.2 (`.sit/objects.patra` — the content-addressed object store).
 **Filed:** 2026-08-18.
 **Blocker it removes:** sit's indexed object reads currently cost O(table rows)

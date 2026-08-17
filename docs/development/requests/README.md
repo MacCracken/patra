@@ -27,15 +27,7 @@ the `issues/` convention.
 
 ## Open requests
 
-- [`2026-08-18-sit-result-buffer-sized-by-table.md`](2026-08-18-sit-result-buffer-sized-by-table.md)
-  — **sit**: `_patra_query_exec` allocates AND `memset`s a result buffer sized
-  `nrows * rsz` — the whole table — on **every** query, including a single-row
-  indexed equality hit. 132 µs → 1.99 ms as a table grows 150 → 4,000 rows with
-  8 KB values. Not I/O: identical with the page cache on or off. Wants the buffer
-  sized by actual result rows (estimate-then-allocate, or grow-on-demand), plus a
-  `min(nrows, limit)` cap on the scan path.
-  ⚠ *An earlier revision of this file blamed the page cache; that was wrong and is
-  retracted in-file — the cache is opt-in and was never enabled in any measurement.*
+*None.*
 
 (The argonaut audit-value escaping P1 shipped in v1.12.10 — tokenizer `''`
 escaping + `patra_quote_str`; the sit BYTES `OR IGNORE` request shipped in

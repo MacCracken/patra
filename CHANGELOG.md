@@ -5,6 +5,60 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.1] - 2026-08-18 — every query allocated a result buffer sized for the whole table
+
+**41× faster indexed lookups on a 32 MB database, and the curve is now flat.**
+Filed by sit, whose object store does one indexed equality per object read.
+Toolchain `6.5.19` → `6.5.27`. Full suite green (894 tests), 7/7 fuzz harnesses,
+all ten `dist/` bundles regenerated at v1.13.1.
+
+### Fixed
+
+- **`_patra_query_exec` sized the result buffer by the TABLE's row count, not the
+  query's.** `nrows * rsz` was allocated *and* `memset` on every query — including
+  a single-row equality hit on an indexed column — making every lookup O(table
+  rows) in both allocation and zeroing. Read latency therefore grew with database
+  size even though the B-tree index was working perfectly.
+
+  Phase-profiling `_patra_query_exec` over 100 indexed queries on a 4,000-row /
+  32 MB table put it beyond doubt:
+
+  | phase | per query |
+  |---|---:|
+  | SQL parse | 10.7 µs |
+  | table + schema setup | 4.6 µs |
+  | **result-buffer alloc + memset** | **1,902 µs** |
+  | index range + fill | 14.8 µs |
+  | `_rs_materialize` | 21 µs |
+
+  **The B-tree lookup cost 14.8 µs; the buffer sized for the table cost 1,902 µs
+  — 128× more than the lookup it served.** At 4,000 rows that is ~19 MB allocated
+  and zeroed per query to return a single row.
+
+  **Fix**: the planning half of the index path moved into a new `_idx_plan`, which
+  runs *before* the allocation and returns the ref count (or -1 when the index
+  cannot serve the query). The buffer is then sized by the actual result —
+  `nrefs` on the index path, `nrows` on the scan fallback. The caller retains the
+  refs buffer, so the B-tree is descended exactly **once**, not twice.
+
+  | DB size | before | after | |
+  |---|---:|---:|---:|
+  | ~1.2 MB | 131,993 ns | 53,729 ns | 2.5× |
+  | ~4.8 MB | 346,313 ns | 47,740 ns | 7.3× |
+  | ~32 MB | 1,989,206 ns | 47,977 ns | **41×** |
+
+  The after-column is **flat** — which is what an indexed equality lookup should
+  have been all along.
+
+  ⚠ **Scan-path queries are unchanged.** With no usable index the worst case
+  really is every row, so `nrows` sizing stays correct there; only the index path
+  can know its result size up front.
+
+### Changed
+
+- **Toolchain pin `6.5.19` → `6.5.27`.** No source change required; verified green
+  on both pins.
+
 ## [1.13.0] - 2026-08-12
 
 **Patra now has zero `[deps.*]` blocks — sakshi moves to the stdlib, and the pin
