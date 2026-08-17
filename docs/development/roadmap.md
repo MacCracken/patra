@@ -29,6 +29,18 @@ per-handle (`DB_LP_*`) and gen-gated against `HDR_COMMITGEN`; issue archived at
 **Deferred (consumer-driven — land when a consumer hits it):**
 
 - ~~**Eager BYTES/TEXT result materialization.**~~ **Shipped v1.12.8** (yeo-cy-test hit it): `_rs_materialize` snapshots every `BYTES`/`TEXT` cell under the query's flock — result sets are true snapshots, and the change landed non-breaking (no API change; `patra_result_free` frees the buffers). The lazy-read TOCTOU this item tracked is closed.
+- **B-tree structural rebalancing (empty-leaf removal).** `_bt_leaf_compact`
+  (`src/btree.cyr`) reclaims lazy-deleted entries within a leaf but deliberately
+  does not remove or merge a leaf that empties — future inserts into that key
+  range refill the slots. A delete-heavy consumer that never re-inserts into the
+  vacated ranges would accumulate empty leaves and pay for walking them. No
+  consumer has hit it; land it when one does.
+- **Drop the statement mutex on the read path.** P2 (v1.12.0) step 1 made the
+  parse scratch per-thread (TLS slots, `src/sql.cyr`) so concurrent parses no
+  longer collide, but the statement mutex is still taken on **every** op. The
+  planned step 2 — dropping it for `patra_query` / `patra_query_prepared` —
+  needs the page slab and freelist to be thread-safe first. Writers stay
+  serialized either way. Blocks concurrent-reader throughput, not correctness.
 - **Sharded page-cache lock.** The opt-in cache's single global mutex re-serializes readers; striped locks would cut that, but the cache is still copy-out overhead vs the OS page cache on warm data — only worth it if a cold/slow-disk read-heavy consumer adopts the cache and profiles the lock.
 
 **Internal / toolchain** (not consumer-filed):

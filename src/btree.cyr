@@ -446,8 +446,9 @@ fn _bt_free_walk(fd, hdr, root, depth): i64 {
 
 # Compact a single leaf in place: keep only entries with valid refs (val != -1).
 # Shifts survivors forward, updates BT_NKEYS. Returns reclaimed count.
-# Structural rebalancing (empty-leaf removal) is intentionally out of scope —
-# future inserts into the leaf's key range will refill the slots.
+# Structural rebalancing (empty-leaf removal) is intentionally out of scope — roadmap.md
+# future inserts into the leaf's key range will refill the slots. Tracked in
+# docs/development/roadmap.md § Open backlog, "B-tree structural rebalancing".
 fn _bt_leaf_compact(fd, pg): i64 {
     var buf = pg_alloc();
     page_read(fd, pg, buf);

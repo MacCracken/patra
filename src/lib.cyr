@@ -94,9 +94,11 @@ enum RsOff {
 #
 # P2 (v1.12.0) lifts the serialization for readers. Step 1 (this change) made
 # the parse scratch PER-THREAD (TLS slots, sql.cyr) so concurrent parses no
-# longer collide; the statement mutex is still held on every op for now and is
+# longer collide; the statement mutex is still held on every op for now (roadmap.md) and is
 # dropped on the read path (patra_query / patra_query_prepared) in a later step
 # once the page slab and freelist are also thread-safe. Writers stay serialized.
+# Step 2 tracked in docs/development/roadmap.md § Open backlog, "Drop the
+# statement mutex on the read path".
 #
 # Caveat (documented): per-call locking makes each auto-commit statement
 # atomic, but does NOT make an explicit BEGIN…COMMIT span atomic across
@@ -1498,7 +1500,6 @@ fn _idx_plan(fd, hdr, schema, ncols, nrows, refs): i64 {
     }
     return nrefs;
 }
-
 
 fn _patra_query_exec(db): i64 {
     var fd = _db_fd(db);

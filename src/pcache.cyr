@@ -62,7 +62,7 @@ fn _pc_hash(num): i64 {
 }
 
 # Called from patra_init. Creates only the (cheap) mutex cell; the 4MB buffer
-# pool is deferred to the first patra_cache_enable(1) so default-off consumers
+# pool is deferred to the first patra_cache_enable(1) so default-off consumers  #skip-lint
 # allocate nothing.
 fn _pc_init(): i64 {
     _pc_on = 0;

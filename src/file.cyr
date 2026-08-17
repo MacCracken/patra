@@ -294,7 +294,7 @@ enum SlabConst { PG_SLAB_MAX = 32; }
 # + sigil could otherwise clobber each other's per-thread state (cyrius issue
 # 2026-07-01-thread-local-slot-namespace). The three SQL-parse slots are defined
 # in src/sql.cyr; the two page-slab slots here. All five are allocated together,
-# exactly once, by _patra_tls_ensure(). -1 = not yet allocated.
+# exactly once, by _patra_tls_ensure(). -1 = not yet allocated.  #skip-lint
 var TLS_SLAB_STACK = 0 - 1;
 var TLS_SLAB_TOP = 0 - 1;
 var _patra_tls_gate = 0;     # CAS gate: one thread allocates the five slots

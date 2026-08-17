@@ -59,6 +59,30 @@ all ten `dist/` bundles regenerated at v1.13.1.
 - **Toolchain pin `6.5.19` → `6.5.27`.** No source change required; verified green
   on both pins.
 
+### Lint
+
+`cyrius lint` is now clean across `src/` + `programs/`: **0 warnings, 0 untracked
+deferrals** (was 1 warning + 6 untracked).
+
+- **Fixed the one warning** — a doubled blank line introduced by this release's
+  `_idx_plan` insertion (`src/lib.cyr`). This was the only failure actually
+  breaking the CI gate.
+- **Four of the six "untracked deferrals" were false positives** and are now
+  `#skip-lint`. The linter matches phrases like "not yet" and "deferred"; in each
+  case the phrase described a **sentinel value** (`-1 = not yet allocated`, in
+  `src/file.cyr` and twice in `src/sql.cyr`) or **lazy allocation** (the page-cache
+  pool "is deferred to the first `patra_cache_enable(1)`", `src/pcache.cyr`) —
+  not deferred work.
+- **The two genuine deferrals are now tracked** in
+  [`docs/development/roadmap.md`](docs/development/roadmap.md) § Open backlog and
+  cross-referenced from the source: B-tree structural rebalancing
+  (`_bt_leaf_compact` reclaims within a leaf but never removes an emptied one) and
+  dropping the statement mutex on the read path (P2 step 2, blocked on a
+  thread-safe page slab + freelist).
+
+  ⚠ The cross-reference must sit on the **same line** as the trigger phrase — a
+  reference on the following line still reports untracked.
+
 ## [1.13.0] - 2026-08-12
 
 **Patra now has zero `[deps.*]` blocks — sakshi moves to the stdlib, and the pin
