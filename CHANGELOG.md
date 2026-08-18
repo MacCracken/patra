@@ -5,12 +5,12 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.13.1] - 2026-08-18 — every query allocated a result buffer sized for the whole table
+## [1.13.1] - 2026-08-17 — every query allocated a result buffer sized for the whole table
 
 **41× faster indexed lookups on a 32 MB database, and the curve is now flat.**
 Filed by sit, whose object store does one indexed equality per object read.
-Toolchain `6.5.19` → `6.5.27`. Full suite green (894 tests), 7/7 fuzz harnesses,
-all ten `dist/` bundles regenerated at v1.13.1.
+Toolchain `6.5.19` → `6.5.27`. Full suite green (893 tests), 7/7 fuzz harnesses,
+`dist/patra.cyr` regenerated at v1.13.1.
 
 ### Fixed
 

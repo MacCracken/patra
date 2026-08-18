@@ -35,11 +35,11 @@ modules = [
 [deps]
 stdlib = ["syscalls", "string", "alloc", "freelist", "io", "fmt", "str", "vec", "atomic", "sync", "thread_local", "sakshi"]
 
-# ⚠ **`[deps.sakshi]` was REMOVED at 1.13.0, and patra having it was an active
+# ⚠ **``deps.sakshi`` was REMOVED at 1.13.0, and patra having it was an active
 # defect for every downstream consumer — not a neutral pin.**
 #
 # It read: "Patra's sole external dep … Cyrius does not resolve transitive deps,
-# so downstream consumers must replicate this block alongside [deps.patra]."
+# so downstream consumers must replicate this block alongside `deps.patra`."
 # **Both halves were wrong by the time it mattered.** sakshi is now FOLDED INTO
 # the cyrius stdlib snapshot, so there is nothing external to declare; and
 # `cyrius deps` very much DOES walk transitive deps — it overlays a git dep's
@@ -48,7 +48,7 @@ stdlib = ["syscalls", "string", "alloc", "freelist", "io", "fmt", "str", "vec", 
 #
 # The consequence, measured 2026-08-12 from four levels up:
 #
-#     agnosai -> bote -> [deps.libro] -> [deps.patra] -> [deps.sakshi] 2.4.2
+#     agnosai -> bote -> `deps.libro` -> `deps.patra` -> `deps.sakshi` 2.4.2
 #
 # patra is **itself folded into the stdlib** (`lib/patra.cyr` ships in the cyrius
 # snapshot), so this block had a folded module pinning a sakshi **eight patch
