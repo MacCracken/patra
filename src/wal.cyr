@@ -4,13 +4,13 @@
 # On commit: WAL is deleted. On crash recovery: WAL is replayed (undo).
 # Integrates with page_write via globals — no call-site changes needed.
 #
-# File format (1.5.3+, v2):
+# File format (1.5.3+; v3 since 1.13.4, v2 still accepted on recovery):
 #   [0..3]       magic "PTWA" (0x41575450 little-endian)
 #   [4..7]       version (2)
 #   [8..15]      salt1 (i64, fresh per transaction)
 #   [16..23]     salt2 (i64, fresh per transaction)
 #   [24..]       records, each 4112 bytes:
-#                  [0..7]       page_num (i64)
+#                  [0..7]       page_num (i64; -1 = the header at offset 0)
 #                  [8..4103]    before-image page (4096 bytes)
 #                  [4104..4111] djb2-derived hash of (salt1, pg, data, salt2)
 #
@@ -26,16 +26,25 @@ var _wal_db_fd = 0 - 1;
 var _wal_pages = 0;
 var _wal_nlog = 0;
 var _wal_overflow = 0;
+var _wal_cap = 0;
 var _wal_salt1 = 0;
 var _wal_salt2 = 0;
 var _wal_tx_counter = 0;
 
 enum WalConst {
-    WAL_MAX_PAGES = 64;
+    # Initial capacity of the per-transaction dedup list. NOT a ceiling —
+    # the list grows (wal_log_page) so a transaction is never forced past the
+    # point where its before-images can be logged. It was a hard cap until
+    # v1.13.4, which made an over-64-page transaction silently unrollback-able.
+    WAL_INIT_PAGES = 64;
     WAL_REC_SZ = 4112;
     WAL_HDR_SZ = 24;
     WAL_MAGIC = 0x41575450;
-    WAL_VER = 2;
+    # v3 adds the header-page record (page_num == WAL_HDR_PAGE -> file offset
+    # 0). v2 WALs contain no such record, so they replay correctly under v3
+    # logic and are still accepted on recovery.
+    WAL_VER = 3;
+    WAL_VER_MIN = 2;
 }
 # Randomness is acquired per-target, never via a hardcoded syscall number:
 #   - Linux x86_64 / aarch64 / macos / agnos: the syscall peer defines the
@@ -76,6 +85,17 @@ fn _wal_gen_salts(): i64 {
     return 0;
 }
 
+# The database header lives at file offset 0 and is NOT part of the page
+# numbering (page N is at PAGE_SIZE + N*PAGE_SIZE), so it needs its own record
+# key. -1 can never be a real page number. (audit 2026-08-18 S1-2)
+var WAL_HDR_PAGE = 0 - 1;
+
+# File offset a WAL record restores to.
+fn _wal_rec_offset(pg): i64 {
+    if (pg == WAL_HDR_PAGE) { return 0; }
+    return page_offset(pg);
+}
+
 # djb2-derivative hash seeded with salt1 and mixed with salt2 at the end.
 # Non-cryptographic — defeats accidental corruption, stale-WAL replay, and
 # cross-WAL replay. Does not defeat an attacker who can read .wal and the
@@ -97,7 +117,11 @@ fn wal_start(db_fd, wal_path): i64 {
     # file_open (io): portable — bridges agnos's namelen + AO_* flag ABI.
     if (_wal_fd < 0) { _wal_fd = 0 - 1; return PATRA_ERR_IO; }
     _wal_db_fd = db_fd;
-    if (_wal_pages == 0) { _wal_pages = alloc(WAL_MAX_PAGES * 8); }
+    if (_wal_pages == 0) {
+        _wal_pages = _pt_alloc(WAL_INIT_PAGES * 8);
+        if (_wal_pages == 0) { sys_close(_wal_fd); _wal_fd = 0 - 1; return PATRA_ERR_IO; }
+        _wal_cap = WAL_INIT_PAGES;
+    }
     _wal_nlog = 0;
     _wal_overflow = 0;
 
@@ -124,31 +148,82 @@ fn wal_is_active(): i64 {
 # Returns 1 if WAL overflowed (more than 64 pages in transaction)
 fn wal_overflowed(): i64 { return _wal_overflow; }
 
-# Log before-image of a page (called from page_write)
+# Log before-image of a page (called from page_write).
+#
+# Returns PATRA_OK, or an error the caller MUST honour by not modifying the
+# page. The whole point of a write-ahead log is that the before-image is
+# durable BEFORE the page it protects changes; if we cannot make that true,
+# the only safe move is to refuse the write. (audit 2026-08-18 S1-1, S1-3)
+#
+# Bookkeeping (_wal_pages / _wal_nlog) is updated only AFTER the record is
+# durable, so a failed attempt never marks a page as logged.
 fn wal_log_page(page_num): i64 {
-    if (_wal_fd < 0) { return 0; }
-    # Check if already logged
+    if (_wal_fd < 0) { return PATRA_OK; }
+    # Already logged this transaction — the first before-image is the one to keep.
+    # Linear scan: O(n) per page, O(n^2) per transaction. Fine at realistic
+    # transaction sizes; if a consumer ever runs very large transactions this
+    # wants a hash set.
     for (var i = 0; i < _wal_nlog; i = i + 1) {
-        if (load64(_wal_pages + i * 8) == page_num) { return 0; }
+        if (load64(_wal_pages + i * 8) == page_num) { return PATRA_OK; }
     }
-    if (_wal_nlog >= WAL_MAX_PAGES) { _wal_overflow = 1; return 0; }
-    store64(_wal_pages + _wal_nlog * 8, page_num);
-    _wal_nlog = _wal_nlog + 1;
+    # Grow the dedup list rather than capping the transaction. The old fixed
+    # 64-page cap set a flag, returned 0, and let page_write modify the page
+    # anyway — so any transaction touching more than 64 pages was silently
+    # unrollback-able, and patra_rollback reported success after restoring only
+    # the first 64. Refusing the write instead is not an option: callers ignore
+    # page_write's return, and a failed page_alloc write leaves a garbage page
+    # whose DP_NEXT makes tbl_insert's tail-walk spin. So we simply do not run
+    # out. _wal_overflow now only trips if the growth itself fails.
+    if (_wal_nlog >= _wal_cap) {
+        var ncap = _wal_cap * 2;
+        var npages = _pt_alloc(ncap * 8);
+        if (npages == 0) { _wal_overflow = 1; return PATRA_ERR_FULL; }
+        memcpy(npages, _wal_pages, _wal_nlog * 8);
+        _pt_free(_wal_pages);
+        _wal_pages = npages;
+        _wal_cap = ncap;
+    }
 
-    # Read current page from disk
     var buf = _pt_alloc(WAL_REC_SZ);
     memset(buf, 0, WAL_REC_SZ);
     store64(buf, page_num);
-    _pt_seek(_wal_db_fd, page_offset(page_num));
+    if (_pt_seek(_wal_db_fd, _wal_rec_offset(page_num)) < 0) {
+        _pt_free(buf);
+        return PATRA_ERR_IO;
+    }
     var nr = sys_read(_wal_db_fd, buf + 8, PAGE_SIZE);
+    # A short/failed read means the page is past EOF (freshly allocated); the
+    # zero-filled buffer is the correct before-image for a page that did not
+    # exist, and rollback restoring zeros is right.
     if (nr < 0) { nr = 0; }
-    # Trailing checksum (salted)
     store64(buf + 8 + PAGE_SIZE, _wal_hash(page_num, buf + 8, _wal_salt1, _wal_salt2));
-    # Write record to WAL
-    sys_write(_wal_fd, buf, WAL_REC_SZ);
+    if (sys_write(_wal_fd, buf, WAL_REC_SZ) != WAL_REC_SZ) {
+        _pt_free(buf);
+        return PATRA_ERR_IO;
+    }
+    # WRITE-AHEAD. Without this the before-image sat in the page cache while
+    # patra_hdr_write fdatasync'd the DATABASE fd on every statement, forcing
+    # the modified pages to stable storage ahead of the log protecting them.
+    # Bounded cost: at most one sync per distinct page per transaction, and
+    # only when a transaction is open (_wal_fd < 0 outside one).
+    if (syscall(SYS_FDATASYNC, _wal_fd) < 0) {
+        _pt_free(buf);
+        return PATRA_ERR_IO;
+    }
     _pt_free(buf);
-    return 0;
+
+    store64(_wal_pages + _wal_nlog * 8, page_num);
+    _wal_nlog = _wal_nlog + 1;
+    return PATRA_OK;
 }
+
+# Log the database header's before-image. The header (table directory,
+# TBL_NROWS/TBL_ROOT, free-list head) is written by patra_hdr_write on EVERY
+# statement, including statements inside a transaction — and it was never
+# WAL-logged, so wal_rollback restored page contents while every header
+# mutation survived. patra_rollback then re-read that mutated header from
+# disk. (audit 2026-08-18 S1-2)
+fn wal_log_hdr(): i64 { return wal_log_page(WAL_HDR_PAGE); }
 
 # Commit transaction: sync WAL, flush in-place data pages, then delete WAL.
 # Audit 2026-04-21 §2.9: pre-1.5.2 the WAL was unlinked before the data-page
@@ -177,7 +252,9 @@ fn _wal_hdr_verify(fd): i64 {
     var nr = sys_read(fd, hdr, WAL_HDR_SZ);
     if (nr != WAL_HDR_SZ) { _pt_free(hdr); return PATRA_ERR_MAGIC; }
     if (load32(hdr) != WAL_MAGIC) { _pt_free(hdr); return PATRA_ERR_MAGIC; }
-    if (load32(hdr + 4) != WAL_VER) { _pt_free(hdr); return PATRA_ERR_MAGIC; }
+    var wv = load32(hdr + 4);
+    if (wv < WAL_VER_MIN) { _pt_free(hdr); return PATRA_ERR_MAGIC; }
+    if (wv > WAL_VER) { _pt_free(hdr); return PATRA_ERR_MAGIC; }
     _wal_salt1 = load64(hdr + 8);
     _wal_salt2 = load64(hdr + 16);
     _pt_free(hdr);
@@ -205,7 +282,7 @@ fn wal_rollback(wal_path): i64 {
         var want = load64(buf + 8 + PAGE_SIZE);
         var got = _wal_hash(pg, buf + 8, _wal_salt1, _wal_salt2);
         if (want != got) { done = 1; continue; }
-        _pt_seek(_wal_db_fd, page_offset(pg));
+        if (_pt_seek(_wal_db_fd, _wal_rec_offset(pg)) < 0) { done = 1; continue; }
         sys_write(_wal_db_fd, buf + 8, PAGE_SIZE);
     }
     _pt_free(buf);
@@ -214,6 +291,12 @@ fn wal_rollback(wal_path): i64 {
     _wal_fd = 0 - 1;
     _wal_nlog = 0;
     xunlink(wal_path);
+    # Backstop: if any before-image went unlogged this transaction, the restore
+    # above is INCOMPLETE and the database is left part-rolled-back. Growth
+    # makes this unreachable short of an allocation failure, but reporting
+    # success after a partial restore is exactly the defect this replaced —
+    # patra_commit already reported it, patra_rollback did not.
+    if (_wal_overflow != 0) { return PATRA_ERR_FULL; }
     return 0;
 }
 
@@ -237,7 +320,7 @@ fn wal_recover(db_fd, wal_path): i64 {
         var want = load64(buf + 8 + PAGE_SIZE);
         var got = _wal_hash(pg, buf + 8, _wal_salt1, _wal_salt2);
         if (want != got) { done = 1; continue; }
-        _pt_seek(db_fd, page_offset(pg));
+        if (_pt_seek(db_fd, _wal_rec_offset(pg)) < 0) { done = 1; continue; }
         sys_write(db_fd, buf + 8, PAGE_SIZE);
     }
     _pt_free(buf);

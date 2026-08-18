@@ -2547,35 +2547,44 @@ fn test_drop_parse_errors() {
 # -- v0.16: WAL overflow ------------------------------------
 
 fn test_wal_overflow() {
-    test_group("wal overflow");
+    test_group("large transaction is fully logged and rollback-able");
     cleanup();
     var db = patra_open(_tpath);
 
-    # Create a table with many columns to make rows large
+    # Rows of 8 + 256*3 = 776 bytes; a page holds ~5, so 400 rows spans ~80
+    # data pages plus index/schema pages — comfortably past the old fixed
+    # 64-page WAL cap.
     patra_exec(db, "CREATE TABLE wo (id INT, a STR, b STR, c STR)");
 
-    # Start explicit transaction
+    # Before v1.13.4 this transaction overflowed the WAL: logging stopped at 64
+    # pages, page_write modified the rest anyway, and commit reported
+    # PATRA_ERR_FULL — meaning the transaction had been unrollback-able all
+    # along. The dedup list now grows, so a large transaction is fully logged.
     patra_begin(db);
-
-    # Insert many rows to force many page writes
-    # Each STR is 256 bytes, row = 8 + 256*3 = 776 bytes
-    # Page fits ~5 rows (776*5 = 3880 < 4072 available)
-    # 64 pages * 5 rows = 320 rows to fill WAL
-    # We need > 64 unique page writes to trigger overflow
     var i = 0;
     while (i < 400) {
         patra_exec(db, "INSERT INTO wo VALUES (1, 'x', 'y', 'z')");
         i = i + 1;
     }
+    assert_eq(patra_commit(db), PATRA_OK, "large txn commits cleanly");
 
-    # Commit returns PATRA_ERR_FULL to signal WAL overflow
-    var r = patra_commit(db);
-    assert_eq(r, PATRA_ERR_FULL, "commit reports overflow");
-
-    # Data was still committed (just not crash-safe beyond 64 pages)
     var rs = patra_query(db, "SELECT COUNT(*) FROM wo");
-    assert(patra_result_get_int(rs, 0, 0) > 0, "data committed");
+    assert_eq(patra_result_get_int(rs, 0, 0), 400, "all 400 rows committed");
     patra_result_free(rs);
+
+    # And the same size of transaction must roll back COMPLETELY — the old
+    # behaviour restored only the first 64 pages and returned success.
+    patra_begin(db);
+    var j = 0;
+    while (j < 400) {
+        patra_exec(db, "INSERT INTO wo VALUES (2, 'p', 'q', 'r')");
+        j = j + 1;
+    }
+    assert_eq(patra_rollback(db), PATRA_OK, "large txn rolls back cleanly");
+
+    var rs2 = patra_query(db, "SELECT COUNT(*) FROM wo");
+    assert_eq(patra_result_get_int(rs2, 0, 0), 400, "rollback restored every page");
+    patra_result_free(rs2);
 
     patra_close(db);
 }
@@ -5108,6 +5117,60 @@ fn test_txn_holds_lock() {
     cleanup();
 }
 
+# -- v1.13.4: WAL covers the header page (audit 2026-08-18 S1-2) --
+
+fn test_rollback_restores_header() {
+    test_group("rollback restores the header page (S1-2)");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE h (id INT, v INT)");
+    var i = 0;
+    while (i < 20) {
+        patra_exec(db, "INSERT INTO h VALUES (1, 100)");
+        i = i + 1;
+    }
+    var rs0 = patra_query(db, "SELECT COUNT(*) FROM h");
+    assert_eq(patra_result_get_int(rs0, 0, 0), 20, "20 rows seeded");
+    patra_result_free(rs0);
+
+    # DELETE decrements TBL_NROWS in the header, and _db_hdr_commit persists it
+    # even inside a transaction. Before v1.13.4 the header was never WAL-logged,
+    # so wal_rollback restored the data pages while the decremented TBL_NROWS
+    # survived — and patra_rollback then re-read that mutated header from disk.
+    # The table's row count and its actual rows disagreed from then on, which is
+    # also how a SELECT could size its result buffer below the row count.
+    patra_begin(db);
+    patra_exec(db, "DELETE FROM h WHERE id = 1");
+    assert_eq(patra_rollback(db), PATRA_OK, "rollback ok");
+
+    # Assert on TBL_NROWS in the header DIRECTLY. COUNT(*) walks the page chain
+    # and never reads TBL_NROWS, so it cannot see this corruption — an earlier
+    # version of this test passed against the unfixed code for that reason.
+    var hidx = tbl_find(_db_hdr(db), "h", 1);
+    assert(hidx >= 0, "table found");
+    assert_eq(load64(_tbl_entry(_db_hdr(db), hidx) + TBL_NROWS), 20,
+              "header TBL_NROWS restored by rollback");
+
+    var rs = patra_query(db, "SELECT COUNT(*) FROM h");
+    assert_eq(patra_result_get_int(rs, 0, 0), 20, "row count restored by rollback");
+    patra_result_free(rs);
+
+    # The rows must really be there, not just counted — a header saying 20 over
+    # an empty table is the corruption, not the fix.
+    var rs2 = patra_query(db, "SELECT id, v FROM h WHERE id = 1");
+    assert_eq(patra_result_count(rs2), 20, "all 20 rows readable after rollback");
+    patra_result_free(rs2);
+
+    # The handle must still work normally afterwards.
+    assert_eq(patra_exec(db, "INSERT INTO h VALUES (2, 200)"), PATRA_OK, "insert after rollback");
+    var rs3 = patra_query(db, "SELECT COUNT(*) FROM h");
+    assert_eq(patra_result_get_int(rs3, 0, 0), 21, "count correct after rollback + insert");
+    patra_result_free(rs3);
+
+    patra_close(db);
+    cleanup();
+}
+
 fn main() {
     alloc_init();
     fl_init();
@@ -5370,6 +5433,7 @@ fn main() {
     test_update_set_type_mismatch();
     test_update_set_list_bound();
     test_txn_holds_lock();
+    test_rollback_restores_header();
     test_bind_where();
     test_bind_update();
     test_bind_rebind();

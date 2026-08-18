@@ -27,9 +27,9 @@ The three defects a consumer could hit with no attacker and no corruption, each 
 ### ~~1.13.3 — S0 transaction integrity~~ ✅ transaction lock SHIPPED 2026-08-18
 
 - ~~**An explicit transaction releases its exclusive lock after its first statement.**~~ **Shipped v1.13.3** — `_tx_unlock`/`_tx_lock_sh` across 48 sites; regression test probes lock state from a second file description. The 2026-04-21 audit §3.5 action that would have caught this is now annotated closed. `DB_TX` is read only in begin/commit/rollback; every `_exec_*` runs an unconditional `patra_unlock`, and flock is non-counted. Another process can then commit mid-transaction, and a later rollback writes before-images over its committed pages. `_patra_query_exec`'s `patra_lock_sh` additionally *downgrades* EX→SH inside a transaction. ~49 call sites — ships alone. *(audit S0-4, reproduced; originally filed as 2026-04-21 §3.5 and never run)*
-- **STILL OPEN — moves to 1.13.4.** Result buffer sized from `TBL_NROWS`, filled from `DP_NROWS`. Reachable without tampering via `BEGIN; DELETE; ROLLBACK;` because the header survives rollback. *(audit S0-5 — depends on the header fix below, so sequence after it or land together)*
+- **STILL OPEN — moves to 1.13.5.** Result buffer sized from `TBL_NROWS`, filled from `DP_NROWS`. The rollback route into this (header surviving its own rollback) closed in 1.13.4; the malformed-file route is still open. Reachable without tampering via `BEGIN; DELETE; ROLLBACK;` because the header survives rollback. *(audit S0-5 — depends on the header fix below, so sequence after it or land together)*
 
-### 1.13.4 — S1 durability: make the write-ahead log actually write-ahead
+### ~~1.13.4 — S1 durability: make the write-ahead log actually write-ahead~~ ✅ SHIPPED 2026-08-18
 
 These compose; treat as one coherent change with a two-process crash harness.
 
@@ -63,6 +63,7 @@ The audit's central finding is that **all 26 defects live in a fully green tree*
 - **Statement-sequence fuzz target** — the existing harnesses fuzz SQL text and file bytes, never API sequences like `BEGIN; DELETE; ROLLBACK; SELECT`.
 - **A real two-process test harness.** flock is the whole concurrency contract, and every current concurrency test runs threads in one process where the shared fd makes flock a no-op. This is why S0-4 and S1-4 were invisible.
 - **CI invariant assertions**: `VERSION == cyrius.cyml version == CHANGELOG top header == README [deps.patra] tag`, and the actual `cyrius test` count matching what the CHANGELOG entry claims.
+- **WAL dedup scan is O(n) per page, O(n^2) per transaction** (`wal.cyr`). Fine at realistic transaction sizes now that the list grows unbounded, but a consumer running very large transactions would want a hash set. No consumer has hit it.
 - **`dist/*.deps` sidecar check** — regenerate and `git diff --quiet`, so an under-declared sidecar fails the build.
 - **patra CI has no format gate at all.** `.github/workflows/ci.yml` runs lint, build, ELF check, tests, fuzz, bench, integration, security scan and version consistency — but never `cyrfmt`. `src/lib.cyr` has drifted unformatted as a result (pre-existing; confirmed against the committed file during the 1.13.2 cut). Add a **per-file loop**, never `cyrfmt --check src/*.cyr` — cyrfmt reads only `argv[1]` and that form silently passes, which is exactly how libro sat green over five unformatted files. Land the reformat as its own change first, so it cannot be confused with a functional diff.
 

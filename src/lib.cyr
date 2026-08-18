@@ -176,8 +176,19 @@ fn patra_open(path): i64 {
     memcpy(wpath + plen, ".wal", 4);
     store8(wpath + plen + 4, 0);
 
-    # WAL recovery
-    wal_recover(fd, wpath);
+    # WAL recovery — MUST hold the exclusive lock. wal_recover replays
+    # before-images and unlinks the WAL, so running it unlocked while another
+    # process has a transaction in flight undoes that transaction's written
+    # pages and destroys the WAL it would need; its later COMMIT then returns
+    # PATRA_OK with the data gone. Non-blocking on purpose: if the lock is held,
+    # someone else owns the file (and any in-flight WAL), so recovery is neither
+    # needed nor safe here — skip it and let whoever opens next do it. Blocking
+    # instead would self-deadlock a consumer that opens a second handle while
+    # holding a transaction on the first. (audit 2026-08-18 S1-4)
+    if (_pt_flock(fd, LOCK_EX + LOCK_NB) == 0) {
+        wal_recover(fd, wpath);
+        patra_unlock(fd);
+    }
 
     var db = _pt_alloc(DB_SZ);
     var hdr = pg_alloc();
@@ -308,6 +319,12 @@ fn _db_hdr_commit(db, fd, hdr): i64 {
     if (load64(db + DB_LP_GEN) == _cg - 1) {
         store64(db + DB_LP_GEN, _cg);
     }
+    # Inside a transaction the header must be undoable like any other page:
+    # log its before-image before the first mutation of this transaction.
+    # wal_log_page dedups, so this costs one record per transaction.
+    # (audit 2026-08-18 S1-2)
+    var hl = wal_log_hdr();
+    if (hl != PATRA_OK) { return hl; }
     if (load64(db + DB_SYNC_MODE) == PATRA_SYNC_BATCH) {
         var r = patra_hdr_write_nosync(fd, hdr);
         if (r != PATRA_OK) { return r; }
@@ -1212,7 +1229,9 @@ fn patra_commit(db): i64 {
 fn patra_rollback(db): i64 {
     if (load64(db + DB_TX) == 0) { return PATRA_OK; }
     var wpath = load64(db + DB_PATH);
-    wal_rollback(wpath);
+    # A non-OK return means the restore was INCOMPLETE — the caller must be told
+    # rather than left believing the transaction was undone. (audit S1-3)
+    var rbr = wal_rollback(wpath);
     # P2: wal_rollback restores before-images via raw sys_write, bypassing
     # page_write's eviction. The txn's own page_writes already evicted the
     # modified pages, so a flush is belt-and-suspenders — but rollback is rare
@@ -1221,6 +1240,7 @@ fn patra_rollback(db): i64 {
     patra_hdr_read(_db_fd(db), _db_hdr(db));
     patra_unlock(_db_fd(db));
     store64(db + DB_TX, 0);
+    if (rbr != 0) { return rbr; }
     return PATRA_OK;
 }
 

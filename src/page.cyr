@@ -42,7 +42,12 @@ fn page_read_checked(fd, hdr, num, buf): i64 {
 # This is the single invalidation hook (page_alloc / page_free route through it).
 fn page_write(fd, num, buf): i64 {
     _pc_evict(num);
-    wal_log_page(num);
+    # Honour the write-ahead contract: if the before-image could not be made
+    # durable (I/O error, or the transaction exhausted its WAL slots), do NOT
+    # modify the page — a page rollback cannot restore is worse than a lost
+    # write. (audit 2026-08-18 S1-1, S1-3)
+    var wl = wal_log_page(num);
+    if (wl != PATRA_OK) { return wl; }
     if (_pt_seek(fd, page_offset(num)) < 0) { return PATRA_ERR_IO; }
     if (sys_write(fd, buf, PAGE_SIZE) != PAGE_SIZE) { return PATRA_ERR_IO; }
     return PATRA_OK;

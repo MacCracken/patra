@@ -5,6 +5,98 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.4] - 2026-08-18 — the write-ahead log was not write-ahead
+
+**S1 durability batch of the 1.13.x repair arc**
+([audit](docs/audit/2026-08-18/security-review.md) S1-1 … S1-4). Four defects
+that composed into one hole: a log that wasn't ordered ahead of the pages it
+protected, a header page outside the log entirely, a cap that made large
+transactions unrollback-able, and recovery that ran with no lock. 935 tests
+(was 925, +10), 7/7 fuzz, libro 15/15, vidya 19/19, benchmarks unchanged,
+lint 0-warn, vet/deny clean.
+
+### Security
+
+- **Before-images were never synced, so the log did not lead the writes it
+  protected.** `wal_log_page` wrote the record with a plain `sys_write`; the only
+  `fdatasync` of the WAL fd was in `wal_commit`, after the whole transaction.
+  Meanwhile every statement ends in `patra_hdr_write`, which `fdatasync`s the
+  **database** fd — forcing modified pages to stable storage while their
+  before-images sat in the page cache. A crash in that window left modified pages
+  on disk with no recoverable before-image.
+
+  The record is now `fdatasync`ed before `wal_log_page` returns, and
+  `page_write` **refuses to modify a page whose before-image could not be made
+  durable**. Cost is bounded — at most one sync per distinct page per
+  transaction, and only while a transaction is open (`_wal_fd < 0` outside one),
+  which is why the benchmarks are unchanged.
+
+- **The database header was never WAL-logged, so header mutations survived their
+  own rollback.** Pages 1..N route through `page_write` → `wal_log_page`, but the
+  4096-byte header at offset 0 is written directly by `patra_hdr_write`, which
+  every statement reaches via `_db_hdr_commit` — including statements inside a
+  transaction. `wal_rollback` restored page contents and nothing restored the
+  header; `patra_rollback` then re-read that mutated header from disk.
+
+  Concretely: `BEGIN; DELETE …; ROLLBACK;` restored the rows but left
+  `TBL_NROWS` at its decremented value — the table's row count and its actual
+  rows disagreed from then on. That divergence is also the feedstock for the
+  S0-5 result-buffer defect, since `_patra_query_exec` sizes its buffer from
+  `TBL_NROWS` and fills it from `DP_NROWS`.
+
+  The header now gets a WAL record of its own. It is not part of the page
+  numbering — page N lives at `PAGE_SIZE + N*PAGE_SIZE`, so offset 0 has no page
+  number — hence a sentinel key (`WAL_HDR_PAGE = -1`) and `_wal_rec_offset` to
+  map it back. **WAL format v2 → v3**; v2 files contain no header record and
+  replay correctly under v3 logic, so they are still accepted on recovery
+  (`WAL_VER_MIN`). A v3 WAL is refused by an older binary rather than
+  mis-replayed.
+
+- **A transaction touching more than 64 pages was silently unrollback-able.**
+  `wal_log_page` stopped at a fixed `WAL_MAX_PAGES` cap, set a flag, returned
+  success, and let `page_write` modify the page anyway. `patra_commit` reported
+  `PATRA_ERR_FULL`; **`patra_rollback` did not check at all** — it restored the
+  first 64 pages, left the rest modified, and returned success.
+
+  The dedup list now **grows** instead of capping, so the situation does not
+  arise. Refusing the write was tried first and is not viable: callers ignore
+  `page_write`'s return, and a failed `page_alloc` write leaves a garbage page
+  whose `DP_NEXT` sends `tbl_insert`'s tail-walk into an infinite loop — the
+  existing test suite hung on it. `_wal_overflow` now trips only if the growth
+  allocation itself fails, and `wal_rollback` reports it so a partial restore can
+  never be silently reported as success.
+
+- **Recovery ran before any lock was taken.** `patra_open` called `wal_recover`
+  unlocked, so opening a database while another process had a transaction in
+  flight replayed that transaction's before-images and unlinked its WAL — its
+  later `COMMIT` then returned `PATRA_OK` with the data gone and no WAL to
+  recover from. Recovery now runs under `LOCK_EX`, taken **non-blocking**: if the
+  lock is held, another handle owns the file and any in-flight WAL, so recovery
+  is neither needed nor safe there. Blocking would self-deadlock a consumer that
+  opens a second handle while holding a transaction on the first.
+
+- **Replay seeks were unchecked.** `wal_rollback` and `wal_recover` both did
+  `_pt_seek(...)` and then wrote regardless — on a failed seek the restore landed
+  at whatever the current file offset happened to be. Both now stop replay
+  instead.
+
+### Changed
+
+- **`test_wal_overflow` now asserts the opposite of what it used to.** It
+  previously encoded the defect — a 400-row transaction overflowing the WAL and
+  `patra_commit` returning `PATRA_ERR_FULL` — and asserted that as correct. It
+  now asserts that the same transaction commits cleanly **and rolls back
+  completely**, which is what the fix delivers.
+
+### Fixed
+
+- A regression test for the header defect initially passed against the *unfixed*
+  code, and was rewritten. `SELECT COUNT(*)` walks the page chain and never reads
+  `TBL_NROWS`, so it cannot observe the corruption; the test now asserts on
+  `TBL_NROWS` in the header directly, and fails (`got 0, expected 20`) without
+  the fix. Worth recording as a method note: a regression test that has not been
+  watched to fail is not yet evidence of anything.
+
 ## [1.13.3] - 2026-08-18 — an explicit transaction held its lock for exactly one statement
 
 **S0 batch 2 of the 1.13.x repair arc** ([audit](docs/audit/2026-08-18/security-review.md) S0-4).
