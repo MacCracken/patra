@@ -74,6 +74,17 @@ fn tbl_create(fd, hdr, name, nlen, col_names, col_types, ncols, autoinc): i64 {
     if (ncols > MAX_COLS) { return PATRA_ERR_COLCOUNT; }
     if (tbl_find(hdr, name, nlen) >= 0) { return PATRA_ERR_EXISTS; }
 
+    # A row must fit inside ONE data page. MAX_COLS caps the column COUNT, but
+    # that is not the binding constraint: 16 STR columns is a legal count and a
+    # 4096-byte row, which cannot fit the PAGE_SIZE - DP_DATA (4072) data area.
+    # Reject at create time — otherwise tbl_insert's fresh-page branch memcpys
+    # the row past the end of the page buffer. (audit 2026-08-18 S0-1)
+    var rowsz = 0;
+    for (var rc_i = 0; rc_i < ncols; rc_i = rc_i + 1) {
+        rowsz = rowsz + row_col_size(load64(col_types + rc_i * 8));
+    }
+    if (rowsz > PAGE_SIZE - DP_DATA) { return PATRA_ERR_ROWSZ; }
+
     var spg = page_alloc(fd, hdr);
     var sbuf = pg_alloc();
     memset(sbuf, 0, PAGE_SIZE);
@@ -190,6 +201,11 @@ fn tbl_drop(fd, hdr, idx): i64 {
 # Insert a row into table. `lpc` -> the handle's 3-word tail-page cache
 # (idx, page, gen); see the note at the top of this file.
 fn tbl_insert(fd, hdr, idx, row_data, row_sz, lpc): i64 {
+    # Defence in depth: tbl_create rejects a schema whose row cannot fit a page,
+    # but a row wider than the data area would silently overflow the fresh-page
+    # memcpy below, so refuse it here too rather than trusting the schema on
+    # disk. (audit 2026-08-18 S0-1)
+    if (row_sz > PAGE_SIZE - DP_DATA) { return PATRA_ERR_ROWSZ; }
     var entry = _tbl_entry(hdr, idx);
     var buf = pg_alloc();
 
@@ -303,6 +319,33 @@ fn tbl_update(fd, hdr, idx, row_sz, schema, ncols, pr): i64 {
     var buf = pg_alloc();
     var nsets = load64(pr + PR_COUNT);
     _tbl_rows_affected = 0;
+
+    # Validate every SET value's type against its column BEFORE touching a row.
+    # Done up-front, not mid-loop, so a bad statement cannot leave a partial
+    # update behind. Without this a STR value assigned to an INT column falls
+    # through to row_write_str, whose unconditional
+    # memset(row + off, 0, COL_STR_SZ) writes 256 bytes at an 8-byte offset —
+    # destroying every following column — and still returns PATRA_OK.
+    # (audit 2026-08-18 S0-2)
+    for (var vs = 0; vs < nsets; vs = vs + 1) {
+        var vset = pr + PR_ITEMS + vs * SET_SZ;
+        var vci = _wh_resolve_col(schema, ncols,
+        load64(vset + SET_CPTR), load64(vset + SET_CLEN));
+        if (vci < 0) { pg_free(buf); return PATRA_ERR_NOTFOUND; }
+        var vct = load64(schema + SCH_START + vci * SCH_ENTRY_SZ + SCH_CTYPE);
+        var vvt = load64(vset + SET_VTYPE);
+        # BYTES is programmatic-only; TEXT takes string literals only.
+        if (vct == COL_BYTES) { pg_free(buf); return PATRA_ERR_TYPE; }
+        if (vct == COL_TEXT) {
+            if (vvt != COL_STR) { pg_free(buf); return PATRA_ERR_TYPE; }
+        }
+        if (vct == COL_INT) {
+            if (vvt != COL_INT) { pg_free(buf); return PATRA_ERR_TYPE; }
+        }
+        if (vct == COL_STR) {
+            if (vvt != COL_STR) { pg_free(buf); return PATRA_ERR_TYPE; }
+        }
+    }
 
     # Check if indexed column is being updated
     var uic = load64(schema + SCH_IDX_COL);

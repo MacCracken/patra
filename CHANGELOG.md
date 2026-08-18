@@ -5,6 +5,105 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.2] - 2026-08-18 — three ways ordinary SQL corrupted memory, all reporting success
+
+**S0 batch of the 1.13.x repair arc** ([audit](docs/audit/2026-08-18/security-review.md)).
+Each of these was reachable through the public API with plain SQL on a healthy
+database — no attacker, no corruption, no tampering — and **each returned
+`PATRA_OK` while doing it.** All three were reproduced with standalone programs
+before being fixed, and each ships with a regression test that fails without its
+fix. 915 tests (was 893, +22), 7/7 fuzz, libro 15/15, vidya 19/19, benchmarks
+within noise, lint 0-warn, vet/deny clean.
+
+### Security
+
+- **A row wider than a page overflowed the page buffer on its first insert.**
+  `tbl_create` validated the column *count* against `MAX_COLS` (32) but never the
+  resulting **row size**. With `COL_STR_SZ = 256` and a `PAGE_SIZE - DP_DATA`
+  (4072-byte) data area, **16 STR columns is a legal column count and an
+  impossible 4096-byte row**. `tbl_insert`'s append path is guarded, but when
+  that guard fails control falls through to the *fresh-page* branch, which was
+  not — `memcpy(buf + DP_DATA, row_data, 4096)` wrote 24 bytes past a 4096-byte
+  page slab. Measured before the fix: `CREATE` returned `0` and the first
+  `INSERT` returned `0`.
+
+  Now rejected at `tbl_create` with `PATRA_ERR_ROWSZ` (an error code that had
+  been declared since the beginning and never used), with the same bound
+  repeated in `tbl_insert` as defence in depth rather than trusting the
+  on-disk schema. A 15-column (3840-byte) table is unaffected.
+
+- **Assigning a string to an INT column wrote 256 bytes into an 8-byte slot.**
+  `tbl_update` guarded `COL_BYTES` and `COL_TEXT` but never checked a `COL_STR`
+  value against a `COL_STR` *column*, so the dispatch chain's final `else` fell
+  through to `row_write_str`, whose unconditional
+  `memset(row + off, 0, COL_STR_SZ)` obliterated every column after the target.
+  Measured on `(id INT, age INT, tag STR)` holding `(7, 42, 'keepme')`:
+  `UPDATE t SET age = 'oops'` returned `0`, set `age` to `1936748399` — the
+  ASCII bytes of `"oops"` — and destroyed `tag`. **A plain typo in consumer SQL.**
+
+  SET value types are now validated against their columns and mismatches return
+  `PATRA_ERR_TYPE`. The validation runs **up-front, before any row is touched**,
+  so a bad pair anywhere in the SET list rejects the whole statement instead of
+  leaving a partial update behind.
+
+- **`UPDATE` accepted an unbounded SET list and overran the parse buffer.**
+  `_parse_update` was the only parser without the bound its four siblings have
+  (`_parse_create`, column-list `INSERT`, `INSERT … VALUES`, and the `SELECT`
+  projection all cap and return `PATRA_ERR_COLCOUNT`). The `PR_ITEMS` region
+  spans offsets 72–800, so it holds **15** 48-byte entries: entry 16 overran into
+  the ORDER BY region and entry 20 landed at offset 1032 — **inside WHERE
+  condition 0**, which `_parse_where` then overwrote, because it runs after the
+  SET loop. The regression test demonstrates the consequence directly: before the
+  fix, a row that a rejected `UPDATE` should not have touched could no longer be
+  found by the following `SELECT`.
+
+  Now capped at `MAX_SET_ITEMS = 15`. **Note this is deliberately not
+  `MAX_COLS`** — 32 entries reach offset 1608, still past `PR_WHERE` (1024). The
+  bound is the region's capacity, derived in a comment beside the layout enum so
+  it cannot drift.
+
+### Fixed
+
+- `CHANGELOG` `[1.13.1]` claimed **894 tests** where the suite reported 893, and
+  claimed "all ten `dist/` bundles regenerated" — `dist/` holds two files, one of
+  which is a bundle. Its date now matches its own git tag (2026-08-17).
+- **`dist/patra.deps` under-declared its dependencies.** It shipped 11 stdlib
+  leaves against the 12 named in `[deps].stdlib`, omitting `sakshi` — while
+  `dist/patra.cyr` calls `sakshi_error` and `sakshi_set_level` and defines
+  neither, so a clean-room consumer resolving from the sidecar was short a leaf.
+
+  Root cause is upstream, in `cyrius distlib`: `_distlib_named_deps`
+  (`cbt/commands.cyr:2486`) scans the manifest for the literal `[deps.`
+  **unanchored**, so it matches inside `#` comment prose and adds that name to
+  the "this is a fold, not a stdlib leaf" exclude set. This file's own comments
+  discussing that block are what deleted the leaf. Its neighbour
+  `_distlib_enum_profiles` (`:2364`) is line-anchored on purpose and its comment
+  already warned that this one is not.
+
+  Worked around by backticking the prose (11 → 12 leaves, `dist/patra.cyr`
+  byte-identical). The parser fix belongs upstream and is filed on the roadmap.
+  The sidecar had been short since at least 1.12.11, unchanged across the
+  `deps.sakshi` removal boundary — which is the proof the removal never caused it.
+
+### Documentation
+
+- **`docs/audit/2026-08-18/security-review.md`** — full 16-dimension audit of
+  1.13.1. **26 distinct defects in a tree where every gate passes**; that is the
+  report's central finding. It also records why the gates missed them: the
+  fuzzers drive SQL text and file bytes but never *API sequences*, nothing tests
+  a schema the DDL accepts but storage cannot hold, and every concurrency test
+  runs threads in one process — where a shared fd makes `flock` a no-op.
+- **`docs/development/roadmap.md`** rewritten around the 1.13.2–1.13.8 repair
+  arc, and cleaned of stale items. Notably **"drop the statement mutex on the
+  read path" had been listed as deferred for thirteen releases after shipping in
+  v1.12.0** — `lib.cyr:1358` and `:2027` state the shipped behaviour 1,260 lines
+  from `lib.cyr:97`, which still claimed the opposite.
+- **ADR-0001 re-verified under cyrius 6.5.27** (three pin bumps overdue, per its
+  own standing commitment): builds are size-identical at 290,376 bytes but no
+  longer byte-identical — 79,391 differing bytes, matching the compiler's own
+  "79,449 bytes NOPed" note. DCE genuinely NOP-fills and still does not strip, so
+  the size-regression conclusion stands and the ADR is **not** superseded.
+
 ## [1.13.1] - 2026-08-17 — every query allocated a result buffer sized for the whole table
 
 **41× faster indexed lookups on a 32 MB database, and the curve is now flat.**

@@ -131,6 +131,12 @@ enum SetOff {
     SET_SPTR = 32;
     SET_SLEN = 40;
     SET_SZ = 48;
+    # UPDATE SET entries live in the PR_ITEMS region, which ends where the
+    # ORDER BY region begins: (PR_ORDERBY_COLS - PR_ITEMS) / SET_SZ
+    # = (800 - 72) / 48 = 15. NOT MAX_COLS — 32 entries reach offset 1608,
+    # past PR_WHERE (1024), and would corrupt WHERE condition 0.
+    # (audit 2026-08-18 S0-3)
+    MAX_SET_ITEMS = 15;
 }
 
 # WHERE condition: 56 bytes
@@ -850,6 +856,7 @@ fn _parse_update(): i64 {
         if (stt == SQLT_SEMI)  { sdone = 1; continue; }
 
         if (stt != SQLT_IDENT) { return PATRA_ERR_SYNTAX; }
+        if (nsets >= MAX_SET_ITEMS) { return PATRA_ERR_COLCOUNT; }
         var item = _spr() + PR_ITEMS + nsets * SET_SZ;
         store64(item + SET_CPTR, _tok_ptr(pos));
         store64(item + SET_CLEN, _tok_len(pos));

@@ -1,4 +1,4 @@
-# Patra Security & Correctness Audit — 2026-08-17
+# Patra Security & Correctness Audit — 2026-08-18
 
 > **Scope**: full source audit of patra **v1.13.1** (6,086 lines across 12 modules)
 > across 16 dimensions, with adversarial verification of every finding.

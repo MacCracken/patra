@@ -4943,6 +4943,111 @@ fn test_cache_coherence() {
     patra_cache_enable(0);
 }
 
+# -- v1.13.2: row geometry (audit 2026-08-18 S0-1) ------------
+
+fn test_row_exceeds_page() {
+    test_group("row wider than a page is rejected (S0-1)");
+    cleanup();
+    var db = patra_open(_tpath);
+
+    # 15 STR columns = 3840 bytes, fits the 4072-byte data area.
+    assert_eq(patra_exec(db, "CREATE TABLE ok15 (a STR, b STR, c STR, d STR, e STR, f STR, g STR, h STR, i STR, j STR, k STR, l STR, m STR, n STR, o STR)"),
+              PATRA_OK, "15 STR cols create ok");
+    assert_eq(patra_exec(db, "INSERT INTO ok15 VALUES ('1','2','3','4','5','6','7','8','9','10','11','12','13','14','15')"),
+              PATRA_OK, "15 STR cols insert ok");
+
+    # 16 STR columns = 4096 bytes > PAGE_SIZE - DP_DATA (4072). A legal column
+    # COUNT (<= MAX_COLS) but an impossible row. Before the fix this created
+    # fine and the first INSERT memcpy'd 24 bytes past the page buffer.
+    assert_eq(patra_exec(db, "CREATE TABLE bad16 (a STR, b STR, c STR, d STR, e STR, f STR, g STR, h STR, i STR, j STR, k STR, l STR, m STR, n STR, o STR, p STR)"),
+              PATRA_ERR_ROWSZ, "16 STR cols create rejected");
+    # ... and the table must not exist.
+    assert_eq(patra_exec(db, "INSERT INTO bad16 VALUES ('1','2','3','4','5','6','7','8','9','10','11','12','13','14','15','16')"),
+              PATRA_ERR_NOTFOUND, "rejected table was not created");
+
+    # Boundary: 15 STR + 4 INT = 3840 + 32 = 3872, still fits.
+    assert_eq(patra_exec(db, "CREATE TABLE edge (a STR, b STR, c STR, d STR, e STR, f STR, g STR, h STR, i STR, j STR, k STR, l STR, m STR, n STR, o STR, w INT, x INT, y INT, z INT)"),
+              PATRA_OK, "3872-byte row fits");
+
+    patra_close(db);
+    cleanup();
+}
+
+# -- v1.13.2: SET type checking (audit 2026-08-18 S0-2) ------
+
+fn test_update_set_type_mismatch() {
+    test_group("UPDATE SET type mismatch is rejected (S0-2)");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (id INT, age INT, tag STR)");
+    assert_eq(patra_exec(db, "INSERT INTO t VALUES (7, 42, 'keepme')"), PATRA_OK, "seed row");
+
+    # STR value into an INT column: previously returned PATRA_OK while
+    # row_write_str memset 256 bytes at the 8-byte INT offset, wrecking `tag`.
+    assert_eq(patra_exec(db, "UPDATE t SET age = 'oops' WHERE id = 7"),
+              PATRA_ERR_TYPE, "STR into INT rejected");
+    # INT value into a STR column is equally wrong.
+    assert_eq(patra_exec(db, "UPDATE t SET tag = 123 WHERE id = 7"),
+              PATRA_ERR_TYPE, "INT into STR rejected");
+
+    # Neither rejected statement may have modified anything.
+    var rs = patra_query(db, "SELECT id, age, tag FROM t WHERE id = 7");
+    assert_eq(patra_result_count(rs), 1, "row still there");
+    assert_eq(patra_result_get_int(rs, 0, 1), 42, "age untouched");
+    assert_streq(patra_result_get_str(rs, 0, 2), "keepme", "tag not clobbered");
+    patra_result_free(rs);
+
+    # Correctly-typed updates still work.
+    assert_eq(patra_exec(db, "UPDATE t SET age = 43, tag = 'fine' WHERE id = 7"),
+              PATRA_OK, "matching types ok");
+    var rs2 = patra_query(db, "SELECT id, age, tag FROM t WHERE id = 7");
+    assert_eq(patra_result_get_int(rs2, 0, 1), 43, "age updated");
+    assert_streq(patra_result_get_str(rs2, 0, 2), "fine", "tag updated");
+    patra_result_free(rs2);
+
+    # A mismatch anywhere in the SET list rejects the WHOLE statement — the
+    # validation runs before any row is touched, so no partial update.
+    assert_eq(patra_exec(db, "UPDATE t SET age = 99, tag = 77 WHERE id = 7"),
+              PATRA_ERR_TYPE, "bad pair rejects whole statement");
+    var rs3 = patra_query(db, "SELECT age FROM t WHERE id = 7");
+    assert_eq(patra_result_get_int(rs3, 0, 0), 43, "no partial update");
+    patra_result_free(rs3);
+
+    patra_close(db);
+    cleanup();
+}
+
+# -- v1.13.2: UPDATE SET list bound (audit 2026-08-18 S0-3) --
+
+fn test_update_set_list_bound() {
+    test_group("UPDATE SET list is bounded to its region (S0-3)");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (c0 INT, c1 INT, c2 INT, c3 INT, c4 INT, c5 INT, c6 INT, c7 INT, c8 INT, c9 INT, c10 INT, c11 INT, c12 INT, c13 INT, c14 INT, c15 INT, c16 INT)");
+    assert_eq(patra_exec(db, "INSERT INTO t VALUES (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)"), PATRA_OK, "seed row");
+
+    # 15 SET pairs is exactly the PR_ITEMS region capacity — must still work.
+    assert_eq(patra_exec(db, "UPDATE t SET c0=100, c1=101, c2=102, c3=103, c4=104, c5=105, c6=106, c7=107, c8=108, c9=109, c10=110, c11=111, c12=112, c13=113, c14=114 WHERE c0 = 0"),
+              PATRA_OK, "15 SET pairs ok (region capacity)");
+    var rs = patra_query(db, "SELECT c0, c14 FROM t WHERE c0 = 100");
+    assert_eq(patra_result_count(rs), 1, "15-pair update applied");
+    assert_eq(patra_result_get_int(rs, 0, 1), 114, "last of 15 applied");
+    patra_result_free(rs);
+
+    # 16 overruns PR_ITEMS into the ORDER BY region; 20+ reaches PR_WHERE and
+    # corrupts WHERE condition 0. Reject at the boundary instead.
+    assert_eq(patra_exec(db, "UPDATE t SET c0=200, c1=201, c2=202, c3=203, c4=204, c5=205, c6=206, c7=207, c8=208, c9=209, c10=210, c11=211, c12=212, c13=213, c14=214, c15=215 WHERE c0 = 100"),
+              PATRA_ERR_COLCOUNT, "16 SET pairs rejected");
+
+    # The rejected statement must not have touched anything.
+    var rs2 = patra_query(db, "SELECT c0 FROM t WHERE c0 = 100");
+    assert_eq(patra_result_count(rs2), 1, "row untouched by rejected UPDATE");
+    patra_result_free(rs2);
+
+    patra_close(db);
+    cleanup();
+}
+
 fn main() {
     alloc_init();
     fl_init();
@@ -5201,6 +5306,9 @@ fn main() {
     test_bind_insert();
     test_bind_text_quotes();
     test_exec_quote_escaping();
+    test_row_exceeds_page();
+    test_update_set_type_mismatch();
+    test_update_set_list_bound();
     test_bind_where();
     test_bind_update();
     test_bind_rebind();

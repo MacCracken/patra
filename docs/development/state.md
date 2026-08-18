@@ -9,20 +9,23 @@
 
 ## Current
 
-> **v1.13.1 (2026-08-18)** — **every query allocated a result buffer sized for the
-> WHOLE TABLE.** `_patra_query_exec` used `nrows * rsz` — allocated *and* memset —
-> on every query, including a single-row indexed equality hit, making lookups
-> O(table rows). Phase-profiling settled it: on a 4,000-row / 32 MB table the
-> B-tree lookup cost **14.8 µs** while the buffer cost **1,902 µs** — 128× more
-> than the lookup it served (~19 MB allocated and zeroed to return one row).
-> The index planning moved into `_idx_plan`, which runs before the allocation and
-> reports the ref count, so the buffer is sized by the actual result and the
-> B-tree is descended once. **41× faster at 32 MB (1,989,206 → 47,977 ns) and the
-> curve is now FLAT** across 1.2 / 4.8 / 32 MB. Scan-path queries unchanged (no
-> index means the worst case really is every row). Filed by sit. 894 tests / 7
-> fuzz harnesses green.
+> **v1.13.2 (2026-08-18)** — **three ways ordinary SQL corrupted memory, every
+> one of them returning `PATRA_OK`.** The S0 batch of the 1.13.x repair arc,
+> opened by a 16-dimension audit that found **26 distinct defects in a tree where
+> every gate passes** ([report](../audit/2026-08-18/security-review.md)).
+> (1) `tbl_create` capped column *count* but not row *size*, so 16 STR columns —
+> a legal count, a 4096-byte row against a 4072-byte data area — overflowed the
+> page buffer by 24 bytes on the first insert. (2) `tbl_update` never type-checked
+> a SET value against its column, so `UPDATE t SET age = 'oops'` on an INT column
+> memset 256 bytes at an 8-byte offset and destroyed every following column.
+> (3) `_parse_update` was the only parser without a SET-list bound; entry 20 landed
+> inside WHERE condition 0, which `_parse_where` then overwrote. All three
+> reproduced before fixing; each ships a test that fails without its fix. Also
+> fixed `dist/patra.deps`, which under-declared `sakshi` (11 leaves against 12)
+> because `cyrius distlib` scans for `[deps.` unanchored and matched this repo's
+> own comment prose. **915 tests / 7 fuzz green.**
 
-- **Version**: 1.13.1 (read `VERSION` for the authoritative number)
+- **Version**: 1.13.2 (read `VERSION` for the authoritative number)
 - **Cyrius toolchain**: 6.5.27 (pinned in `cyrius.cyml [package].cyrius`; 6.5.19 → 6.5.27 at v1.13.1, source-change-free).
   Progression: 6.1.15 (v1.11.0) → 6.2.1 (v1.11.1, stdlib
   pin sweep) → 6.2.19 (v1.11.3) → 6.2.21 (v1.11.5) → 6.2.22 (v1.12.0) →
@@ -53,7 +56,7 @@
   ⚠ **Do not re-add it**, and do not repeat the v1.12.11 reasoning that deferred
   a bump as "additive only, no consumer need" — for a folded module that test is
   wrong, because the pin *overrides* what consumers resolve.
-- **Binary**: ~274 KB demo (`programs/demo.cyr`, x86_64; **273,752 bytes** at
+- **Binary**: ~290 KB demo (`programs/demo.cyr`, x86_64; **290,392 bytes** at
   v1.12.11 under 6.4.64 — **−8,488** vs v1.12.7's 282,240 under 6.3.5, entirely
   cyrius codegen improvement across the 6.3.5 → 6.4.64 span, zero patra source
   changed). Prior: 282,240 at
@@ -151,7 +154,7 @@
 
 ## Tests / Fuzz / Bench
 
-- **Unit**: `tests/tcyr/patra.tcyr` — **893 / 893** assertions pass under
+- **Unit**: `tests/tcyr/patra.tcyr` — **915 / 915** assertions pass under
   cyrius 6.4.64 (re-run at the v1.12.11 pin bump) (+8 at v1.12.10: the `exec '' escaping` group — a `''` value
   round-trips through STR + TEXT columns via `patra_exec`, a `''` WHERE literal
   matches, and `patra_quote_str` doubles quotes; +6 at v1.12.8: the `text readback snapshot (flock-window fix)`
@@ -269,6 +272,7 @@ payload at `BY_DATA_MAX = 4072`.
 | Version | Date | Summary |
 |---------|------|---------|
 | 1.13.0 | 2026-08-12 | **Zero `[deps.*]` blocks — `[deps.sakshi]` (2.4.2) removed and moved to `[deps].stdlib` (folded 2.4.10); cyrius `6.4.65` → `6.5.19`.** The old pin was actively downgrading consumers: patra is itself folded into the stdlib, and `cyrius deps` overlays a git dep on top of the snapshot on *every build*, so a folded module was forcing an eight-releases-stale sakshi onto anything reaching it transitively (`agnosai -> bote -> libro -> patra -> sakshi 2.4.2`). agnosai carried a defensive counter-pin for several releases because of it; bote still does until this is folded into a cyrius release. Nine-minor toolchain jump needed no source changes to build or pass. `src/lib.cyr` + `src/wal.cyr` reformatted for the 6.5.19 formatter (pre-existing drift) — the `wal.cyr` hunk indents `#ifdef`/`#else`/`#endif`, **probed first** since a column-sensitive preprocessor would silently pick the wrong branch in `_wal_gen_salts`'s getrandom/agnos selection, which no Linux test run would catch; both forms take the same branch. Gates: **893 tests**, **7/7 fuzz**, benchmarks clean, fmt+lint 0-warn across 15 files, vet/deny clean, `lib/` diffs clean against the 6.5.19 snapshot after sync *and* after build. `dist/patra.cyr` regenerated at 6081 lines (v1.13.0). |
+| 1.13.2 | 2026-08-18 | **S0 batch of the 1.13.x repair arc — three memory-safety defects reachable from plain SQL, all returning `PATRA_OK`.** Row-geometry guard at `tbl_create` (`PATRA_ERR_ROWSZ`, a code declared since the beginning and never used) closing a 24-byte page-buffer overflow on any table whose row exceeds `PAGE_SIZE - DP_DATA`; up-front SET type validation in `tbl_update` closing a 256-byte write at an 8-byte INT offset (validated before any row is touched, so no partial update); and `MAX_SET_ITEMS = 15` on `_parse_update`'s SET list — **deliberately not `MAX_COLS`**, since 32 entries still overrun `PR_WHERE`. All three reproduced with standalone programs before fixing; each has a regression test verified to fail without its fix. Also: `dist/patra.deps` restored to 12 leaves (`sakshi` had been missing since ≥1.12.11 — root cause is `cyrius distlib`'s unanchored `[deps.` scan matching comment prose, filed upstream; bundle byte-identical), CHANGELOG [1.13.1]'s 894→893 test count and "ten dist/ bundles" corrected, roadmap rewritten around the repair arc, ADR-0001 re-verified under 6.5.27. Gates: **915 tests** (+22), **7/7 fuzz**, libro 15/15, vidya 19/19, benchmarks within noise, lint 0-warn, vet/deny clean, clean-tree DCE build. Binary 290,376 → **290,392 bytes** (+16, the guards). `dist/patra.cyr` at 6124 lines. |
 | 1.12.11 | 2026-07-16 | **Toolchain-pin patch — cyrius `6.3.5` → `6.4.64` (first 6.4.x; latest released, verified published with tarball assets).** Source-change-free (the `dist/patra.cyr` diff is the one-line version header); `cyrius.lock` re-resolved under the new pin (105 → 106 deps). Binary 282,240 → **273,752 bytes** (−8,488 — entirely cyrius codegen improvement across the 6.3.5 → 6.4.64 span, zero patra source changed). Also flushed audit-found doc-sync debt (two passes — an adversarial diff review caught a second stratum the first pass missed): README `[deps.patra]` example tag (sat at 1.12.7 through three cuts — a repeat of the 1.12.2–1.12.5 miss), doc-health.md ledger (stale at v1.12.6), requests/README.md open-list (argonaut P1 archived but still listed), this file's Status line (stale at v1.12.7) plus its interior current-claims (Tests/cross-build pins, sakshi dep row, source line counts, consumers table missing argonaut), the v1.12.8 snapshot-fix ripple (README / roadmap / arch notes 002–003 / this file's thread-safety contract still described the closed lazy-readback TOCTOU as live), and ADR-0001's missing 6.4.64 annotation. sakshi stays 2.4.2 (2.4.6 upstream is additive; deferred, no consumer need). Gates: **893 tests**, **7 fuzz**, **40 benchmarks** (no regression — `insert_1k` 21.6 µs vs 22.3 at v1.12.7, `read_scan_4t_par` 135.1 µs vs 139, `dedup_insert_row_or_ignore_500` 9.7 µs vs ~10 at v1.12.6), libro 15/15, vidya 19/19, lint 0-warn (src + dist), aarch64 + agnos cross-builds clean, clean-tree `CYRIUS_DCE=1` build. `dist/patra.cyr` at 6083 lines. |
 | 1.12.10 | 2026-07-13 | **A single quote in a consumer-built `INSERT`/`WHERE` value no longer corrupts or drops the row — the SQL tokenizer now implements standard `''` escaping, plus a new `patra_quote_str` helper (argonaut/libro, P1).** libro's `patrastore_append` builds each audit row by raw string interpolation; a `'` in a service/action/detail field made the `INSERT` malformed → `PATRA_ERR_SYNTAX` → the record was silently dropped, diverging the on-disk audit chain from the in-memory one (third consumer to hit this wall). Fix: the tokenizer (`src/sql.cyr`) treats a doubled `''` as one escaped quote, spans the whole literal, and collapses `''`→`'` **in place** (only trails after the first escape → no-`''` literals stay zero-copy); `patra_exec`/`patra_query` copy the SQL first when a `''` is present (via a linear `_sql_has_dq` scan) so the caller's buffer is never mutated (prepare already owns its copy). New `patra_quote_str(dst, src, srclen)` doubles quotes for string-building consumers; binds (`patra_bind_text`) are unaffected — they never pass through the SQL string. `INSERT`, `UPDATE … SET`, and `WHERE` literals all benefit. Gates: **893 tests** (+8, `test_exec_quote_escaping`), 7 fuzz (incl. the SQL parser fuzzer), libro 15/15, vidya 19/19. `dist/patra.cyr` at 6083 lines. Toolchain pin unchanged (6.3.5). Resolves + archives `requests/2026-07-13-argonaut-audit-insert-value-escaping.md`. |
 | 1.12.9 | 2026-07-06 | **`.patra` file opens now work on agnos (and any non-Linux target) — routed through the stdlib `file_open` ABI bridge instead of raw `sys_open` (owl).** owl's sit-backed VCS change-marker gutter failed on the agnos kernel with `patra: cannot open or create file`, reading every line as "added" because the object store never opened. |
