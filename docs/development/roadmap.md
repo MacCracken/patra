@@ -24,10 +24,10 @@ The three defects a consumer could hit with no attacker and no corruption, each 
 - **String assigned to an INT column writes 256 bytes into an 8-byte slot.** `tbl_update` (`table.cyr:371`) never type-checks SET value against column. `UPDATE t SET age = 'oops'` returns 0 and destroys every following column. *(audit S0-2, reproduced)*
 - **`UPDATE` SET list has no cap.** `_parse_update` (`sql.cyr:853`) is the only parser missing the bound its four siblings have. Entry 16 overruns into ORDER BY, entry 20 into WHERE condition 0. Cap at the region capacity **15**, not `MAX_COLS` — 32 entries still overrun. *(audit S0-3, reproduced)*
 
-### 1.13.3 — S0 transaction integrity
+### ~~1.13.3 — S0 transaction integrity~~ ✅ transaction lock SHIPPED 2026-08-18
 
-- **An explicit transaction releases its exclusive lock after its first statement.** `DB_TX` is read only in begin/commit/rollback; every `_exec_*` runs an unconditional `patra_unlock`, and flock is non-counted. Another process can then commit mid-transaction, and a later rollback writes before-images over its committed pages. `_patra_query_exec`'s `patra_lock_sh` additionally *downgrades* EX→SH inside a transaction. ~49 call sites — ships alone. *(audit S0-4, reproduced; originally filed as 2026-04-21 §3.5 and never run)*
-- **Result buffer sized from `TBL_NROWS`, filled from `DP_NROWS`.** Reachable without tampering via `BEGIN; DELETE; ROLLBACK;` because the header survives rollback. *(audit S0-5 — depends on the header fix below, so sequence after it or land together)*
+- ~~**An explicit transaction releases its exclusive lock after its first statement.**~~ **Shipped v1.13.3** — `_tx_unlock`/`_tx_lock_sh` across 48 sites; regression test probes lock state from a second file description. The 2026-04-21 audit §3.5 action that would have caught this is now annotated closed. `DB_TX` is read only in begin/commit/rollback; every `_exec_*` runs an unconditional `patra_unlock`, and flock is non-counted. Another process can then commit mid-transaction, and a later rollback writes before-images over its committed pages. `_patra_query_exec`'s `patra_lock_sh` additionally *downgrades* EX→SH inside a transaction. ~49 call sites — ships alone. *(audit S0-4, reproduced; originally filed as 2026-04-21 §3.5 and never run)*
+- **STILL OPEN — moves to 1.13.4.** Result buffer sized from `TBL_NROWS`, filled from `DP_NROWS`. Reachable without tampering via `BEGIN; DELETE; ROLLBACK;` because the header survives rollback. *(audit S0-5 — depends on the header fix below, so sequence after it or land together)*
 
 ### 1.13.4 — S1 durability: make the write-ahead log actually write-ahead
 

@@ -348,7 +348,7 @@ fn _exec_create(db): i64 {
     _pt_free(types);
 
     if (r == PATRA_OK) { _db_hdr_commit(db, fd, hdr); }
-    patra_unlock(fd);
+    _tx_unlock(db, fd);
     return r;
 }
 
@@ -388,7 +388,7 @@ fn _exec_insert(db): i64 {
     var tnlen = load64(_spr() + PR_TNLEN);
     var idx = tbl_find(hdr, tname, tnlen);
     if (idx < 0) {
-        patra_unlock(fd);
+        _tx_unlock(db, fd);
         return PATRA_ERR_NOTFOUND;
     }
 
@@ -408,13 +408,13 @@ fn _exec_insert(db): i64 {
     if (ins_nc == 0) {
         if (nvals != ncols) {
             pg_free(schema);
-            patra_unlock(fd);
+            _tx_unlock(db, fd);
             return PATRA_ERR_COLCOUNT;
         }
     } else {
         if (nvals != ins_nc) {
             pg_free(schema);
-            patra_unlock(fd);
+            _tx_unlock(db, fd);
             return PATRA_ERR_COLCOUNT;
         }
     }
@@ -436,7 +436,7 @@ fn _exec_insert(db): i64 {
             if (ci < 0) {
                 _pt_free(row);
                 pg_free(schema);
-                patra_unlock(fd);
+                _tx_unlock(db, fd);
                 return PATRA_ERR_NOTFOUND;
             }
         }
@@ -447,7 +447,7 @@ fn _exec_insert(db): i64 {
             if (ctype != COL_INT) {
                 _pt_free(row);
                 pg_free(schema);
-                patra_unlock(fd);
+                _tx_unlock(db, fd);
                 return PATRA_ERR_TYPE;
             }
             row_write_int(row, off, load64(item + IR_IVAL));
@@ -464,7 +464,7 @@ fn _exec_insert(db): i64 {
             } else {
                 _pt_free(row);
                 pg_free(schema);
-                patra_unlock(fd);
+                _tx_unlock(db, fd);
                 return PATRA_ERR_TYPE;
             }
         }
@@ -542,7 +542,7 @@ fn _exec_insert(db): i64 {
                         _pt_free(row);
                         pg_free(schema);
                         store64(db + DB_ROWS_AFFECTED, 0);
-                        patra_unlock(fd);
+                        _tx_unlock(db, fd);
                         return PATRA_OK;
                     }
                 }
@@ -576,7 +576,7 @@ fn _exec_insert(db): i64 {
     pg_free(schema);
 
     if (r == PATRA_OK) { _db_hdr_commit(db, fd, hdr); }
-    patra_unlock(fd);
+    _tx_unlock(db, fd);
     return r;
 }
 
@@ -593,7 +593,7 @@ fn _exec_update(db): i64 {
     var tnlen = load64(_spr() + PR_TNLEN);
     var idx = tbl_find(hdr, tname, tnlen);
     if (idx < 0) {
-        patra_unlock(fd);
+        _tx_unlock(db, fd);
         return PATRA_ERR_NOTFOUND;
     }
 
@@ -613,7 +613,7 @@ fn _exec_update(db): i64 {
         _db_hdr_commit(db, fd, hdr);
     }
     pg_free(schema);
-    patra_unlock(fd);
+    _tx_unlock(db, fd);
     return r;
 }
 
@@ -630,7 +630,7 @@ fn _exec_delete(db): i64 {
     var tnlen = load64(_spr() + PR_TNLEN);
     var idx = tbl_find(hdr, tname, tnlen);
     if (idx < 0) {
-        patra_unlock(fd);
+        _tx_unlock(db, fd);
         return PATRA_ERR_NOTFOUND;
     }
 
@@ -648,7 +648,7 @@ fn _exec_delete(db): i64 {
     # DELETE compacts/frees data pages, so the cached tail page may be gone.
     store64(db + DB_LP_IDX, 0 - 1);
     _db_hdr_commit(db, fd, hdr);
-    patra_unlock(fd);
+    _tx_unlock(db, fd);
     return r;
 }
 
@@ -665,7 +665,7 @@ fn _exec_drop(db): i64 {
     var tnlen = load64(_spr() + PR_TNLEN);
     var idx = tbl_find(hdr, tname, tnlen);
     if (idx < 0) {
-        patra_unlock(fd);
+        _tx_unlock(db, fd);
         return PATRA_ERR_NOTFOUND;
     }
 
@@ -674,7 +674,7 @@ fn _exec_drop(db): i64 {
     # (idx, page) is stale.
     store64(db + DB_LP_IDX, 0 - 1);
     if (r == PATRA_OK) { _db_hdr_commit(db, fd, hdr); }
-    patra_unlock(fd);
+    _tx_unlock(db, fd);
     return r;
 }
 
@@ -691,7 +691,7 @@ fn _exec_alter_rename_tbl(db): i64 {
     var tname = load64(_spr() + PR_TNAME);
     var tnlen = load64(_spr() + PR_TNLEN);
     var idx = tbl_find(hdr, tname, tnlen);
-    if (idx < 0) { patra_unlock(fd); return PATRA_ERR_NOTFOUND; }
+    if (idx < 0) { _tx_unlock(db, fd); return PATRA_ERR_NOTFOUND; }
 
     var it = _spr() + PR_ITEMS;
     var new_ptr = load64(it + CR_NPTR);
@@ -699,7 +699,7 @@ fn _exec_alter_rename_tbl(db): i64 {
 
     # Reject if new name collides with any existing table
     if (tbl_find(hdr, new_ptr, new_len) >= 0) {
-        patra_unlock(fd);
+        _tx_unlock(db, fd);
         return PATRA_ERR_EXISTS;
     }
 
@@ -711,7 +711,7 @@ fn _exec_alter_rename_tbl(db): i64 {
     store8(entry + TBL_NAME + nn, 0);
 
     _db_hdr_commit(db, fd, hdr);
-    patra_unlock(fd);
+    _tx_unlock(db, fd);
     return PATRA_OK;
 }
 
@@ -726,7 +726,7 @@ fn _exec_alter_rename_col(db): i64 {
     var tname = load64(_spr() + PR_TNAME);
     var tnlen = load64(_spr() + PR_TNLEN);
     var idx = tbl_find(hdr, tname, tnlen);
-    if (idx < 0) { patra_unlock(fd); return PATRA_ERR_NOTFOUND; }
+    if (idx < 0) { _tx_unlock(db, fd); return PATRA_ERR_NOTFOUND; }
 
     var entry = _tbl_entry(hdr, idx);
     var spg = load64(entry + TBL_SCHEMA);
@@ -742,14 +742,14 @@ fn _exec_alter_rename_col(db): i64 {
     var new_len = load64(it_new + CR_NLEN);
 
     var ci = _wh_resolve_col(schema, ncols, old_ptr, old_len);
-    if (ci < 0) { pg_free(schema); patra_unlock(fd); return PATRA_ERR_NOTFOUND; }
+    if (ci < 0) { pg_free(schema); _tx_unlock(db, fd); return PATRA_ERR_NOTFOUND; }
 
     # Reject if new name collides with another existing column
     var collide = _wh_resolve_col(schema, ncols, new_ptr, new_len);
     if (collide >= 0) {
         if (collide != ci) {
             pg_free(schema);
-            patra_unlock(fd);
+            _tx_unlock(db, fd);
             return PATRA_ERR_EXISTS;
         }
     }
@@ -763,7 +763,7 @@ fn _exec_alter_rename_col(db): i64 {
 
     page_write(fd, spg, schema);
     pg_free(schema);
-    patra_unlock(fd);
+    _tx_unlock(db, fd);
     return PATRA_OK;
 }
 
@@ -781,7 +781,7 @@ fn _exec_alter_add(db): i64 {
     var tname = load64(_spr() + PR_TNAME);
     var tnlen = load64(_spr() + PR_TNLEN);
     var idx = tbl_find(hdr, tname, tnlen);
-    if (idx < 0) { patra_unlock(fd); return PATRA_ERR_NOTFOUND; }
+    if (idx < 0) { _tx_unlock(db, fd); return PATRA_ERR_NOTFOUND; }
 
     var entry = _tbl_entry(hdr, idx);
     var spg = load64(entry + TBL_SCHEMA);
@@ -790,7 +790,7 @@ fn _exec_alter_add(db): i64 {
     var ncols_old = load64(schema + SCH_NCOLS);
     if (ncols_old >= MAX_COLS) {
         pg_free(schema);
-        patra_unlock(fd);
+        _tx_unlock(db, fd);
         return PATRA_ERR_COLCOUNT;
     }
 
@@ -802,7 +802,7 @@ fn _exec_alter_add(db): i64 {
     # Reject if the new column name already exists
     if (_wh_resolve_col(schema, ncols_old, nc_ptr, nc_len) >= 0) {
         pg_free(schema);
-        patra_unlock(fd);
+        _tx_unlock(db, fd);
         return PATRA_ERR_EXISTS;
     }
 
@@ -894,7 +894,7 @@ fn _exec_alter_add(db): i64 {
     if (nrows > 0) { _pt_free(scratch); }
     pg_free(schema);
     _db_hdr_commit(db, fd, hdr);
-    patra_unlock(fd);
+    _tx_unlock(db, fd);
     return PATRA_OK;
 }
 
@@ -914,7 +914,7 @@ fn _exec_alter_drop_col(db): i64 {
     var tname = load64(_spr() + PR_TNAME);
     var tnlen = load64(_spr() + PR_TNLEN);
     var idx = tbl_find(hdr, tname, tnlen);
-    if (idx < 0) { patra_unlock(fd); return PATRA_ERR_NOTFOUND; }
+    if (idx < 0) { _tx_unlock(db, fd); return PATRA_ERR_NOTFOUND; }
 
     var entry = _tbl_entry(hdr, idx);
     var spg = load64(entry + TBL_SCHEMA);
@@ -923,7 +923,7 @@ fn _exec_alter_drop_col(db): i64 {
     var ncols_old = load64(schema + SCH_NCOLS);
     if (ncols_old <= 1) {
         pg_free(schema);
-        patra_unlock(fd);
+        _tx_unlock(db, fd);
         return PATRA_ERR_COLCOUNT;
     }
 
@@ -933,7 +933,7 @@ fn _exec_alter_drop_col(db): i64 {
     var di = _wh_resolve_col(schema, ncols_old, dc_ptr, dc_len);
     if (di < 0) {
         pg_free(schema);
-        patra_unlock(fd);
+        _tx_unlock(db, fd);
         return PATRA_ERR_NOTFOUND;
     }
 
@@ -1049,7 +1049,7 @@ fn _exec_alter_drop_col(db): i64 {
     if (nrows > 0) { _pt_free(scratch); }
     pg_free(schema);
     _db_hdr_commit(db, fd, hdr);
-    patra_unlock(fd);
+    _tx_unlock(db, fd);
     return PATRA_OK;
 }
 
@@ -1065,7 +1065,7 @@ fn _exec_vacuum(db): i64 {
     var tname = load64(_spr() + PR_TNAME);
     var tnlen = load64(_spr() + PR_TNLEN);
     var idx = tbl_find(hdr, tname, tnlen);
-    if (idx < 0) { patra_unlock(fd); return PATRA_ERR_NOTFOUND; }
+    if (idx < 0) { _tx_unlock(db, fd); return PATRA_ERR_NOTFOUND; }
 
     var entry = _tbl_entry(hdr, idx);
     var spg = load64(entry + TBL_SCHEMA);
@@ -1080,7 +1080,7 @@ fn _exec_vacuum(db): i64 {
             btree_compact(fd, hdr, ir);
         }
     }
-    patra_unlock(fd);
+    _tx_unlock(db, fd);
     return PATRA_OK;
 }
 
@@ -1096,7 +1096,7 @@ fn _exec_create_index(db): i64 {
     var tname = load64(_spr() + PR_TNAME);
     var tnlen = load64(_spr() + PR_TNLEN);
     var idx = tbl_find(hdr, tname, tnlen);
-    if (idx < 0) { patra_unlock(fd); return PATRA_ERR_NOTFOUND; }
+    if (idx < 0) { _tx_unlock(db, fd); return PATRA_ERR_NOTFOUND; }
 
     var entry = _tbl_entry(hdr, idx);
     var spg = load64(entry + TBL_SCHEMA);
@@ -1108,13 +1108,13 @@ fn _exec_create_index(db): i64 {
     var cn_ptr = load64(_spr() + PR_ITEMS);
     var cn_len = load64(_spr() + PR_ITEMS + 8);
     var ci = _wh_resolve_col(schema, ncols, cn_ptr, cn_len);
-    if (ci < 0) { pg_free(schema); patra_unlock(fd); return PATRA_ERR_NOTFOUND; }
+    if (ci < 0) { pg_free(schema); _tx_unlock(db, fd); return PATRA_ERR_NOTFOUND; }
 
     # INT columns index by raw i64; STR columns index by hash of the
     # 256-byte slot (collisions verified at lookup via where_eval / byte
     # compare). BYTES columns can't be indexed.
     var ct = load64(schema + SCH_START + ci * SCH_ENTRY_SZ + SCH_CTYPE);
-    if (_col_is_chain(ct)) { pg_free(schema); patra_unlock(fd); return PATRA_ERR_TYPE; }
+    if (_col_is_chain(ct)) { pg_free(schema); _tx_unlock(db, fd); return PATRA_ERR_TYPE; }
 
     # Create B-tree and populate with existing rows
     var bt = btree_create(fd, hdr);
@@ -1141,8 +1141,36 @@ fn _exec_create_index(db): i64 {
     pg_free(schema);
 
     _db_hdr_commit(db, fd, hdr);
-    patra_unlock(fd);
+    _tx_unlock(db, fd);
     return PATRA_OK;
+}
+
+# ── Transaction-aware locking (v1.13.3) ────────────────────
+#
+# flock is NON-COUNTED (docs/architecture/002-flock-non-counted.md): one unlock
+# releases it no matter how many times it was taken. patra_begin takes LOCK_EX
+# and sets DB_TX, but every statement used to run its own unconditional
+# patra_unlock(fd) on the way out — so the FIRST statement inside a transaction
+# dropped the transaction's exclusive lock entirely. Another process could then
+# take LOCK_EX and commit against the same file mid-transaction, and a later
+# patra_rollback would restore before-images over its committed pages.
+#
+# _patra_query_exec's patra_lock_sh was worse in kind: inside a transaction it
+# DOWNGRADED the exclusive lock to shared before releasing it.
+#
+# So statements defer to the transaction: while DB_TX is set, they neither take
+# nor release the file lock — patra_commit / patra_rollback own it end to end.
+# Re-taking LOCK_EX inside a transaction is left alone: the lock is already held
+# exclusively, so it is a harmless no-op re-acquire. (audit 2026-08-18 S0-4)
+
+fn _tx_unlock(db, fd): i64 {
+    if (load64(db + DB_TX)) { return 0; }
+    return patra_unlock(fd);
+}
+
+fn _tx_lock_sh(db, fd): i64 {
+    if (load64(db + DB_TX)) { return 0; }
+    return patra_lock_sh(fd);
 }
 
 # ── Transactions ────────────────────
@@ -1505,14 +1533,14 @@ fn _patra_query_exec(db): i64 {
     var fd = _db_fd(db);
     var hdr = _db_hdr(db);
 
-    patra_lock_sh(fd);
+    _tx_lock_sh(db, fd);
     _pc_refresh(fd, hdr);
 
     var tname = load64(_spr() + PR_TNAME);
     var tnlen = load64(_spr() + PR_TNLEN);
     var idx = tbl_find(hdr, tname, tnlen);
     if (idx < 0) {
-        patra_unlock(fd);
+        _tx_unlock(db, fd);
         return 0;
     }
 
@@ -1536,7 +1564,7 @@ fn _patra_query_exec(db): i64 {
         if (agg != AGG_COUNT) {
             var aci = _wh_resolve_col(schema, ncols,
             load64(_spr() + PR_AGG_COL_PTR), load64(_spr() + PR_AGG_COL_LEN));
-            if (aci < 0) { pg_free(schema); patra_unlock(fd); return 0; }
+            if (aci < 0) { pg_free(schema); _tx_unlock(db, fd); return 0; }
             agg_off = row_field_offset(schema, ncols, aci);
         }
 
@@ -1562,7 +1590,7 @@ fn _patra_query_exec(db): i64 {
         }
         pg_free(abuf);
         pg_free(schema);
-        patra_unlock(fd);
+        _tx_unlock(db, fd);
 
         if (agg == AGG_COUNT) { agg_val = agg_count; }
 
@@ -1727,7 +1755,7 @@ fn _patra_query_exec(db): i64 {
             _pt_free(pj_types);
             _pt_free(pj_offs);
             _pt_free(rs);
-            patra_unlock(fd);
+            _tx_unlock(db, fd);
             return 0;
         }
 
@@ -1778,13 +1806,13 @@ fn _patra_query_exec(db): i64 {
         _pt_free(rs);
         # Snapshot TEXT/BYTES payloads of the projected result, then drop the lock.
         _rs_materialize(fd, hdr, rs2);
-        patra_unlock(fd);
+        _tx_unlock(db, fd);
         return rs2;
     }
 
     # Snapshot TEXT/BYTES payloads of the (unprojected) result, then drop the lock.
     _rs_materialize(fd, hdr, rs);
-    patra_unlock(fd);
+    _tx_unlock(db, fd);
     return rs;
 }
 
@@ -2255,7 +2283,7 @@ fn _patra_insert_row_impl(db, tname, tnlen, ncols, types, ivals, sptrs, slens, b
     _pc_refresh(fd, hdr);
 
     var idx = tbl_find(hdr, tname, tnlen);
-    if (idx < 0) { patra_unlock(fd); return PATRA_ERR_NOTFOUND; }
+    if (idx < 0) { _tx_unlock(db, fd); return PATRA_ERR_NOTFOUND; }
 
     var entry = _tbl_entry(hdr, idx);
     var spg = load64(entry + TBL_SCHEMA);
@@ -2264,7 +2292,7 @@ fn _patra_insert_row_impl(db, tname, tnlen, ncols, types, ivals, sptrs, slens, b
 
     var scols = load64(schema + SCH_NCOLS);
     if (ncols != scols) {
-        pg_free(schema); patra_unlock(fd); return PATRA_ERR_COLCOUNT;
+        pg_free(schema); _tx_unlock(db, fd); return PATRA_ERR_COLCOUNT;
     }
 
     # Type-match every column before we write anything on disk
@@ -2272,7 +2300,7 @@ fn _patra_insert_row_impl(db, tname, tnlen, ncols, types, ivals, sptrs, slens, b
         var ctype = load64(schema + SCH_START + i * SCH_ENTRY_SZ + SCH_CTYPE);
         var vtype = load64(types + i * 8);
         if (vtype != ctype) {
-            pg_free(schema); patra_unlock(fd); return PATRA_ERR_TYPE;
+            pg_free(schema); _tx_unlock(db, fd); return PATRA_ERR_TYPE;
         }
     }
 
@@ -2338,7 +2366,7 @@ fn _patra_insert_row_impl(db, tname, tnlen, ncols, types, ivals, sptrs, slens, b
                         _pt_free(row);
                         pg_free(schema);
                         store64(db + DB_ROWS_AFFECTED, 0);
-                        patra_unlock(fd);
+                        _tx_unlock(db, fd);
                         return PATRA_OK;
                     }
                 }
@@ -2391,6 +2419,6 @@ fn _patra_insert_row_impl(db, tname, tnlen, ncols, types, ivals, sptrs, slens, b
     pg_free(schema);
 
     if (r == PATRA_OK) { _db_hdr_commit(db, fd, hdr); }
-    patra_unlock(fd);
+    _tx_unlock(db, fd);
     return r;
 }

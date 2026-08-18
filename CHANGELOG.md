@@ -5,6 +5,70 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.3] - 2026-08-18 — an explicit transaction held its lock for exactly one statement
+
+**S0 batch 2 of the 1.13.x repair arc** ([audit](docs/audit/2026-08-18/security-review.md) S0-4).
+925 tests (was 915, +10), 7/7 fuzz, libro 15/15, vidya 19/19, benchmarks
+unchanged, lint 0-warn, vet/deny clean.
+
+### Security
+
+- **`BEGIN` … `COMMIT` provided no cross-process isolation past its first
+  statement.** `patra_begin` took `LOCK_EX` and set `DB_TX`, but `DB_TX` was read
+  **only** in `patra_begin` / `patra_commit` / `patra_rollback`. No `_exec_*` path
+  and no query path consulted it, so the first statement inside the transaction
+  ran its own unconditional `patra_unlock(fd)` — and because flock is
+  non-counted, that released the transaction's lock outright.
+
+  `_patra_query_exec` was worse in kind: its `patra_lock_sh` **downgraded** the
+  exclusive lock to shared before releasing it, so a `SELECT` inside a
+  transaction briefly published a shared lock other readers could join.
+
+  Measured by probing from a second open file description (which contends
+  exactly as a second process does):
+
+  | point | before | after |
+  |---|---|---|
+  | after `patra_begin` | EXCLUSIVE | EXCLUSIVE |
+  | after 1st `INSERT` in txn | **FREE** | EXCLUSIVE |
+  | after `SELECT` in txn | **FREE** | EXCLUSIVE |
+  | after `COMMIT` | FREE | FREE |
+
+  From the first statement until commit, another process could take `LOCK_EX` and
+  write the same file. A subsequent `patra_rollback` then restored before-images
+  over that process's committed pages via raw `sys_write` — **silent
+  cross-process data destruction**, on a feature the README advertises and libro
+  re-exports (`patrastore_begin` / `_commit` / `_rollback`).
+
+  **Fix**: statements now defer to the transaction. Two helpers, `_tx_unlock` and
+  `_tx_lock_sh`, no-op while `DB_TX` is set, so `patra_commit` / `patra_rollback`
+  own the lock end to end. Applied to **47 unlock sites and the one shared-lock
+  site** across the eleven `_exec_*` paths, `_patra_query_exec`, and
+  `_patra_insert_row_impl`. Auto-commit statements outside a transaction are
+  unchanged, and the 13 `patra_lock_ex` sites are deliberately left alone —
+  re-acquiring an exclusive lock already held is a harmless no-op, and leaving
+  them keeps statements correct even if `DB_TX` bookkeeping were ever wrong.
+
+  Closing a handle with a transaction still open is unchanged: `sys_close`
+  releases the lock at the OS level and the WAL is left for the next open's
+  recovery.
+
+  > This defect was written down as an action in the **2026-04-21** audit (§3.5 —
+  > "audit every call site of `patra_lock_ex` to confirm lock span covers all
+  > `page_write` calls in the tx"). It was never dispositioned into P0/P1/P2 and,
+  > on the evidence, never run. It is fixed now, and §3.5 is annotated closed.
+
+### Changed
+
+- **`cyrius.cyml` trimmed from 75 lines to 53.** A manifest is not a changelog.
+  The narrative — the 1.12.11 retrospective, the four-level `agnosai -> bote ->
+  libro -> patra -> sakshi` measurement, the kavach anecdote — already lives in
+  `CHANGELOG [1.13.0]` and the roadmap. What stays is the two operative rules a
+  maintainer needs to not break the build, stated once: never write a bracketed
+  `deps.NAME` header inside a comment (distlib's unanchored scan eats the leaf),
+  and never add a git dep for anything the stdlib folds. The warning itself no
+  longer contains the literal it warns about.
+
 ## [1.13.2] - 2026-08-18 — three ways ordinary SQL corrupted memory, all reporting success
 
 **S0 batch of the 1.13.x repair arc** ([audit](docs/audit/2026-08-18/security-review.md)).

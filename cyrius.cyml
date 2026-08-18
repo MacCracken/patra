@@ -11,10 +11,9 @@ repository = "https://github.com/MacCracken/patra"
 entry = "src/lib.cyr"
 output = "patra"
 
+# Order must match src/lib.cyr's include order — `cyrius distlib` concatenates
+# in this order and cyrius resolves forward references in a single pass.
 [lib]
-# `cyrius distlib` reads this section to build dist/patra.cyr.
-# Order matches src/lib.cyr's concatenation order. Bundle shape
-# is unchanged from the old scripts/bundle.sh (retired in v1.5.5).
 modules = [
     "src/file.cyr",
     "src/pcache.cyr",
@@ -30,46 +29,25 @@ modules = [
     "src/lib.cyr",
 ]
 
-# Order mirrors the include order at the top of src/lib.cyr — `sakshi` last,
-# matching `include "lib/sakshi.cyr"` there.
+# Order mirrors the includes at the top of src/lib.cyr — sakshi last.
+# patra uses two sakshi symbols: sakshi_error (file.cyr), sakshi_set_level (lib.cyr).
 [deps]
 stdlib = ["syscalls", "string", "alloc", "freelist", "io", "fmt", "str", "vec", "atomic", "sync", "thread_local", "sakshi"]
 
-# ⚠ **``deps.sakshi`` was REMOVED at 1.13.0, and patra having it was an active
-# defect for every downstream consumer — not a neutral pin.**
+# Two rules for this file. Both have already been violated once.
 #
-# It read: "Patra's sole external dep … Cyrius does not resolve transitive deps,
-# so downstream consumers must replicate this block alongside `deps.patra`."
-# **Both halves were wrong by the time it mattered.** sakshi is now FOLDED INTO
-# the cyrius stdlib snapshot, so there is nothing external to declare; and
-# `cyrius deps` very much DOES walk transitive deps — it overlays a git dep's
-# resolution ON TOP OF the `lib sync --full` snapshot, recursing through sibling
-# manifests, on **every `cyrius build`** and not only on `deps`.
+# 1. Never write a bracketed deps.NAME section header inside a comment —
+#    backtick it as `deps.NAME` instead. `cyrius distlib` scans for that opening
+#    bracket sequence unanchored (cbt/commands.cyr _distlib_named_deps), matches
+#    it inside comment prose, and drops NAME from the .deps sidecar. Cost:
+#    dist/patra.deps silently shipped 11 leaves against 12, missing sakshi, from
+#    <=1.12.11 through 1.13.1. Fixed 1.13.2; filed upstream.
 #
-# The consequence, measured 2026-08-12 from four levels up:
-#
-#     agnosai -> bote -> `deps.libro` -> `deps.patra` -> `deps.sakshi` 2.4.2
-#
-# patra is **itself folded into the stdlib** (`lib/patra.cyr` ships in the cyrius
-# snapshot), so this block had a folded module pinning a sakshi **eight patch
-# releases behind the sakshi the same snapshot ships** — and silently
-# downgrading `lib/sakshi.cyr` in anything that reached patra transitively. The
-# only signal is an unnamed "1 bundled lib(s) differ" shadow warning, and
-# `deps --verify` cannot catch it: the lock is written *from disk*, so it simply
-# records the downgraded file's hash.
-#
-# ⚠ **The 1.12.11 reasoning is what to avoid repeating.** That release deferred
-# 2.4.2 -> 2.4.6 as "additive only, no consumer need". For a module that is
-# folded into the toolchain, "no consumer need" is not the test — a stale pin
-# here is not inert, it *overrides* what every consumer resolves. agnosai carried
-# a defensive counter-pin for several releases because of this block, and bote
-# still carries one until this fix is folded.
-#
-# ⚠ **Do NOT re-add this as a git dep.** patra publishes `dist/patra.cyr`, and on
-# a bundle-publishing library a git dep makes `cyrius distlib` reclassify the
-# module OUT of the stdlib leaves, dropping it from the `.deps` sidecar and
-# breaking clean-room consumers. kavach hit exactly that; majra and bote both
-# carry the same warning.
-#
-# patra uses exactly two sakshi symbols — `sakshi_error` (src/file.cyr) and
-# `sakshi_set_level` (src/lib.cyr).
+# 2. Never add a git `deps.X` block for anything the cyrius stdlib folds.
+#    `cyrius deps` overlays a git dep on top of the snapshot on every build,
+#    recursing through sibling manifests — so a stale pin here overrides what
+#    every downstream consumer resolves, and `deps --verify` cannot catch it
+#    (the lock is written from disk, recording the downgraded hash). patra is
+#    itself folded, so this reached four levels down. On a bundle-publishing
+#    library it also drops the module from the .deps sidecar.
+#    History: `deps.sakshi` 2.4.2, removed at 1.13.0. See CHANGELOG [1.13.0].

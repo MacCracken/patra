@@ -126,6 +126,14 @@ Three issues already covered: no magic, no checksum, no bounds. Fourth: `wal_rec
 - **After `fork()` + child inherits fd, the child holds a reference to the lock**; releasing in parent may still hold in child. Patra does not fork, but a consumer calling `patra_open` then `fork` without `close` on child is a shared-state trap.
 - **Over NFS**, Linux emulates flock via fcntl byte-range since 2.6.12, but lockd flakiness is well-documented. If a consumer points Patra at an NFS share, expect silent lock loss. **Document as unsupported.**
 - `flock` does not protect against concurrent **readers** observing a partial write. Patra's `patra_lock_sh` for reads + `patra_lock_ex` for writes is the right pattern, but the WAL is not shared-visible — a reader could read a page mid-write if the writer does not hold exclusive lock for the entire multi-page transaction. Audit every call site of `patra_lock_ex` to confirm lock span covers all `page_write` calls in the tx.
+  > **Update 2026-08-18 — RUN, and it found a real defect. Closed in v1.13.3.**
+  > This action was never dispositioned into P0/P1/P2 and, on the evidence, was never carried out.
+  > Executing it found the lock span did **not** cover the transaction at all: `DB_TX` was read only
+  > in `patra_begin`/`patra_commit`/`patra_rollback`, so the first statement inside a transaction
+  > released the exclusive lock via its own unconditional `patra_unlock`, and a `SELECT` downgraded
+  > it to shared. Fixed in v1.13.3 via `_tx_unlock`/`_tx_lock_sh` across 48 sites, with a regression
+  > test that probes lock state from a second file description. See
+  > [`../2026-08-18/security-review.md`](../2026-08-18/security-review.md) S0-4.
 
 ### 3.6 JSONL escaping completeness
 Per RFC 8259 §7, these MUST be escaped: U+0000–U+001F (all), `"`, `\`. Patra escapes `"`, `\`, `\n`, `\r`, `\t`. **Missing escapes** for: 0x00, 0x01–0x07, 0x08 (`\b`), 0x0B, 0x0C (`\f`), 0x0E–0x1F. Also: if input is not valid UTF-8 (lone surrogates, overlong sequences), output is not valid JSON per strict parsers.

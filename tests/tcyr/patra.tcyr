@@ -5048,6 +5048,66 @@ fn test_update_set_list_bound() {
     cleanup();
 }
 
+# -- v1.13.3: transaction lock span (audit 2026-08-18 S0-4) --
+
+# Probe the file lock from a SECOND open file description. flock contends
+# between separate descriptions exactly as it does between processes, so this
+# observes what another process would see. Returns 0 = FREE, 1 = SHARED,
+# 2 = EXCLUSIVE.  (LOCK_NB = 4)
+fn _lock_state(): i64 {
+    var f = _pt_file_open(_tpath);
+    if (f < 0) { return 0 - 1; }
+    var ex = _pt_flock(f, LOCK_EX + 4);
+    if (ex == 0) { _pt_flock(f, LOCK_UN); sys_close(f); return 0; }
+    var sh = _pt_flock(f, LOCK_SH + 4);
+    if (sh == 0) { _pt_flock(f, LOCK_UN); sys_close(f); return 1; }
+    sys_close(f);
+    return 2;
+}
+
+fn test_txn_holds_lock() {
+    test_group("explicit transaction holds its lock throughout (S0-4)");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (id INT, v INT)");
+    patra_exec(db, "INSERT INTO t VALUES (1, 100)");
+    assert_eq(_lock_state(), 0, "no lock held outside a transaction");
+
+    patra_begin(db);
+    assert_eq(_lock_state(), 2, "EXCLUSIVE after begin");
+
+    # The regression: before the fix the statement's own unconditional
+    # patra_unlock released the transaction's lock here, leaving it FREE.
+    patra_exec(db, "INSERT INTO t VALUES (2, 200)");
+    assert_eq(_lock_state(), 2, "still EXCLUSIVE after INSERT inside txn");
+
+    patra_exec(db, "UPDATE t SET v = 201 WHERE id = 2");
+    assert_eq(_lock_state(), 2, "still EXCLUSIVE after UPDATE inside txn");
+
+    # A SELECT used to take LOCK_SH, DOWNGRADING the exclusive lock.
+    var rs = patra_query(db, "SELECT id, v FROM t WHERE id = 1");
+    assert_eq(_lock_state(), 2, "still EXCLUSIVE after SELECT inside txn");
+    if (rs != 0) { patra_result_free(rs); }
+
+    patra_commit(db);
+    assert_eq(_lock_state(), 0, "released on commit");
+
+    # Rollback must release it too.
+    patra_begin(db);
+    assert_eq(_lock_state(), 2, "EXCLUSIVE after begin (2nd txn)");
+    patra_exec(db, "INSERT INTO t VALUES (3, 300)");
+    assert_eq(_lock_state(), 2, "still EXCLUSIVE before rollback");
+    patra_rollback(db);
+    assert_eq(_lock_state(), 0, "released on rollback");
+
+    # Auto-commit statements outside a transaction still release normally.
+    patra_exec(db, "INSERT INTO t VALUES (4, 400)");
+    assert_eq(_lock_state(), 0, "auto-commit statement releases");
+
+    patra_close(db);
+    cleanup();
+}
+
 fn main() {
     alloc_init();
     fl_init();
@@ -5309,6 +5369,7 @@ fn main() {
     test_row_exceeds_page();
     test_update_set_type_mismatch();
     test_update_set_list_bound();
+    test_txn_holds_lock();
     test_bind_where();
     test_bind_update();
     test_bind_rebind();
