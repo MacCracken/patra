@@ -542,9 +542,19 @@ fn _exec_insert(db): i64 {
                                 if (iref != (0 - 1)) {
                                     var rpg = _bt_ref_pg(iref);
                                     var rsl = _bt_ref_slot(iref);
-                                    if (rpg != lpg) { page_read(fd, rpg, pbuf); lpg = rpg; }
-                                    if (_memeq256(pbuf + DP_DATA + rsl * rsz + icoff, row + icoff)) {
-                                        ihit = 1;
+                                    var pok = 1;
+                                    if (rpg != lpg) {
+                                        if (page_read_checked(fd, hdr, rpg, pbuf) != PATRA_OK) {
+                                            lpg = 0 - 1;
+                                            pok = 0;
+                                        } else { lpg = rpg; }
+                                    }
+                                    var prp = 0;
+                                    if (pok == 1) { prp = _bt_row_ptr(pbuf, rsl, rsz); }
+                                    if (prp != 0) {
+                                        if (_memeq256(prp + icoff, row + icoff)) {
+                                            ihit = 1;
+                                        }
                                     }
                                 }
                             }
@@ -1638,7 +1648,21 @@ fn _patra_query_exec(db): i64 {
     var plan_n = _idx_plan(fd, hdr, schema, ncols, nrows, plan_refs);
     var alloc_rows = nrows;
     if (plan_n >= 0) { alloc_rows = plan_n; }
-    var total = RS_HDR_SZ + ncols * 8 + ncols * SCH_CNAME_MAX + alloc_rows * rsz;
+    # alloc_rows comes from TBL_NROWS (index path aside), a table-directory
+    # field patra_hdr_verify does not validate. Guard the multiply before it
+    # wraps i64 negative — a negative `total` made _pt_alloc hand back a tiny
+    # block while memset silently no-oped. (audit 2026-08-18 S0-5)
+    if (alloc_rows < 0) { alloc_rows = 0; }
+    var fixed = RS_HDR_SZ + ncols * 8 + ncols * SCH_CNAME_MAX;
+    var maxrows = 0;
+    if (rsz > 0) { maxrows = (0x7FFFFFFFFFFFFFFF - fixed) / rsz; }
+    if (alloc_rows > maxrows) {
+        pg_free(schema);
+        _pt_free(plan_refs);
+        _tx_unlock(db, fd);
+        return 0;
+    }
+    var total = fixed + alloc_rows * rsz;
     if (total < RS_HDR_SZ + 64) { total = RS_HDR_SZ + 64; }
     var rs = _pt_alloc(total);
     memset(rs, 0, total);
@@ -1676,10 +1700,15 @@ fn _patra_query_exec(db): i64 {
             var rpg = _bt_ref_pg(ref);
             var rsl = _bt_ref_slot(ref);
             if (rpg != lpg) {
-                page_read(fd, rpg, rbuf);
+                # Checked read: a ref off a malformed index can name any page.
+                if (page_read_checked(fd, hdr, rpg, rbuf) != PATRA_OK) {
+                    lpg = 0 - 1;
+                    continue;
+                }
                 lpg = rpg;
             }
-            var rp = rbuf + DP_DATA + rsl * rsz;
+            var rp = _bt_row_ptr(rbuf, rsl, rsz);
+            if (rp == 0) { continue; }
             if (where_eval(rp, schema, ncols, _spr())) {
                 memcpy(data_ptr + actual * rsz, rp, rsz);
                 actual = actual + 1;
@@ -1690,7 +1719,7 @@ fn _patra_query_exec(db): i64 {
     _pt_free(plan_refs);
 
     if (used_index == 0) {
-        actual = tbl_scan_where(fd, hdr, idx, data_ptr, rsz, schema, ncols, _spr());
+        actual = tbl_scan_where(fd, hdr, idx, data_ptr, rsz, schema, ncols, _spr(), alloc_rows);
     }
     store64(rs + RS_NROWS, actual);
 
@@ -2372,9 +2401,19 @@ fn _patra_insert_row_impl(db, tname, tnlen, ncols, types, ivals, sptrs, slens, b
                                 if (iref != (0 - 1)) {
                                     var rpg = _bt_ref_pg(iref);
                                     var rsl = _bt_ref_slot(iref);
-                                    if (rpg != lpg) { page_read(fd, rpg, pbuf); lpg = rpg; }
-                                    if (_memeq256(pbuf + DP_DATA + rsl * rsz + ikoff, row + ikoff)) {
-                                        ihit = 1;
+                                    var pok = 1;
+                                    if (rpg != lpg) {
+                                        if (page_read_checked(fd, hdr, rpg, pbuf) != PATRA_OK) {
+                                            lpg = 0 - 1;
+                                            pok = 0;
+                                        } else { lpg = rpg; }
+                                    }
+                                    var prp = 0;
+                                    if (pok == 1) { prp = _bt_row_ptr(pbuf, rsl, rsz); }
+                                    if (prp != 0) {
+                                        if (_memeq256(prp + ikoff, row + ikoff)) {
+                                            ihit = 1;
+                                        }
                                     }
                                 }
                             }

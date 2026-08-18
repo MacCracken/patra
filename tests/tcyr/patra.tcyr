@@ -589,12 +589,12 @@ fn test_json_build() {
 fn test_json_escape() {
     test_group("json escape");
     var dst = fl_alloc(64);
-    var n = _json_escape(dst, "a\"b\\c", 5);
+    var n = _json_escape(dst, "a\"b\\c", 5, 256);
     store8(dst + n, 0);
     assert_eq(n, 7, "escape len");
     assert_streq(dst, "a\\\"b\\\\c", "escaped");
 
-    n = _json_escape(dst, "line\n", 5);
+    n = _json_escape(dst, "line\n", 5, 256);
     store8(dst + n, 0);
     assert_streq(dst, "line\\n", "newline esc");
     fl_free(dst);
@@ -1371,7 +1371,7 @@ fn test_json_escape_control_chars() {
     # 0x00 (NUL) -> [NUL]
     memset(src, 0, 32);
     store8(src, 0);
-    var w = _json_escape(dst, src, 1);
+    var w = _json_escape(dst, src, 1, 256);
     assert_eq(w, 6, "NUL emits 6 chars");
     assert_eq(load8(dst), 92, "leading backslash");
     assert_eq(load8(dst + 1), 117, "u");
@@ -1382,38 +1382,38 @@ fn test_json_escape_control_chars() {
 
     # 0x08 -> \b
     store8(src, 8);
-    w = _json_escape(dst, src, 1);
+    w = _json_escape(dst, src, 1, 256);
     assert_eq(w, 2, "\\b is 2 chars");
     assert_eq(load8(dst + 1), 98, "b");
 
     # 0x0C -> \f
     store8(src, 12);
-    w = _json_escape(dst, src, 1);
+    w = _json_escape(dst, src, 1, 256);
     assert_eq(w, 2, "\\f is 2 chars");
     assert_eq(load8(dst + 1), 102, "f");
 
     # 0x01 -> [NUL]
     store8(src, 1);
-    w = _json_escape(dst, src, 1);
+    w = _json_escape(dst, src, 1, 256);
     assert_eq(w, 6, "\\u0001 is 6 chars");
     assert_eq(load8(dst + 5), 49, "last hex = '1'");
 
     # 0x1F -> [NUL]
     store8(src, 31);
-    w = _json_escape(dst, src, 1);
+    w = _json_escape(dst, src, 1, 256);
     assert_eq(w, 6, "\\u001f is 6 chars");
     assert_eq(load8(dst + 4), 49, "hex hi = '1'");
     assert_eq(load8(dst + 5), 102, "hex lo = 'f'");
 
     # Printable byte 0x20 stays literal
     store8(src, 32);
-    w = _json_escape(dst, src, 1);
+    w = _json_escape(dst, src, 1, 256);
     assert_eq(w, 1, "space is 1 char");
     assert_eq(load8(dst), 32, "space preserved");
 
     # High byte 0x80 stays literal (not mistakenly escaped)
     store8(src, 128);
-    w = _json_escape(dst, src, 1);
+    w = _json_escape(dst, src, 1, 256);
     assert_eq(w, 1, "0x80 passes through");
 
     fl_free(src);
@@ -5171,6 +5171,111 @@ fn test_rollback_restores_header() {
     cleanup();
 }
 
+# -- v1.13.5: DELETE keeps the index in sync (audit S2-4) ----
+
+fn test_delete_repoints_index() {
+    test_group("DELETE repoints moved index refs (S2-4)");
+    cleanup();
+    var db = patra_open(_tpath);
+    # The first INT column is auto-indexed, so every lookup below goes through
+    # the B-tree rather than a scan.
+    patra_exec(db, "CREATE TABLE d (id INT, v INT)");
+    patra_exec(db, "INSERT INTO d VALUES (1, 10)");
+    patra_exec(db, "INSERT INTO d VALUES (2, 20)");
+    patra_exec(db, "INSERT INTO d VALUES (3, 30)");
+    patra_exec(db, "INSERT INTO d VALUES (4, 40)");
+    patra_exec(db, "INSERT INTO d VALUES (5, 50)");
+
+    # Deleting the FIRST row compacts the page: rows 2..5 each shift down one
+    # slot. Their B-tree refs are (page, slot) pairs, so without repointing they
+    # all name the slot they used to occupy — and correctness then depends on
+    # reading past DP_NROWS, where the pre-compaction bytes happen to linger.
+    assert_eq(patra_exec(db, "DELETE FROM d WHERE id = 1"), PATRA_OK, "delete first row");
+
+    # Every survivor must still be found by indexed lookup, with its own value.
+    var rs2 = patra_query(db, "SELECT id, v FROM d WHERE id = 2");
+    assert_eq(patra_result_count(rs2), 1, "id=2 still found");
+    assert_eq(patra_result_get_int(rs2, 0, 1), 20, "id=2 has its own value");
+    patra_result_free(rs2);
+
+    var rs5 = patra_query(db, "SELECT id, v FROM d WHERE id = 5");
+    assert_eq(patra_result_count(rs5), 1, "id=5 still found");
+    assert_eq(patra_result_get_int(rs5, 0, 1), 50, "id=5 has its own value");
+    patra_result_free(rs5);
+
+    # The deleted row must not come back through a stale ref.
+    var rs1 = patra_query(db, "SELECT id FROM d WHERE id = 1");
+    assert_eq(patra_result_count(rs1), 0, "deleted row not resurrected");
+    patra_result_free(rs1);
+
+    # Delete from the middle too, then re-check the tail.
+    assert_eq(patra_exec(db, "DELETE FROM d WHERE id = 3"), PATRA_OK, "delete middle row");
+    var rs4 = patra_query(db, "SELECT id, v FROM d WHERE id = 4");
+    assert_eq(patra_result_count(rs4), 1, "id=4 found after middle delete");
+    assert_eq(patra_result_get_int(rs4, 0, 1), 40, "id=4 value intact");
+    patra_result_free(rs4);
+
+    var rsall = patra_query(db, "SELECT COUNT(*) FROM d");
+    assert_eq(patra_result_get_int(rsall, 0, 0), 3, "3 rows remain");
+    patra_result_free(rsall);
+
+    patra_close(db);
+    cleanup();
+}
+
+# -- v1.13.5: JSON builder honours its capacity (audit S1-7) --
+
+fn test_json_build_bounds() {
+    test_group("json_build_lens honours max (S1-7)");
+
+    var keys = _pt_alloc(8);
+    var vals = _pt_alloc(8);
+    var vlens = _pt_alloc(8);
+    var types = _pt_alloc(8);
+    store64(keys, "k");
+    store64(types, COL_STR);
+
+    # A 5000-byte value cannot fit a 4096-byte buffer. Before the fix `max` was
+    # never read, so this ran off the end of the allocation.
+    var big = _pt_alloc(5001);
+    memset(big, 65, 5000);
+    store8(big + 5000, 0);
+    store64(vals, big);
+    store64(vlens, 5000);
+
+    # Deliberately oversize the real allocation so a regression overflows into
+    # our own slack rather than the heap, and is caught by the assert below.
+    var buf = _pt_alloc(16384);
+    assert_eq(json_build_lens(buf, 4096, keys, vals, vlens, types, 1), 0 - 1,
+              "oversized value rejected");
+
+    # Escaping expands 1 -> 2 bytes per quote, so 2500 quotes become 5000 bytes
+    # from a 2500-byte source that would itself have fit. (2000 quotes = 4000
+    # bytes and DOES fit — the point is that the budget must be checked against
+    # the escaped length, not the source length.)
+    memset(big, 34, 2500);
+    store64(vlens, 2500);
+    assert_eq(json_build_lens(buf, 4096, keys, vals, vlens, types, 1), 0 - 1,
+              "value whose ESCAPED form overflows is rejected");
+
+    # A value that fits must still build correctly.
+    memset(big, 66, 100);
+    store64(vlens, 100);
+    var okl = json_build_lens(buf, 4096, keys, vals, vlens, types, 1);
+    assert(okl > 0, "in-budget value builds");
+    assert(okl < 4096, "and stays inside max");
+
+    # _json_escape reports overflow rather than writing past dmax.
+    var small = _pt_alloc(64);
+    assert_eq(_json_escape(small, big, 100, 8), 0 - 1, "escape rejects short dst");
+    assert(_json_escape(small, big, 8, 64) > 0, "escape fits in ample dst");
+
+    _pt_free(small);
+    _pt_free(buf);
+    _pt_free(big);
+    _pt_free(types); _pt_free(vlens); _pt_free(vals); _pt_free(keys);
+}
+
 fn main() {
     alloc_init();
     fl_init();
@@ -5434,6 +5539,8 @@ fn main() {
     test_update_set_list_bound();
     test_txn_holds_lock();
     test_rollback_restores_header();
+    test_delete_repoints_index();
+    test_json_build_bounds();
     test_bind_where();
     test_bind_update();
     test_bind_rebind();

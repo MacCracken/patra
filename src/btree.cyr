@@ -29,6 +29,26 @@ fn _bt_mkref(pg, slot): i64 { return pg * 65536 + slot; }
 fn _bt_ref_pg(ref): i64 { return ref / 65536; }
 fn _bt_ref_slot(ref): i64 { return ref % 65536; }
 
+# Resolve a row ref's slot against the data page it landed on, returning a
+# pointer to the row or 0 if the slot does not name a live row.
+#
+# Both halves of a ref (page, slot) come off a B-tree leaf on disk, so both are
+# attacker-controllable in a malformed .patra file. A ref of 0x000000010000FFFF
+# yields slot 65535, and with rsz = 256 that addressed ~16 MB past a 4 KB page
+# buffer — read by where_eval and, on a match, memcpy'd into the result set the
+# caller receives. Callers must pair this with page_read_checked for the page
+# half. (audit 2026-08-18 S1-6)
+fn _bt_row_ptr(buf, rsl, rsz): i64 {
+    if (rsl < 0) { return 0; }
+    if (rsz <= 0) { return 0; }
+    var nr = load64(buf + DP_NROWS);
+    # DP_NROWS is equally untrusted: cap it at what the page can physically hold.
+    var cap = (PAGE_SIZE - DP_DATA) / rsz;
+    if (nr > cap) { nr = cap; }
+    if (rsl >= nr) { return 0; }
+    return buf + DP_DATA + rsl * rsz;
+}
+
 # Path stack for insert (max depth BT_MAX_DEPTH = 10)
 var _bt_path[80];
 var _bt_pdepth = 0;
@@ -92,6 +112,11 @@ fn _bt_find_leaf(fd, hdr, root, key): i64 {
 
 fn _bt_leaf_ins(buf, key, val): i64 {
     var nk = load64(buf + BT_NKEYS);
+    # CLAMP: BT_NKEYS is read off a disk page, so a torn write or a hostile
+    # file controls it. Every *reader* clamped; the mutation paths did not,
+    # and used it as a loop bound while filling fixed-size buffers.
+    # (audit 2026-08-18 S1-5)
+    if (nk > BT_MAX_KEYS) { nk = BT_MAX_KEYS; }
     var pos = nk;
     var ff = 0;
     for (var i = 0; i < nk; i = i + 1) {
@@ -117,6 +142,11 @@ fn _bt_leaf_ins(buf, key, val): i64 {
 
 fn _bt_int_ins(buf, key, rchild): i64 {
     var nk = load64(buf + BT_NKEYS);
+    # CLAMP: BT_NKEYS is read off a disk page, so a torn write or a hostile
+    # file controls it. Every *reader* clamped; the mutation paths did not,
+    # and used it as a loop bound while filling fixed-size buffers.
+    # (audit 2026-08-18 S1-5)
+    if (nk > BT_MAX_KEYS) { nk = BT_MAX_KEYS; }
     var pos = nk;
     var ff = 0;
     for (var i = 0; i < nk; i = i + 1) {
@@ -165,6 +195,11 @@ fn _bt_push_up(fd, hdr, root, left_pg, sep, right_pg): i64 {
     var pb = pg_alloc();
     page_read(fd, par_pg, pb);
     var nk = load64(pb + BT_NKEYS);
+    # CLAMP: BT_NKEYS is read off a disk page, so a torn write or a hostile
+    # file controls it. Every *reader* clamped; the mutation paths did not,
+    # and used it as a loop bound while filling fixed-size buffers.
+    # (audit 2026-08-18 S1-5)
+    if (nk > BT_MAX_KEYS) { nk = BT_MAX_KEYS; }
 
     if (nk < BT_MAX_KEYS) {
         _bt_int_ins(pb, sep, right_pg);
@@ -257,6 +292,11 @@ fn btree_insert(fd, hdr, root, key, val): i64 {
     var buf = pg_alloc();
     page_read(fd, leaf_pg, buf);
     var nk = load64(buf + BT_NKEYS);
+    # CLAMP: BT_NKEYS is read off a disk page, so a torn write or a hostile
+    # file controls it. Every *reader* clamped; the mutation paths did not,
+    # and used it as a loop bound while filling fixed-size buffers.
+    # (audit 2026-08-18 S1-5)
+    if (nk > BT_MAX_KEYS) { nk = BT_MAX_KEYS; }
 
     if (nk < BT_MAX_KEYS) {
         _bt_leaf_ins(buf, key, val);
@@ -394,6 +434,11 @@ fn btree_remove_ref(fd, hdr, root, key, ref): i64 {
     var buf = pg_alloc();
     page_read(fd, leaf_pg, buf);
     var nk = load64(buf + BT_NKEYS);
+    # CLAMP: BT_NKEYS is read off a disk page, so a torn write or a hostile
+    # file controls it. Every *reader* clamped; the mutation paths did not,
+    # and used it as a loop bound while filling fixed-size buffers.
+    # (audit 2026-08-18 S1-5)
+    if (nk > BT_MAX_KEYS) { nk = BT_MAX_KEYS; }
     var modified = 0;
     for (var i = 0; i < nk; i = i + 1) {
         if (load64(buf + BT_KEYS + i * 8) == key) {
@@ -406,6 +451,38 @@ fn btree_remove_ref(fd, hdr, root, key, ref): i64 {
     if (modified != 0) { page_write(fd, leaf_pg, buf); }
     pg_free(buf);
     return 0;
+}
+
+# Repoint an existing (key, oldref) entry at newref, in place.
+#
+# DELETE compacts a data page by shifting survivors down into lower slots, but
+# a B-tree value is a (page, slot) pair — so every survivor that moved was left
+# with an index entry naming the slot it used to occupy. Lookups then read the
+# wrong slot, and correctness silently depended on reading past DP_NROWS, where
+# the pre-compaction bytes happened to linger.
+#
+# Deliberately an in-place rewrite rather than remove+insert: it touches no
+# structure, cannot split, and cannot change the root — which matters because
+# _exec_delete never writes the schema page back, so a new root would be lost.
+# (audit 2026-08-18 S2-4)
+fn btree_update_ref(fd, hdr, root, key, oldref, newref): i64 {
+    var leaf_pg = _bt_find_leaf(fd, hdr, root, key);
+    var buf = pg_alloc();
+    page_read(fd, leaf_pg, buf);
+    var nk = load64(buf + BT_NKEYS);
+    if (nk > BT_MAX_KEYS) { nk = BT_MAX_KEYS; }
+    var modified = 0;
+    for (var i = 0; i < nk; i = i + 1) {
+        if (load64(buf + BT_KEYS + i * 8) == key) {
+            if (load64(buf + BT_VALS + i * 8) == oldref) {
+                store64(buf + BT_VALS + i * 8, newref);
+                modified = 1;
+            }
+        }
+    }
+    if (modified != 0) { page_write(fd, leaf_pg, buf); }
+    pg_free(buf);
+    return modified;
 }
 
 # ── Whole-tree free (depth-first page reclaim) ─────────────
@@ -453,6 +530,11 @@ fn _bt_leaf_compact(fd, pg): i64 {
     var buf = pg_alloc();
     page_read(fd, pg, buf);
     var nk = load64(buf + BT_NKEYS);
+    # CLAMP: BT_NKEYS is read off a disk page, so a torn write or a hostile
+    # file controls it. Every *reader* clamped; the mutation paths did not,
+    # and used it as a loop bound while filling fixed-size buffers.
+    # (audit 2026-08-18 S1-5)
+    if (nk > BT_MAX_KEYS) { nk = BT_MAX_KEYS; }
     var kept = 0;
     for (var i = 0; i < nk; i = i + 1) {
         var v = load64(buf + BT_VALS + i * 8);

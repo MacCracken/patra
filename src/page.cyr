@@ -54,22 +54,43 @@ fn page_write(fd, num, buf): i64 {
 }
 
 # Allocate a new page (from free list or extend file)
+# Returns a page number, or 0 on failure. 0 is never a valid allocation (the
+# header sets HDR_PGCOUNT = 1, so the first page handed out is 1), so callers
+# can treat it as a sentinel — but historically none of the ten call sites
+# checked it, and a 0 would have been used as a real page number. Rather than
+# plumb an error through ten signatures, the two ways this could fail are
+# handled here. (audit 2026-08-18 S3)
 fn page_alloc(fd, hdr): i64 {
     var fh = load64(hdr + HDR_FREEHEAD);
     if (fh != 0) {
         var buf = _pt_alloc(PAGE_SIZE);
-        var rr = page_read(fd, fh, buf);
-        if (rr != PATRA_OK) { _pt_free(buf); return 0; }
-        var next = load64(buf + FP_NEXT);
-        store64(hdr + HDR_FREEHEAD, next);
+        # HDR_FREEHEAD is an on-disk pointer: bounds-check it like any other.
+        var rr = page_read_checked(fd, hdr, fh, buf);
+        if (rr == PATRA_OK) {
+            var next = load64(buf + FP_NEXT);
+            store64(hdr + HDR_FREEHEAD, next);
+            _pt_free(buf);
+            return fh;
+        }
+        # The free-list head is out of range or unreadable, so the list is
+        # corrupt. Drop it and extend the file instead of failing the
+        # allocation — losing the free list leaks pages, which is far better
+        # than returning 0 for a caller to use as a page number.
         _pt_free(buf);
-        return fh;
+        store64(hdr + HDR_FREEHEAD, 0);
     }
     var num = load64(hdr + HDR_PGCOUNT);
     store64(hdr + HDR_PGCOUNT, num + 1);
     var buf = _pt_alloc(PAGE_SIZE);
     memset(buf, 0, PAGE_SIZE);
-    page_write(fd, num, buf);
+    # page_write can now fail (it refuses to modify a page whose WAL
+    # before-image is not durable). Undo the extend and report failure rather
+    # than handing back a page whose contents were never initialised.
+    if (page_write(fd, num, buf) != PATRA_OK) {
+        store64(hdr + HDR_PGCOUNT, num);
+        _pt_free(buf);
+        return 0;
+    }
     _pt_free(buf);
     return num;
 }

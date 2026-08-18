@@ -27,7 +27,7 @@ The three defects a consumer could hit with no attacker and no corruption, each 
 ### ~~1.13.3 — S0 transaction integrity~~ ✅ transaction lock SHIPPED 2026-08-18
 
 - ~~**An explicit transaction releases its exclusive lock after its first statement.**~~ **Shipped v1.13.3** — `_tx_unlock`/`_tx_lock_sh` across 48 sites; regression test probes lock state from a second file description. The 2026-04-21 audit §3.5 action that would have caught this is now annotated closed. `DB_TX` is read only in begin/commit/rollback; every `_exec_*` runs an unconditional `patra_unlock`, and flock is non-counted. Another process can then commit mid-transaction, and a later rollback writes before-images over its committed pages. `_patra_query_exec`'s `patra_lock_sh` additionally *downgrades* EX→SH inside a transaction. ~49 call sites — ships alone. *(audit S0-4, reproduced; originally filed as 2026-04-21 §3.5 and never run)*
-- **STILL OPEN — moves to 1.13.5.** Result buffer sized from `TBL_NROWS`, filled from `DP_NROWS`. The rollback route into this (header surviving its own rollback) closed in 1.13.4; the malformed-file route is still open. Reachable without tampering via `BEGIN; DELETE; ROLLBACK;` because the header survives rollback. *(audit S0-5 — depends on the header fix below, so sequence after it or land together)*
+- ~~Result buffer sized from `TBL_NROWS`, filled from `DP_NROWS`.~~ **Shipped v1.13.5** — capacity plumbed into `tbl_scan_where`, `DP_NROWS` clamped per page, size multiply guarded against i64 wrap. (The rollback route closed in 1.13.4.) Reachable without tampering via `BEGIN; DELETE; ROLLBACK;` because the header survives rollback. *(audit S0-5 — depends on the header fix below, so sequence after it or land together)*
 
 ### ~~1.13.4 — S1 durability: make the write-ahead log actually write-ahead~~ ✅ SHIPPED 2026-08-18
 
@@ -38,7 +38,7 @@ These compose; treat as one coherent change with a two-process crash harness.
 - **`patra_rollback` ignores WAL overflow** (`wal.cyr:134`), restoring 64 pages of a larger transaction and reporting success.
 - **`wal_recover` runs before any lock is taken** (`lib.cyr:180`), so opening a database destroys another process's in-flight transaction.
 
-### 1.13.5 — S1 malformed-file hardening
+### ~~1.13.5 — S1 malformed-file hardening~~ ✅ SHIPPED 2026-08-18
 
 The `.patra` file is an untrusted input. Grep for every on-disk value used as a bound or index.
 
@@ -49,7 +49,9 @@ The `.patra` file is an untrusted input. Grep for every on-disk value used as a 
 
 ### 1.13.6 — S2 silent wrong answers
 
-- `tbl_delete` shifts survivors but only tombstones deleted refs — indexed lookups return wrong or resurrected rows (`table.cyr:438`).
+*(`tbl_delete` ref desync already shipped in 1.13.5 — see below.)*
+
+- ~~`tbl_delete` shifts survivors but only tombstones deleted refs.~~ **Shipped v1.13.5** — pulled forward out of necessity: the S1-6 slot bounds check could not land without it, because index correctness had been depending on reads past `DP_NROWS`. New `btree_update_ref`.
 - Duplicate keys straddling a leaf split become permanently unreachable (`btree.cyr:292`).
 - `_idx_plan`'s ±2^62 sentinels silently drop rows, so index and scan disagree (`lib.cyr:1452`).
 - Tokenizer truncates at `MAX_TOKENS` with no error — a long `UPDATE` loses its `WHERE` and updates every row (`sql.cyr:326`); plus dangling `AND`/`OR` (`:531`) and unconsumed trailing tokens (`:1039`).

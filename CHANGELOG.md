@@ -5,6 +5,87 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.5] - 2026-08-18 — the .patra file is untrusted input, and the index was lying about where rows live
+
+**S1 malformed-file hardening**
+([audit](docs/audit/2026-08-18/security-review.md) S1-5 … S1-7, S0-5, S3), plus
+**S2-4 pulled forward from 1.13.6** — it turned out the bounds checks could not
+land without it. 951 tests (was 935, +16), 7/7 fuzz, libro 15/15, vidya 19/19,
+benchmarks unchanged, lint 0-warn, vet/deny clean.
+
+### Security
+
+- **`BT_NKEYS` was trusted from disk on every mutation path.** Four of ten reads
+  were unclamped — `btree_insert`, `_bt_push_up`, `btree_remove_ref` and
+  `_bt_leaf_compact` — while every *reader* clamped. A page claiming
+  `BT_NKEYS = 1000` was used as a loop bound while filling `_pt_alloc(520)`
+  scratch arrays sized for 65 slots: roughly 8 KB written into a 520-byte
+  freelist block, straight through neighbouring freelist headers. All ten reads
+  now clamp (`_bt_leaf_ins`/`_bt_int_ins` included — they re-read the field
+  themselves rather than trusting the caller's check).
+
+- **B-tree row refs were dereferenced without bounds checks.** Both halves of a
+  ref come off a leaf page, so both are attacker-controllable. `page_read_checked`
+  exists precisely for this and was used at **zero** of the three ref sites; the
+  slot half was multiplied into a 4 KB buffer with no cap at all. A ref of
+  `0x000000010000FFFF` addressed ~16 MB past the page buffer, was read by
+  `where_eval`, and on a match was `memcpy`'d into the caller's result set — an
+  out-of-bounds read and a direct heap-memory disclosure. New `_bt_row_ptr`
+  validates the slot against a clamped `DP_NROWS`, and all three sites now use
+  `page_read_checked` and honour its return.
+
+- **`json_build_lens` ignored its `max` argument** — the parameter appeared only
+  in the signature. `jsonl_append_obj_lens` allocated exactly 4096 bytes and
+  relied on it. `_json_escape` was no better: its `cap = slen * 6 + 8` was
+  derived from the **source** length, so the guard could never fire and bounded
+  nothing about the destination. Both now take and honour a destination
+  capacity, returning -1 rather than overrunning, and the caller emits nothing
+  instead of a truncated line that would corrupt the JSONL stream for every
+  later reader.
+
+- **The result buffer was sized from `TBL_NROWS` and filled from `DP_NROWS`,
+  with nothing reconciling them.** `tbl_scan_where` now takes the buffer's row
+  capacity and stops at it, per-page `DP_NROWS` is clamped to what a page can
+  physically hold (`_dp_nrows_clamped`), and the size multiply is guarded before
+  it can wrap i64 negative — a negative total previously made `_pt_alloc` hand
+  back a tiny block while `memset` silently no-oped. `tbl_scan` got the same
+  capacity bound despite having no callers in-tree; an unbounded `memcpy` driven
+  by an on-disk count is not worth leaving for a future caller.
+
+- **`page_alloc` could return 0, and none of its ten call sites checked.**
+  Rather than plumb an error through ten signatures, both failure modes are
+  handled at the source: a corrupt `HDR_FREEHEAD` (now bounds-checked like any
+  other on-disk pointer) drops the free list and extends the file instead of
+  failing, and a failed extend write undoes the `HDR_PGCOUNT` bump. The two
+  sites that would corrupt a table if handed a 0 — `tbl_create`'s schema and
+  data pages, and `tbl_insert`'s fresh page — check explicitly.
+
+### Fixed
+
+- **`DELETE` left the index pointing at slots the rows had moved out of** (S2-4,
+  scheduled for 1.13.6 and pulled forward). `tbl_delete` compacts a page by
+  shifting survivors into lower slots, but a B-tree value is a `(page, slot)`
+  pair and only the *deleted* rows' refs were invalidated. Every survivor that
+  moved kept an entry naming its old slot.
+
+  **This is why it had to ship here:** bounding the slot against `DP_NROWS`
+  immediately broke `SELECT * FROM t1 WHERE id = 2` after a delete — the index
+  had been silently depending on reading *past* `DP_NROWS`, where the
+  pre-compaction bytes happened to still be sitting. The bounds check and this
+  fix are the same change; landing either alone leaves the database wrong.
+
+  New `btree_update_ref` repoints the entry in place. Deliberately not
+  remove-then-insert: an in-place rewrite touches no structure, cannot split,
+  and cannot change the root — which matters because `_exec_delete` never writes
+  the schema page back, so a new root would be lost. Removing the repointing
+  fails 7 assertions across two tests.
+
+### Changed
+
+- Long clamp comments rewrapped to stay inside the 120-column lint limit; the
+  first version of this change shipped 6 lint warnings, and patra's CI treats
+  lint as a hard gate.
+
 ## [1.13.4] - 2026-08-18 — the write-ahead log was not write-ahead
 
 **S1 durability batch of the 1.13.x repair arc**

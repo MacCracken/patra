@@ -48,12 +48,27 @@ fn _hex_digit(v): i64 {
 # `simdjson` in strict mode) reject raw control bytes. Pre-1.5.2 Patra could
 # emit invalid JSON whenever a STR column contained a byte outside the five
 # originally-escaped chars.
-fn _json_escape(dst, src, slen): i64 {
+# Escape `src` into `dst`, writing at most `dmax` bytes.
+# Returns the number of bytes written, or -1 if the escaped form does not fit.
+#
+# The old signature took no destination capacity: its `cap = slen * 6 + 8` was
+# derived from the SOURCE length, so `w + 6 > cap` could never trigger and the
+# guard bounded nothing about `dst`. (audit 2026-08-18 S1-7)
+fn _json_escape(dst, src, slen, dmax): i64 {
     var w = 0;
-    var cap = slen * 6 + 8;
     for (var i = 0; i < slen; i = i + 1) {
-        if (w + 6 > cap) { return w; }
         var c = load8(src + i) & 0xff;
+        # Worst case for this byte, checked BEFORE any store.
+        var need = 1;
+        if (c == 34) { need = 2; }
+        elif (c == 92) { need = 2; }
+        elif (c == 8) { need = 2; }
+        elif (c == 9) { need = 2; }
+        elif (c == 10) { need = 2; }
+        elif (c == 12) { need = 2; }
+        elif (c == 13) { need = 2; }
+        elif (c < 32) { need = 6; }
+        if (w + need > dmax) { return 0 - 1; }
         if (c == 34) {
             store8(dst + w, 92); store8(dst + w + 1, 34); w = w + 2;
         } elif (c == 92) {
@@ -90,19 +105,32 @@ fn _json_escape(dst, src, slen): i64 {
 # NUL bytes without being silently truncated by strlen — audit 2026-04-21 §2.6
 # log-forging case. Emits `[NUL]` for any NUL, producing valid JSON in all cases.
 # Pass `vlens = 0` to fall back to strlen on every STR value (legacy behavior).
+# Build a JSON object into `buf`, writing at most `max` bytes including the
+# trailing NUL. Returns the length written, or -1 if it does not fit.
+#
+# `max` was previously accepted and never read — it appeared only in the
+# signature — while jsonl_append_obj_lens allocated exactly 4096 bytes and
+# relied on it. A long enough key or value ran straight off the end.
+# (audit 2026-08-18 S1-7)
 fn json_build_lens(buf, max, keys, vals, vlens, types, n): i64 {
     var pos = 0;
+    # One byte is reserved throughout for the terminating NUL.
+    var lim = max - 1;
+    if (lim < 2) { return 0 - 1; }
     store8(buf + pos, 123); pos = pos + 1;
 
     for (var i = 0; i < n; i = i + 1) {
         if (i > 0) {
+            if (pos + 2 > lim) { return 0 - 1; }
             store8(buf + pos, 44); pos = pos + 1;
             store8(buf + pos, 32); pos = pos + 1;
         }
         # Key
-        store8(buf + pos, 34); pos = pos + 1;
         var kp = load64(keys + i * 8);
         var kl = strlen(kp);
+        # quote + key + quote + colon + space
+        if (pos + kl + 4 > lim) { return 0 - 1; }
+        store8(buf + pos, 34); pos = pos + 1;
         memcpy(buf + pos, kp, kl); pos = pos + kl;
         store8(buf + pos, 34); pos = pos + 1;
         store8(buf + pos, 58); pos = pos + 1;
@@ -111,18 +139,25 @@ fn json_build_lens(buf, max, keys, vals, vlens, types, n): i64 {
         # Value
         var vt = load64(types + i * 8);
         if (vt == COL_INT) {
+            # i64 renders to at most 20 chars ("-" + 19 digits).
+            if (pos + 20 > lim) { return 0 - 1; }
             pos = pos + fmt_int_buf(load64(vals + i * 8), buf + pos);
         } else {
+            if (pos + 2 > lim) { return 0 - 1; }
             store8(buf + pos, 34); pos = pos + 1;
             var sp = load64(vals + i * 8);
             var sl = 0;
             if (vlens != 0) { sl = load64(vlens + i * 8); }
             else { sl = strlen(sp); }
-            pos = pos + _json_escape(buf + pos, sp, sl);
+            # Reserve the closing quote in the escape budget.
+            var ew = _json_escape(buf + pos, sp, sl, lim - pos - 1);
+            if (ew < 0) { return 0 - 1; }
+            pos = pos + ew;
             store8(buf + pos, 34); pos = pos + 1;
         }
     }
 
+    if (pos + 1 > lim) { return 0 - 1; }
     store8(buf + pos, 125); pos = pos + 1;
     store8(buf + pos, 0);
     return pos;
@@ -148,6 +183,12 @@ fn patra_json_build(buf, max, keys, vals, types, n): i64 {
 fn jsonl_append_obj_lens(fd, keys, vals, vlens, types, n): i64 {
     var buf = _pt_alloc(4096);
     var len = json_build_lens(buf, 4096, keys, vals, vlens, types, n);
+    if (len < 0) {
+        # Does not fit — emit nothing rather than a truncated, malformed line
+        # that would corrupt the JSONL stream for every later reader.
+        _pt_free(buf);
+        return PATRA_ERR_FULL;
+    }
     jsonl_append(fd, buf, len);
     _pt_free(buf);
     return 0;
