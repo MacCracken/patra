@@ -1523,7 +1523,25 @@ fn test_insert_value_count_bounded() {
     }
     store8(&sql + w, 41); w = w + 1;  # ')'
     store8(&sql + w, 0);
-    assert_eq(patra_exec(db, &sql), PATRA_ERR_COLCOUNT, "200-value insert rejected");
+    # ~405 tokens, well past MAX_TOKENS (128). Since v1.13.6 the tokenizer
+    # reports the truncation instead of silently dropping the tail, so this is
+    # rejected as SYNTAX before the value-count cap is ever reached. It used to
+    # return COLCOUNT — the right rejection for the wrong reason, reached only
+    # because the statement had already been quietly cut to 127 tokens.
+    assert_eq(patra_exec(db, &sql), PATRA_ERR_SYNTAX, "200-value insert rejected (token limit)");
+
+    # A value list that FITS the token budget still exercises the MAX_COLS cap:
+    # 40 values is ~83 tokens.
+    var sql2[4096];
+    memcpy(&sql2, "INSERT INTO t VALUES (", 22);
+    var w2 = 22;
+    for (var j = 0; j < 40; j = j + 1) {
+        if (j > 0) { store8(&sql2 + w2, 44); w2 = w2 + 1; store8(&sql2 + w2, 32); w2 = w2 + 1; }
+        store8(&sql2 + w2, 49); w2 = w2 + 1;
+    }
+    store8(&sql2 + w2, 41); w2 = w2 + 1;
+    store8(&sql2 + w2, 0);
+    assert_eq(patra_exec(db, &sql2), PATRA_ERR_COLCOUNT, "40-value insert hits the column cap");
     patra_close(db);
 }
 
@@ -5276,6 +5294,210 @@ fn test_json_build_bounds() {
     _pt_free(types); _pt_free(vlens); _pt_free(vals); _pt_free(keys);
 }
 
+# -- v1.13.6: duplicate keys across a leaf split (audit S2-5) --
+
+fn test_dup_key_across_split() {
+    test_group("index mutations reach duplicate keys across a split (S2-5)");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (id INT, v INT)");
+
+    # 100 rows sharing indexed key 7 overflows an order-64 leaf, so the split
+    # boundary falls INSIDE the run of equal keys. sep == 7 is pushed up
+    # unchanged, leaving entries equal to sep in the LEFT leaf while a strict
+    # `key < keys[i]` descent routes 7 to the RIGHT.
+    var i = 0;
+    while (i < 100) {
+        patra_exec(db, "INSERT INTO t VALUES (7, 1)");
+        i = i + 1;
+    }
+    patra_exec(db, "INSERT INTO t VALUES (9, 99)");
+
+    # Reads were never affected — _bt_rwalk visits every child that can hold
+    # the key, so all 100 are found.
+    var rs = patra_query(db, "SELECT id FROM t WHERE id = 7");
+    assert_eq(patra_result_count(rs), 100, "all 100 duplicates readable");
+    patra_result_free(rs);
+
+    var idx = tbl_find(_db_hdr(db), "t", 1);
+    var spg = load64(_tbl_entry(_db_hdr(db), idx) + TBL_SCHEMA);
+    var sch = pg_alloc();
+    page_read(_db_fd(db), spg, sch);
+    var root = load64(sch + SCH_IDX_ROOT);
+
+    var refs = _pt_alloc(4096);
+    var n = btree_search(_db_fd(db), _db_hdr(db), root, 7, refs, 512);
+    assert_eq(n, 100, "btree holds 100 refs for key 7");
+
+    # The mutators used _bt_find_leaf (single path) and silently touched
+    # nothing for entries in the leaf that descent did not reach.
+    var target = load64(refs);
+    assert_eq(btree_remove_ref(_db_fd(db), _db_hdr(db), root, 7, target), 1,
+              "remove_ref finds a duplicate in the non-descent leaf");
+
+    var n2 = btree_search(_db_fd(db), _db_hdr(db), root, 7, refs, 512);
+    var live = 0;
+    for (var j = 0; j < n2; j = j + 1) {
+        if (load64(refs + j * 8) != (0 - 1)) { live = live + 1; }
+    }
+    assert_eq(live, 99, "exactly one ref tombstoned");
+
+    # Repointing has the same reachability requirement.
+    var t2 = 0;
+    for (var k = 0; k < n2; k = k + 1) {
+        if (t2 == 0) {
+            if (load64(refs + k * 8) != (0 - 1)) { t2 = load64(refs + k * 8); }
+        }
+    }
+    assert_eq(btree_update_ref(_db_fd(db), _db_hdr(db), root, 7, t2, t2), 1,
+              "update_ref reaches duplicates too");
+
+    _pt_free(refs);
+    pg_free(sch);
+    patra_close(db);
+    cleanup();
+}
+
+# -- v1.13.6: index range covers all of i64 (audit S2-1) -----
+
+fn test_idx_range_full_i64() {
+    test_group("indexed range covers the whole i64 domain (S2-1)");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE big (id INT, v INT)");
+
+    # 2^62 is 4611686018427387904 — the old sentinel. Rows beyond it were
+    # silently dropped from every indexed range query, so the index and a plain
+    # scan disagreed about the same predicate.
+    patra_exec(db, "INSERT INTO big VALUES (5, 1)");
+    patra_exec(db, "INSERT INTO big VALUES (4611686018427387905, 2)");
+    patra_exec(db, "INSERT INTO big VALUES (9223372036854775807, 3)");
+
+    # Indexed range (first INT column is auto-indexed).
+    var rs = patra_query(db, "SELECT id, v FROM big WHERE id > 4");
+    assert_eq(patra_result_count(rs), 3, "range finds keys beyond 2^62");
+    patra_result_free(rs);
+
+    var rs2 = patra_query(db, "SELECT v FROM big WHERE id = 9223372036854775807");
+    assert_eq(patra_result_count(rs2), 1, "i64 max key found by equality");
+    assert_eq(patra_result_get_int(rs2, 0, 0), 3, "and it is the right row");
+    patra_result_free(rs2);
+
+    # >= i64 max matches exactly one row; > i64 max matches none and must not
+    # wrap the boundary arithmetic into a full-range scan hit.
+    var rs3 = patra_query(db, "SELECT v FROM big WHERE id >= 9223372036854775807");
+    assert_eq(patra_result_count(rs3), 1, ">= i64 max finds one");
+    patra_result_free(rs3);
+
+    var rs4 = patra_query(db, "SELECT v FROM big WHERE id > 9223372036854775807");
+    assert_eq(patra_result_count(rs4), 0, "> i64 max finds none");
+    patra_result_free(rs4);
+
+    patra_close(db);
+    cleanup();
+}
+
+# -- v1.13.6: the parser rejects what it cannot represent ----
+
+fn test_parser_strictness() {
+    test_group("parser rejects input it cannot represent (S0-6, S2-2, S2-3)");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE p (id INT, name STR)");
+    patra_exec(db, "INSERT INTO p VALUES (1, 'a')");
+    patra_exec(db, "INSERT INTO p VALUES (2, 'b')");
+
+    # Unterminated string literal: the closing quote never arrives, so the
+    # statement is a truncated prefix of whatever the caller meant. It used to
+    # be accepted as a complete literal.
+    assert_eq(patra_exec(db, "INSERT INTO p VALUES (3, 'oops"),
+              PATRA_ERR_SYNTAX, "unterminated literal rejected");
+    var rs = patra_query(db, "SELECT id FROM p");
+    assert_eq(patra_result_count(rs), 2, "rejected insert changed nothing");
+    patra_result_free(rs);
+
+    # Integer literal past i64: _pt_atoi wrapped modulo 2^64, so the value was
+    # silently stored/matched as a DIFFERENT number.
+    assert_eq(patra_exec(db, "INSERT INTO p VALUES (99999999999999999999, 'x')"),
+              PATRA_ERR_SYNTAX, "out-of-range integer literal rejected");
+
+    # A dangling conjunction meant a chain truncated mid-way parsed as the
+    # narrower chain — `WHERE id = 1 AND` became `WHERE id = 1`, silently
+    # widening what an UPDATE or DELETE touched.
+    assert_eq(patra_exec(db, "DELETE FROM p WHERE id = 1 AND"),
+              PATRA_ERR_SYNTAX, "dangling AND rejected");
+    assert_eq(patra_exec(db, "DELETE FROM p WHERE id = 1 OR"),
+              PATRA_ERR_SYNTAX, "dangling OR rejected");
+    var rs2 = patra_query(db, "SELECT id FROM p");
+    assert_eq(patra_result_count(rs2), 2, "no row deleted by a rejected DELETE");
+    patra_result_free(rs2);
+
+    # Well-formed equivalents must still work.
+    assert_eq(patra_exec(db, "DELETE FROM p WHERE id = 1 AND name = 'a'"),
+              PATRA_OK, "complete AND chain still parses");
+    var rs3 = patra_query(db, "SELECT id FROM p");
+    assert_eq(patra_result_count(rs3), 1, "the complete DELETE applied");
+    patra_result_free(rs3);
+
+    # And a valid large-but-in-range literal is unaffected.
+    assert_eq(patra_exec(db, "INSERT INTO p VALUES (9223372036854775807, 'max')"),
+              PATRA_OK, "i64 max literal accepted");
+
+    patra_close(db);
+    cleanup();
+}
+
+# -- v1.13.6: over-long STR is rejected, not truncated (S2-8) --
+
+fn test_str_overlong_rejected() {
+    test_group("over-long STR is rejected, not silently truncated (S2-8)");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE s (id INT, name STR)");
+
+    # Two DISTINCT 300-byte values that share their first 255 bytes. Truncation
+    # made them identical on disk — silent data loss, and two rows that should
+    # differ compare equal.
+    var a[400];
+    var b[400];
+    memset(&a, 65, 300); store8(&a + 300, 0);
+    memset(&b, 65, 300); store8(&b + 299, 90); store8(&b + 300, 0);
+
+    var sqla[600];
+    memcpy(&sqla, "INSERT INTO s VALUES (1, '", 26);
+    memcpy(&sqla + 26, &a, 300);
+    memcpy(&sqla + 326, "')", 2);
+    store8(&sqla + 328, 0);
+    assert_eq(patra_exec(db, &sqla), PATRA_ERR_ROWSZ, "300-byte STR rejected");
+
+    var rs = patra_query(db, "SELECT id FROM s");
+    assert_eq(patra_result_count(rs), 0, "nothing was stored");
+    patra_result_free(rs);
+
+    # 255 bytes is the documented maximum and must still be accepted.
+    var sqlok[600];
+    memcpy(&sqlok, "INSERT INTO s VALUES (2, '", 26);
+    memcpy(&sqlok + 26, &a, 255);
+    memcpy(&sqlok + 281, "')", 2);
+    store8(&sqlok + 283, 0);
+    assert_eq(patra_exec(db, &sqlok), PATRA_OK, "255-byte STR accepted");
+
+    # UPDATE has the same rule, checked before any row is touched.
+    var upd[600];
+    memcpy(&upd, "UPDATE s SET name = '", 21);
+    memcpy(&upd + 21, &b, 300);
+    memcpy(&upd + 321, "' WHERE id = 2", 14);
+    store8(&upd + 335, 0);
+    assert_eq(patra_exec(db, &upd), PATRA_ERR_ROWSZ, "over-long UPDATE rejected");
+
+    var rs2 = patra_query(db, "SELECT id FROM s WHERE id = 2");
+    assert_eq(patra_result_count(rs2), 1, "row still present after rejected UPDATE");
+    patra_result_free(rs2);
+
+    patra_close(db);
+    cleanup();
+}
+
 fn main() {
     alloc_init();
     fl_init();
@@ -5541,6 +5763,10 @@ fn main() {
     test_rollback_restores_header();
     test_delete_repoints_index();
     test_json_build_bounds();
+    test_dup_key_across_split();
+    test_idx_range_full_i64();
+    test_parser_strictness();
+    test_str_overlong_rejected();
     test_bind_where();
     test_bind_update();
     test_bind_rebind();

@@ -77,10 +77,15 @@ fn _bt_find_leaf(fd, hdr, root, key): i64 {
 
     while (load64(buf + BT_LEAF) == 0) {
         if (_bt_pdepth >= BT_MAX_DEPTH) {
-            # Depth cap reached: malformed tree / cycle → return current page
-            # as if it were a leaf. Caller's key-match logic will find nothing.
+            # Depth cap reached: malformed tree or a cycle. Returning the
+            # current page used to be described as harmless ("the caller's
+            # key-match logic will find nothing") — but the caller is
+            # btree_insert, which writes LEAF structure into whatever it gets
+            # back, corrupting an internal node. 0 is never a valid B-tree
+            # page, so it is an unambiguous failure signal.
+            # (audit 2026-08-18 S2-6)
             pg_free(buf);
-            return pg;
+            return 0;
         }
         store64(&_bt_path + _bt_pdepth * 8, pg);
         _bt_pdepth = _bt_pdepth + 1;
@@ -98,8 +103,11 @@ fn _bt_find_leaf(fd, hdr, root, key): i64 {
         }
         pg = load64(buf + BT_VALS + ci * 8);
         if (page_read_checked(fd, hdr, pg, buf) != PATRA_OK) {
+            # Child is out of range or unreadable. `root` was returned here,
+            # which is itself an internal node in any tree deeper than one
+            # level — same corruption as above. (audit 2026-08-18 S2-6)
             pg_free(buf);
-            return root;
+            return 0;
         }
     }
     store64(&_bt_path + _bt_pdepth * 8, pg);
@@ -289,8 +297,20 @@ fn _bt_push_up(fd, hdr, root, left_pg, sep, right_pg): i64 {
 # Insert key-value into B-tree, returns (possibly new) root
 fn btree_insert(fd, hdr, root, key, val): i64 {
     var leaf_pg = _bt_find_leaf(fd, hdr, root, key);
+    # Descent failed (depth cap or an unreadable child): drop the index entry
+    # rather than write leaf structure over an internal node. The row itself is
+    # still stored; a scan finds it.
+    if (leaf_pg == 0) { return root; }
     var buf = pg_alloc();
-    page_read(fd, leaf_pg, buf);
+    if (page_read_checked(fd, hdr, leaf_pg, buf) != PATRA_OK) {
+        pg_free(buf);
+        return root;
+    }
+    # Belt and braces: only ever mutate an actual leaf.
+    if (load64(buf + BT_LEAF) == 0) {
+        pg_free(buf);
+        return root;
+    }
     var nk = load64(buf + BT_NKEYS);
     # CLAMP: BT_NKEYS is read off a disk page, so a torn write or a hostile
     # file controls it. Every *reader* clamped; the mutation paths did not,
@@ -429,60 +449,95 @@ fn _bt_rwalk(fd, hdr, pg, lo, hi, out, max, cp, depth): i64 {
 # ── Remove ref (lazy delete — set value to 0) ──────────────
 
 # Lazy-delete: invalidate a specific ref for a key
-fn btree_remove_ref(fd, hdr, root, key, ref): i64 {
-    var leaf_pg = _bt_find_leaf(fd, hdr, root, key);
+# ── Ref mutation (remove / repoint) ────────────────────
+#
+# Both mutators must visit EVERY leaf that can hold `key`, not just one.
+#
+# A leaf split takes sep = tk[32] and pushes it up unchanged, so when a run of
+# equal keys spans the split boundary, entries equal to sep stay in the LEFT
+# leaf while _bt_find_leaf's strict `key < keys[i]` descent routes the key
+# RIGHT. Reads were never affected — _bt_rwalk walks first-relevant-child
+# through to the last child whose separator exceeds `hi`, so it sees both
+# leaves — but the mutators used _bt_find_leaf and silently touched nothing.
+# Measured before this change: 100 refs under one key, btree_remove_ref
+# returned 0 (found nothing) and all 100 refs stayed live.
+#
+# Consequence was a stale index entry surviving a DELETE or an UPDATE of a
+# duplicate key, and (since v1.13.5) a silently-skipped ref repointing.
+# (audit 2026-08-18 S2-5)
+#
+# Descent mirrors _bt_rwalk exactly, so reads and mutations agree on which
+# leaves can hold a key. Returns the number of entries changed.
+fn _bt_mut_walk(fd, hdr, pg, key, oldref, newref, cp, depth): i64 {
+    if (depth >= BT_MAX_DEPTH) { return 0; }
     var buf = pg_alloc();
-    page_read(fd, leaf_pg, buf);
+    if (page_read_checked(fd, hdr, pg, buf) != PATRA_OK) {
+        pg_free(buf);
+        return 0;
+    }
     var nk = load64(buf + BT_NKEYS);
-    # CLAMP: BT_NKEYS is read off a disk page, so a torn write or a hostile
-    # file controls it. Every *reader* clamped; the mutation paths did not,
-    # and used it as a loop bound while filling fixed-size buffers.
-    # (audit 2026-08-18 S1-5)
     if (nk > BT_MAX_KEYS) { nk = BT_MAX_KEYS; }
-    var modified = 0;
-    for (var i = 0; i < nk; i = i + 1) {
-        if (load64(buf + BT_KEYS + i * 8) == key) {
-            if (load64(buf + BT_VALS + i * 8) == ref) {
-                store64(buf + BT_VALS + i * 8, 0 - 1);
-                modified = 1;
+    var leaf = load64(buf + BT_LEAF);
+
+    if (leaf != 0) {
+        var modified = 0;
+        for (var i = 0; i < nk; i = i + 1) {
+            if (load64(buf + BT_KEYS + i * 8) == key) {
+                if (load64(buf + BT_VALS + i * 8) == oldref) {
+                    store64(buf + BT_VALS + i * 8, newref);
+                    modified = 1;
+                    store64(cp, load64(cp) + 1);
+                }
+            }
+        }
+        if (modified != 0) { page_write(fd, pg, buf); }
+    } else {
+        # First child that can hold `key`, then onward while the separators
+        # still allow it — the same rule _bt_rwalk uses with lo == hi == key.
+        var first = 0;
+        for (var i = 0; i < nk; i = i + 1) {
+            if (load64(buf + BT_KEYS + i * 8) < key) {
+                first = i + 1;
+            }
+        }
+        var stop = 0;
+        for (var i = first; i <= nk; i = i + 1) {
+            if (stop == 0) {
+                _bt_mut_walk(fd, hdr, load64(buf + BT_VALS + i * 8),
+                key, oldref, newref, cp, depth + 1);
+                if (i < nk) {
+                    if (load64(buf + BT_KEYS + i * 8) > key) { stop = 1; }
+                }
             }
         }
     }
-    if (modified != 0) { page_write(fd, leaf_pg, buf); }
     pg_free(buf);
     return 0;
 }
 
+# Tombstone the (key, ref) entry. Lazy delete: the slot keeps its key and takes
+# the -1 sentinel as its value.
+fn btree_remove_ref(fd, hdr, root, key, ref): i64 {
+    var n = 0;
+    _bt_mut_walk(fd, hdr, root, key, ref, 0 - 1, &n, 0);
+    return n;
+}
+
 # Repoint an existing (key, oldref) entry at newref, in place.
 #
-# DELETE compacts a data page by shifting survivors down into lower slots, but
-# a B-tree value is a (page, slot) pair — so every survivor that moved was left
+# DELETE compacts a data page by shifting survivors into lower slots, but a
+# B-tree value is a (page, slot) pair — so every survivor that moved was left
 # with an index entry naming the slot it used to occupy. Lookups then read the
-# wrong slot, and correctness silently depended on reading past DP_NROWS, where
-# the pre-compaction bytes happened to linger.
+# wrong slot, and correctness silently depended on reading past DP_NROWS.
 #
 # Deliberately an in-place rewrite rather than remove+insert: it touches no
 # structure, cannot split, and cannot change the root — which matters because
 # _exec_delete never writes the schema page back, so a new root would be lost.
 # (audit 2026-08-18 S2-4)
 fn btree_update_ref(fd, hdr, root, key, oldref, newref): i64 {
-    var leaf_pg = _bt_find_leaf(fd, hdr, root, key);
-    var buf = pg_alloc();
-    page_read(fd, leaf_pg, buf);
-    var nk = load64(buf + BT_NKEYS);
-    if (nk > BT_MAX_KEYS) { nk = BT_MAX_KEYS; }
-    var modified = 0;
-    for (var i = 0; i < nk; i = i + 1) {
-        if (load64(buf + BT_KEYS + i * 8) == key) {
-            if (load64(buf + BT_VALS + i * 8) == oldref) {
-                store64(buf + BT_VALS + i * 8, newref);
-                modified = 1;
-            }
-        }
-    }
-    if (modified != 0) { page_write(fd, leaf_pg, buf); }
-    pg_free(buf);
-    return modified;
+    var n = 0;
+    _bt_mut_walk(fd, hdr, root, key, oldref, newref, &n, 0);
+    return n;
 }
 
 # ── Whole-tree free (depth-first page reclaim) ─────────────

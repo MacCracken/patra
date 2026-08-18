@@ -9,23 +9,24 @@
 
 ## Current
 
-> **v1.13.5 (2026-08-18)** — **the `.patra` file is untrusted input, and the
-> index was lying about where rows live.** `BT_NKEYS` was trusted from disk on
-> four mutation paths while every reader clamped, so a page claiming 1000 keys
-> wrote ~8 KB into a 520-byte freelist block. B-tree refs were dereferenced with
-> no bounds check at all — `page_read_checked` exists for exactly this and was
-> used at **zero** of the three ref sites — so a crafted ref addressed ~16 MB
-> past a 4 KB page buffer and, on a `where_eval` match, was `memcpy`'d into the
-> caller's result set. `json_build_lens` never read its `max`, and
-> `_json_escape`'s guard was computed from the *source* length. The result
-> buffer was sized from `TBL_NROWS` and filled from `DP_NROWS` with nothing
-> reconciling them. **S2-4 was pulled forward from 1.13.6 out of necessity**:
-> bounding the slot broke indexed lookups after a `DELETE`, because the index had
-> been depending on reading *past* `DP_NROWS` — `tbl_delete` shifted survivors
-> down without repointing their refs. New `btree_update_ref` fixes it in place.
-> **951 tests / 7 fuzz green.**
+> **v1.13.6 (2026-08-18)** — **silent wrong answers.** Nothing here crashes;
+> each item made patra confidently return the wrong result. Index *mutations*
+> could not reach duplicate keys on the far side of a leaf split — reads always
+> could (`_bt_rwalk` visits every candidate child, which is why it survived), but
+> `btree_remove_ref`/`update_ref` used single-path descent and touched nothing:
+> measured, 100 refs under one key and `remove_ref` returned 0 with all 100 still
+> live. Both now share `_bt_mut_walk`, whose descent mirrors reads exactly. The
+> index range planner covered only **±2^62**, so `WHERE id > 4` over
+> `{5, 2^62+1, i64max}` returned 1 of 3 rows. The tokenizer truncated at
+> `MAX_TOKENS` in silence (a truncated `UPDATE` keeps its SET list and loses its
+> `WHERE`), accepted unterminated string literals, and ignored a dangling
+> `AND`/`OR`; `_pt_atoi` wrapped modulo 2^64. All now report through a
+> **per-thread** flag (readers parse concurrently). `_bt_find_leaf` returned an
+> internal node on both failure paths while `btree_insert` wrote leaf structure
+> into it. An over-long STR was truncated to 255 bytes, making distinct values
+> identical. **976 tests / 7 fuzz green.**
 
-- **Version**: 1.13.5 (read `VERSION` for the authoritative number)
+- **Version**: 1.13.6 (read `VERSION` for the authoritative number)
 - **Cyrius toolchain**: 6.5.27 (pinned in `cyrius.cyml [package].cyrius`; 6.5.19 → 6.5.27 at v1.13.1, source-change-free).
   Progression: 6.1.15 (v1.11.0) → 6.2.1 (v1.11.1, stdlib
   pin sweep) → 6.2.19 (v1.11.3) → 6.2.21 (v1.11.5) → 6.2.22 (v1.12.0) →
@@ -154,7 +155,7 @@
 
 ## Tests / Fuzz / Bench
 
-- **Unit**: `tests/tcyr/patra.tcyr` — **951 / 951** assertions pass under
+- **Unit**: `tests/tcyr/patra.tcyr` — **976 / 976** assertions pass under
   cyrius 6.4.64 (re-run at the v1.12.11 pin bump) (+8 at v1.12.10: the `exec '' escaping` group — a `''` value
   round-trips through STR + TEXT columns via `patra_exec`, a `''` WHERE literal
   matches, and `patra_quote_str` doubles quotes; +6 at v1.12.8: the `text readback snapshot (flock-window fix)`
@@ -272,6 +273,7 @@ payload at `BY_DATA_MAX = 4072`.
 | Version | Date | Summary |
 |---------|------|---------|
 | 1.13.0 | 2026-08-12 | **Zero `[deps.*]` blocks — `[deps.sakshi]` (2.4.2) removed and moved to `[deps].stdlib` (folded 2.4.10); cyrius `6.4.65` → `6.5.19`.** The old pin was actively downgrading consumers: patra is itself folded into the stdlib, and `cyrius deps` overlays a git dep on top of the snapshot on *every build*, so a folded module was forcing an eight-releases-stale sakshi onto anything reaching it transitively (`agnosai -> bote -> libro -> patra -> sakshi 2.4.2`). agnosai carried a defensive counter-pin for several releases because of it; bote still does until this is folded into a cyrius release. Nine-minor toolchain jump needed no source changes to build or pass. `src/lib.cyr` + `src/wal.cyr` reformatted for the 6.5.19 formatter (pre-existing drift) — the `wal.cyr` hunk indents `#ifdef`/`#else`/`#endif`, **probed first** since a column-sensitive preprocessor would silently pick the wrong branch in `_wal_gen_salts`'s getrandom/agnos selection, which no Linux test run would catch; both forms take the same branch. Gates: **893 tests**, **7/7 fuzz**, benchmarks clean, fmt+lint 0-warn across 15 files, vet/deny clean, `lib/` diffs clean against the 6.5.19 snapshot after sync *and* after build. `dist/patra.cyr` regenerated at 6081 lines (v1.13.0). |
+| 1.13.6 | 2026-08-18 | **S2 batch — silent wrong answers.** Index mutations could not reach duplicate keys across a leaf split: `sep` is pushed up unchanged, so equal keys stay LEFT while strict `key < keys[i]` descent routes RIGHT. Reads were fine (`_bt_rwalk` visits every candidate child); `btree_remove_ref`/`update_ref` used `_bt_find_leaf` and silently touched nothing — measured, 100 refs under one key, `remove_ref` returned 0, all 100 stayed live. Both now share `_bt_mut_walk`. `_idx_plan` covered only ±2^62 (a range query returned 1 of 3 rows over `{5, 2^62+1, i64max}`) — now full i64 with saturating boundary arithmetic. Tokenizer truncation at `MAX_TOKENS`, unterminated string literals, dangling `AND`/`OR`, and `_pt_atoi`'s modulo-2^64 wrap all now report via a **per-thread** `TLS_LEXERR` (readers parse concurrently); `sql_parse` gates it on both sides of dispatch because an out-of-range literal is only found during parsing. The truncation check also removed a `break` inside a `while` with `var` declarations — a forbidden pattern. `_bt_find_leaf` returned an internal node on both failure paths while `btree_insert` wrote leaf structure into it; now returns 0 and the caller verifies `BT_LEAF`. Over-long STR rejected instead of truncated to 255. `test_insert_value_count_bounded` re-expected: a 200-value INSERT is ~405 tokens and is now SYNTAX (untokenizable) rather than COLCOUNT reached via silent truncation. **Deferred:** WHERE type mismatch still returns false rather than erroring — a contract decision needing per-statement validation across three exec paths. Gates: **976 tests** (+25), 7/7 fuzz, libro 15/15, vidya 19/19, benchmarks unchanged, lint 0-warn, vet/deny clean. `dist/patra.cyr` at 6633 lines. |
 | 1.13.5 | 2026-08-18 | **S1 malformed-file hardening + S2-4 pulled forward.** All ten `BT_NKEYS` reads now clamp (four mutation paths were unclamped while every reader clamped — a corrupt count wrote ~8 KB into a 520-byte block). All three B-tree ref sites now use `page_read_checked` and new `_bt_row_ptr`, which validates the slot against a clamped `DP_NROWS` — previously a crafted ref reached ~16 MB past the page buffer and its bytes were memcpy'd into the caller's result set. `json_build_lens` honours `max` and `_json_escape` takes a destination capacity (its old guard was derived from the SOURCE length and could never fire). `tbl_scan_where` takes a row capacity, `DP_NROWS` is clamped per page, and the result-size multiply is guarded against i64 wrap. `page_alloc` recovers from a corrupt free list instead of returning 0 to ten unchecking callers. **S2-4 shipped here out of necessity:** bounding the slot broke indexed lookups after DELETE, because `tbl_delete` shifted survivors without repointing their `(page, slot)` refs — index correctness had been depending on reads past `DP_NROWS`. New `btree_update_ref` repoints in place (not remove+insert: cannot split, cannot change the root, which `_exec_delete` would lose). Gates: **951 tests** (+16), 7/7 fuzz, libro 15/15, vidya 19/19, benchmarks unchanged, lint 0-warn, vet/deny clean. `dist/patra.cyr` at 6490 lines. |
 | 1.13.4 | 2026-08-18 | **S1 durability batch — the write-ahead log was not write-ahead.** Before-images went to disk unsynced while `patra_hdr_write` fdatasync'd the database fd every statement; records are now synced before `wal_log_page` returns and `page_write` refuses to modify a page whose before-image is not durable (bounded to explicit transactions — benchmarks unchanged). **Header page now WAL-logged** via a sentinel record (offset 0 is outside the page numbering), closing the `BEGIN; DELETE; ROLLBACK` divergence that left `TBL_NROWS` decremented while the rows came back — **WAL format v2 → v3**, v2 still accepted on recovery. **WAL dedup list grows** instead of capping at 64, so a large transaction is no longer silently unrollback-able; refusing the write was tried and rejected (callers ignore `page_write`'s return, and a garbage page spins `tbl_insert`'s tail-walk — the suite hung). `wal_rollback` now reports a partial restore. **Recovery runs under a non-blocking `LOCK_EX`** rather than unlocked, so opening a database no longer destroys another process's in-flight transaction. Unchecked replay seeks fixed. `test_wal_overflow` rewritten — it had encoded the defect as correct. Gates: **935 tests** (+10), 7/7 fuzz, libro 15/15, vidya 19/19, benchmarks unchanged, lint 0-warn, vet/deny clean, suite wall time 0.5s. `dist/patra.cyr` at 6260 lines. |
 | 1.13.3 | 2026-08-18 | **S0 batch 2 — `BEGIN`…`COMMIT` gave no cross-process isolation past its first statement.** `DB_TX` was consulted only by begin/commit/rollback, so every `_exec_*` and the query path released the transaction's flock on the way out (non-counted, so one unlock is total), and `_patra_query_exec`'s `patra_lock_sh` downgraded EX→SH first. Another process could take `LOCK_EX` and commit mid-transaction; a later `patra_rollback` then wrote before-images over its committed pages. Fixed with `_tx_unlock`/`_tx_lock_sh` (no-op while `DB_TX` set) across **47 unlock sites + 1 lock_sh**, spanning the eleven `_exec_*` paths, `_patra_query_exec` and `_patra_insert_row_impl`; the 13 `patra_lock_ex` sites deliberately left alone (re-acquiring a held exclusive lock is a harmless no-op). Regression test probes lock state from a second open file description and fails 4 assertions without the fix. **Closes the 2026-04-21 audit §3.5 action, which had never been dispositioned or run.** Also trimmed `cyrius.cyml` 75→53 lines (a manifest is not a changelog). Gates: **925 tests** (+10), 7/7 fuzz, libro 15/15, vidya 19/19, benchmarks unchanged, lint 0-warn, vet/deny clean. `dist/patra.cyr` at 6152 lines. |

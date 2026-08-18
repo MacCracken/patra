@@ -379,6 +379,12 @@ fn tbl_update(fd, hdr, idx, row_sz, schema, ncols, pr): i64 {
         }
         if (vct == COL_STR) {
             if (vvt != COL_STR) { pg_free(buf); return PATRA_ERR_TYPE; }
+            # A STR slot holds COL_STR_SZ - 1 bytes plus a NUL; silently
+            # truncating made distinct values collide. (audit 2026-08-18 S2-8)
+            if (load64(vset + SET_SLEN) > COL_STR_SZ - 1) {
+                pg_free(buf);
+                return PATRA_ERR_ROWSZ;
+            }
         }
     }
 

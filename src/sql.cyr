@@ -200,6 +200,13 @@ fn _spr(): i64 { return thread_local_get(TLS_PR); }
 fn _sntoks(): i64 { return thread_local_get(TLS_NTOKS); }
 fn _set_sntoks(n): i64 { thread_local_set(TLS_NTOKS, n); return 0; }
 
+# Lexer/parser error flag for THIS thread. Set when the input cannot be
+# represented — token limit reached, unterminated string literal, integer
+# literal out of i64 range. sql_parse refuses rather than parsing a statement
+# that is not the one the caller wrote. (audit 2026-08-18 S2-2, S2-3, S0-6)
+fn _lexerr(): i64 { return thread_local_get(TLS_LEXERR); }
+fn _set_lexerr(v): i64 { thread_local_set(TLS_LEXERR, v); return 0; }
+
 # Allocate this thread's parse scratch on first touch. Idempotent (slot 0 means
 # "not yet"). Called at the head of tokenize / prepared-statement restore — both  #skip-lint
 # under _patra_lock today, so the fl_alloc is serialized (S3 adds an allocator
@@ -324,12 +331,23 @@ fn _classify_ident(ptr, len): i64 {
 # Tokenize SQL string into token array
 fn sql_tokenize(input): i64 {
     _sql_ensure();
+    _set_lexerr(0);
     var pos = 0;
     var n = 0;
     var slen = strlen(input);
+    var tdone = 0;
 
     while (pos < slen) {
-        if (n >= MAX_TOKENS - 1) { break; }
+        # Token limit reached. This used to `break` — both a silent truncation
+        # (a long UPDATE lost its WHERE and updated every row) and a `break`
+        # inside a while loop containing `var` declarations, which this
+        # toolchain does not reliably compile. Flag + continue, per convention.
+        if (tdone == 1) { pos = slen; continue; }
+        if (n >= MAX_TOKENS - 1) {
+            _set_lexerr(1);
+            tdone = 1;
+            continue;
+        }
         var c = load8(input + pos);
 
         if (_is_ws(c)) { pos = pos + 1; continue; }
@@ -388,7 +406,10 @@ fn sql_tokenize(input): i64 {
                 pos = pos + 1;
             }
             _tok_set(n, SQLT_STR_LIT, input + start, wpos - start);
-            if (pos < slen) { pos = pos + 1; }
+            # A literal that ran to end-of-input never saw its closing quote.
+            # Accepting it silently turned a truncated statement into a
+            # different, valid-looking one. (audit 2026-08-18 S2-3)
+            if (pos < slen) { pos = pos + 1; } else { _set_lexerr(1); }
             n = n + 1;
             continue;
         }
@@ -459,10 +480,19 @@ fn sql_tokenize(input): i64 {
 
 # ── Helpers ────────────────────
 
+# Parse a non-negative decimal literal. Previously wrapped modulo 2^64 in
+# silence, so an out-of-range literal aliased onto a different value and was
+# stored or matched as that value. (audit 2026-08-18 S2-2)
 fn _pt_atoi(ptr, len): i64 {
     var r = 0;
     for (var i = 0; i < len; i = i + 1) {
-        r = r * 10 + (load8(ptr + i) - 48);
+        var d = load8(ptr + i) - 48;
+        # r * 10 + d must stay within i64.
+        if (r > (0x7FFFFFFFFFFFFFFF - d) / 10) {
+            _set_lexerr(1);
+            return 0;
+        }
+        r = r * 10 + d;
     }
     return r;
 }
@@ -487,6 +517,11 @@ fn _parse_where(pos): i64 {
 
     var count = 0;
     var join = 0 - 1;
+    # Set when AND/OR is consumed, cleared when the condition after it parses.
+    # Left set at loop exit means the chain ended on a dangling conjunction —
+    # `WHERE a = 1 AND` used to parse as `WHERE a = 1`, so a statement truncated
+    # mid-chain became a valid-looking narrower one. (audit 2026-08-18 S0-6)
+    var pending_conj = 0;
 
     while (pos <= _sntoks()) {
         var tt = _tok_type(pos);
@@ -497,6 +532,7 @@ fn _parse_where(pos): i64 {
 
         # col
         if (tt != SQLT_IDENT) { return 0 - 1; }
+        pending_conj = 0;
         # Audit 2026-04-21 §2.10: cap condition count before writing
         if (count >= WH_MAX) { return 0 - 1; }
         var cond = _spr() + PR_WHERE + count * WH_ENTRY_SZ;
@@ -538,9 +574,11 @@ fn _parse_where(pos): i64 {
             if (join == (0 - 1)) { join = WH_AND; }
             elif (join != WH_AND) { return 0 - 1; }
             pos = pos + 1;
+            pending_conj = 1;
         } elif (tt == SQLT_OR) {
             if (join == (0 - 1)) { join = WH_OR; }
             elif (join != WH_OR) { return 0 - 1; }
+            pending_conj = 1;
             pos = pos + 1;
         } else {
             break;
@@ -549,6 +587,7 @@ fn _parse_where(pos): i64 {
 
     # WHERE with no conditions is malformed
     if (count == 0) { return 0 - 1; }
+    if (pending_conj != 0) { return 0 - 1; }
     store64(_spr() + PR_WHERE_N, count);
     if (join == (0 - 1)) { join = WH_AND; }
     store64(_spr() + PR_WHERE_JOIN, join);
@@ -1044,18 +1083,27 @@ fn _parse_vacuum(): i64 {
 
 # Parse tokenized SQL into parse result
 fn sql_parse(): i64 {
+    # Refuse anything the TOKENIZER could not represent faithfully (token limit
+    # reached, unterminated string literal).
+    if (_lexerr() != 0) { return PATRA_ERR_SYNTAX; }
     memset(_spr(), 0, 4096);
+    var r = PATRA_ERR_SYNTAX;
     var tt = _tok_type(0);
     if (tt == SQLT_CREATE) {
-        if (_tok_type(1) == SQLT_INDEX) { return _parse_create_index(); }
-        return _parse_create();
+        if (_tok_type(1) == SQLT_INDEX) { r = _parse_create_index(); }
+        else { r = _parse_create(); }
     }
-    if (tt == SQLT_INSERT) { return _parse_insert(); }
-    if (tt == SQLT_SELECT) { return _parse_select(); }
-    if (tt == SQLT_UPDATE) { return _parse_update(); }
-    if (tt == SQLT_DELETE) { return _parse_delete(); }
-    if (tt == SQLT_DROP)   { return _parse_drop(); }
-    if (tt == SQLT_VACUUM) { return _parse_vacuum(); }
-    if (tt == SQLT_ALTER)  { return _parse_alter(); }
-    return PATRA_ERR_SYNTAX;
+    elif (tt == SQLT_INSERT) { r = _parse_insert(); }
+    elif (tt == SQLT_SELECT) { r = _parse_select(); }
+    elif (tt == SQLT_UPDATE) { r = _parse_update(); }
+    elif (tt == SQLT_DELETE) { r = _parse_delete(); }
+    elif (tt == SQLT_DROP)   { r = _parse_drop(); }
+    elif (tt == SQLT_VACUUM) { r = _parse_vacuum(); }
+    elif (tt == SQLT_ALTER)  { r = _parse_alter(); }
+
+    # And again after parsing: an out-of-range integer literal is only
+    # discovered when _pt_atoi converts it, which happens inside the parser —
+    # i.e. after the pre-check above has already passed.
+    if (_lexerr() != 0) { return PATRA_ERR_SYNTAX; }
+    return r;
 }

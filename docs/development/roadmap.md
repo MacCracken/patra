@@ -47,7 +47,7 @@ The `.patra` file is an untrusted input. Grep for every on-disk value used as a 
 - `json_build_lens` ignores its `max` argument entirely (`jsonl.cyr:93`).
 - `page_alloc` failure return never checked (`page.cyr:57`).
 
-### 1.13.6 — S2 silent wrong answers
+### ~~1.13.6 — S2 silent wrong answers~~ ✅ SHIPPED 2026-08-18
 
 *(`tbl_delete` ref desync already shipped in 1.13.5 — see below.)*
 
@@ -55,7 +55,8 @@ The `.patra` file is an untrusted input. Grep for every on-disk value used as a 
 - Duplicate keys straddling a leaf split become permanently unreachable (`btree.cyr:292`).
 - `_idx_plan`'s ±2^62 sentinels silently drop rows, so index and scan disagree (`lib.cyr:1452`).
 - Tokenizer truncates at `MAX_TOKENS` with no error — a long `UPDATE` loses its `WHERE` and updates every row (`sql.cyr:326`); plus dangling `AND`/`OR` (`:531`) and unconsumed trailing tokens (`:1039`).
-- `_pt_atoi` wraps modulo 2^64 (`sql.cyr:456`); unterminated string literals accepted (`:385`); `_bt_find_leaf` returns internal nodes on failure (`btree.cyr:63`); WHERE type mismatch returns false rather than erroring (`where.cyr:145`); STR >255 truncated silently (`row.cyr:52`).
+- All shipped in v1.13.6 **except one**, carried into 1.13.7:
+  - **WHERE type mismatch evaluates to false rather than erroring** (`where.cyr`). `intcol != 'str'` excludes every row where it should match them all. This is a **contract decision**, not just a bug: patra does no type coercion by design, and v1.13.2 made `UPDATE SET` reject mismatches, so WHERE rejecting is the consistent end state. Doing it properly means validating conditions against the schema once per statement across three exec paths — `where_eval` runs per-row inside the scan loop and has no error channel.
 
 ### 1.13.7 — gates, so this class cannot recur
 

@@ -306,12 +306,18 @@ var _patra_tls_ready = 0;    # published once all five slot indices are assigned
 # nanoseconds until it publishes. Called at the head of both TLS entry points
 # (_sql_ensure, _pg_slab_init) so the indices exist before any get/set; the fast
 # path (already ready) is a single compare.
+# v1.13.6: per-thread lexer/parser error flag. Must be per-thread, not global —
+# readers parse concurrently (v1.12.0 dropped the statement mutex on the read
+# path), so a shared flag would cross-contaminate parses.
+var TLS_LEXERR = 0 - 1;
+
 fn _patra_tls_ensure(): i64 {
     if (_patra_tls_ready == 1) { return 0; }
     if (atomic_cas(&_patra_tls_gate, 0, 1) != 0) {
         TLS_TOKS = thread_local_alloc();
         TLS_PR = thread_local_alloc();
         TLS_NTOKS = thread_local_alloc();
+        TLS_LEXERR = thread_local_alloc();
         TLS_SLAB_STACK = thread_local_alloc();
         TLS_SLAB_TOP = thread_local_alloc();
         _patra_tls_ready = 1;

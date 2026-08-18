@@ -5,6 +5,94 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.6] - 2026-08-18 — silent wrong answers
+
+**S2 batch of the 1.13.x repair arc**
+([audit](docs/audit/2026-08-18/security-review.md) S2-1 … S2-8, S0-6). Nothing
+here crashes or corrupts memory; each item made patra confidently return the
+wrong answer. 976 tests (was 951, +25), 7/7 fuzz, libro 15/15, vidya 19/19,
+benchmarks unchanged, lint 0-warn, vet/deny clean.
+
+### Fixed
+
+- **Index mutations could not reach duplicate keys on the far side of a leaf
+  split.** A split takes `sep = tk[32]` and pushes it up unchanged, so when a
+  run of equal keys spans the boundary, entries equal to `sep` stay in the LEFT
+  leaf while `_bt_find_leaf`'s strict `key < keys[i]` descent routes the key
+  RIGHT.
+
+  **Reads were never affected** — `_bt_rwalk` visits every child that can hold
+  the key, which is why this survived so long — but `btree_remove_ref` and
+  `btree_update_ref` used the single-path descent and silently touched nothing.
+  Measured before the fix: 100 refs under one key, `btree_remove_ref` returned 0
+  and all 100 refs stayed live. A `DELETE` or `UPDATE` of a duplicate key left a
+  stale index entry behind, and (since 1.13.5) the ref repointing was skipped
+  too. Both mutators now share `_bt_mut_walk`, whose descent mirrors `_bt_rwalk`
+  exactly — so reads and mutations finally agree on which leaves can hold a key.
+
+- **The index range planner covered only ±2^62.** `_idx_plan` seeded its bounds
+  at `±(1 << 62)`, so every indexed key outside ±4611686018427387904 was
+  silently dropped and an indexed range query disagreed with a plain scan of the
+  same predicate. Now the full i64 domain, with saturating boundary arithmetic
+  so `> i64max` and `< i64min` do not wrap into a spuriously wide range.
+  Measured: a `WHERE id > 4` over keys `{5, 2^62+1, i64max}` returned **1 of 3**
+  rows before, 3 after.
+
+- **The tokenizer truncated at `MAX_TOKENS` and said nothing.** A long statement
+  lost its tail — and a truncated `UPDATE` keeps its SET list while losing its
+  `WHERE`, updating every row instead of one. Compounding it, an unterminated
+  string literal was accepted as complete and a dangling trailing `AND`/`OR` was
+  ignored, so `WHERE a = 1 AND` parsed as `WHERE a = 1`. Every one of those
+  turned a truncated statement into a *valid-looking narrower* one rather than a
+  syntax error. All three now report, via a **per-thread** lexer error flag
+  (`TLS_LEXERR` — readers parse concurrently since v1.12.0, so a global would
+  cross-contaminate parses).
+
+  The truncation check also replaced a `break` inside a `while` loop containing
+  `var` declarations — a pattern this toolchain does not reliably compile, and
+  one CLAUDE.md forbids outright.
+
+- **`_pt_atoi` wrapped modulo 2^64**, so an out-of-range integer literal aliased
+  onto a different value and was stored or matched as that value. It now
+  reports. Note `sql_parse` gates the error flag on **both** sides of the parser
+  dispatch: the tokenizer's failures are known before parsing, but an
+  out-of-range literal is only discovered when `_pt_atoi` converts it, which
+  happens inside the parser.
+
+- **`_bt_find_leaf` returned an internal node on both failure paths** (depth cap
+  reached, and unreadable child — the latter returning `root`, itself internal
+  in any tree deeper than one level). Its comment called this harmless because
+  "the caller's key-match logic will find nothing", but the caller is
+  `btree_insert`, which writes LEAF structure into whatever it gets back. Both
+  paths now return 0, which is never a valid page, and `btree_insert` verifies
+  `BT_LEAF` before mutating.
+
+- **An over-long STR was truncated to 255 bytes in silence**, so two distinct
+  values became identical on disk. `INSERT` and `UPDATE` now return
+  `PATRA_ERR_ROWSZ`; 255 bytes remains the documented maximum and is unaffected.
+
+### Changed
+
+- **`test_insert_value_count_bounded` now expects `PATRA_ERR_SYNTAX`** where it
+  expected `PATRA_ERR_COLCOUNT`. A 200-value INSERT is ~405 tokens, far past the
+  128-token budget, so it is now rejected as untokenizable *before* the value
+  count is examined. The old `COLCOUNT` was the right rejection for the wrong
+  reason — reached only because the statement had already been quietly cut to
+  127 tokens. A second case covers the genuine column cap with a 40-value insert
+  that fits the token budget.
+
+### Deferred
+
+- **A WHERE type mismatch still evaluates to false rather than erroring**
+  (`where.cyr`), so `intcol != 'str'` excludes every row where it should match
+  them all. Unlike the items above, this is a **contract decision** — patra
+  deliberately does no type coercion, and v1.13.2 made `UPDATE SET` reject
+  mismatches outright, so the consistent move is for WHERE to reject too. But
+  `where_eval` is called per-row deep inside the scan loop and has no error
+  channel; doing it properly means validating conditions against the schema once
+  per statement, across three exec paths. Deliberately not rushed into this
+  batch.
+
 ## [1.13.5] - 2026-08-18 — the .patra file is untrusted input, and the index was lying about where rows live
 
 **S1 malformed-file hardening**
