@@ -5,6 +5,68 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.8] - 2026-08-18 — a WAL now belongs to a database, and WHERE stops lying about types
+
+Closes the 1.13.x repair arc. 1059 tests (was 1043, +16), 8/8 fuzz, libro 15/15,
+vidya 19/19, benchmarks unchanged, lint 0-warn, vet/deny clean.
+
+### Security
+
+- **A WAL was not bound to the database it protected.** Its salts authenticate
+  its records against **its own header**, not against any database, so
+  `wal_recover` replayed an orphaned `.wal` into whatever file later occupied
+  that path. Reproduced: database A accumulates 30 rows and is closed with a
+  transaction open, leaving `A.patra.wal`; `A.patra` is then deleted and
+  recreated — the shape of restoring a backup over a database that had crashed.
+  Opening the fresh file gave it **30 rows that were never inserted into it**,
+  overwriting the one row that was.
+
+  Found by `fuzz/fuzz_stmtseq.fcyr`, the statement-sequence harness added in
+  1.13.7 *because* the audit's own "what the gates did not catch" section
+  identified sequence coverage as the gap. The 16-dimension audit had missed it.
+
+  **Fix.** The header carries a random `HDR_DBID` in its reserved region,
+  assigned on first open under the same exclusive lock recovery already takes.
+  `patra_hdr_init` zeroes the page, so every pre-existing file reads 0 and is
+  migrated on next open — no format break, `PATRA_VER` stays 1. The WAL header
+  carries the owning id at offset 24, widening `WAL_HDR_SZ` 24 → 32 and moving
+  the record offset: **WAL format v3 → v4**. Recovery refuses a v4 WAL whose id
+  does not match.
+
+  **v2/v3 WALs carry no id and cannot be bound**, so they are replayed
+  **best-effort**: every record must name a page that exists in this database.
+  That is a sanity check, not proof of ownership — but refusing them outright
+  would drop undo for a database that genuinely crashed under an older binary,
+  leaving its half-written pages in place, which is its own corruption. Chosen
+  deliberately over the stricter alternative.
+
+  Verified both directions: the foreign WAL is no longer replayed (30 → 1), and
+  a database's **own** abandoned-transaction WAL is still replayed and the
+  transaction still undone.
+
+### Fixed
+
+- **A WHERE type mismatch evaluated to false instead of erroring**, so
+  `intcol != 'str'` excluded every row where it should have matched them all —
+  a confidently wrong empty answer rather than a diagnostic. `where_eval`
+  compares per row and has no error channel, so conditions are now type-checked
+  against the schema **once per statement, before any row is touched**, across
+  all three exec paths (`_patra_query_exec`, `tbl_update`, `tbl_delete`).
+  Mismatches return `PATRA_ERR_TYPE`, matching what v1.13.2 already did for
+  `UPDATE SET`. Consistent with patra's no-coercion design.
+
+  Scoped deliberately to genuine INT/STR mismatches. **BYTES/TEXT columns in a
+  WHERE are left alone** — their documented and tested contract is that they
+  match nothing, and turning that into an error is a separate contract change,
+  not a type mismatch. An earlier revision of this change made it an error and
+  broke `bytes where no match`; that was over-reach and was scoped back.
+
+### Added
+
+- `fuzz_stmtseq` gains the foreign-WAL invariant (exit 71–73), so the defect it
+  found stays fixed, plus a check that every database is assigned a non-zero
+  identity.
+
 ## [1.13.7] - 2026-08-18 — gates, so this class cannot recur (and one of them immediately found a new bug)
 
 **The gates batch of the 1.13.x arc.** The audit's central finding was that all

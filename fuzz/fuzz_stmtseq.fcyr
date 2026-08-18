@@ -184,7 +184,31 @@ if (idx_vs_scan(db, 5) != 0) { syscall(SYS_EXIT, 55); }
 if (hdr_nrows(db) != 0) { syscall(SYS_EXIT, 56); }
 patra_close(db);
 
-# ── 6. Reopen after each shape: recovery must leave a consistent file ──
+# ── 6. An orphaned WAL must not be replayed into a different database ──
+#
+# The salts authenticate a WAL against its own header, not against a database,
+# so before v1.13.8 an abandoned .wal was replayed into whatever file later
+# took that path. This harness found that defect; the invariant stays.
+
+db = fresh();
+seed(db, 30);
+patra_begin(db);
+patra_exec(db, "INSERT INTO t VALUES (2, 22)");
+patra_exec(db, "DELETE FROM t WHERE id = 1");
+patra_close(db);                 # abandoned: the .wal survives
+
+sys_unlink(_p);                  # replace the database, keep the orphaned WAL
+var fresh_db = patra_open(_p);
+if (fresh_db == 0) { syscall(SYS_EXIT, 70); }
+patra_exec(fresh_db, "CREATE TABLE t (id INT, v INT)");
+patra_exec(fresh_db, "INSERT INTO t VALUES (7, 77)");
+if (nrows(fresh_db) != 1) { syscall(SYS_EXIT, 71); }
+if (hdr_nrows(fresh_db) != 1) { syscall(SYS_EXIT, 72); }
+if (load64(_db_hdr(fresh_db) + HDR_DBID) == 0) { syscall(SYS_EXIT, 73); }
+patra_close(fresh_db);
+sys_unlink("fuzz_stmtseq.patra.wal");
+
+# ── 7. Reopen after each shape: recovery must leave a consistent file ──
 
 db = fresh();
 seed(db, 7);
@@ -192,11 +216,11 @@ patra_begin(db);
 seed(db, 7);
 patra_close(db);            # abandon a transaction WITHOUT commit/rollback
 var db2 = patra_open(_p);
-if (db2 == 0) { syscall(SYS_EXIT, 60); }
+if (db2 == 0) { syscall(SYS_EXIT, 80); }
 var after = nrows(db2);
-if (after < 0) { syscall(SYS_EXIT, 61); }
-if (hdr_nrows(db2) != after) { syscall(SYS_EXIT, 62); }
-if (lock_is_free() != 1) { syscall(SYS_EXIT, 63); }
+if (after < 0) { syscall(SYS_EXIT, 81); }
+if (hdr_nrows(db2) != after) { syscall(SYS_EXIT, 82); }
+if (lock_is_free() != 1) { syscall(SYS_EXIT, 83); }
 patra_close(db2);
 
 sys_unlink(_p);

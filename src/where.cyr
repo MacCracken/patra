@@ -117,6 +117,44 @@ fn _cmp_str(row_str, cmp_ptr, cmp_len, op): i64 {
 # Returns 1 if row matches, 0 if not.
 # pr = parse result buffer (_sql_pr).
 # Evaluate WHERE conditions against a row (1=match, 0=no)
+# Validate every WHERE condition's value type against its column, ONCE per
+# statement, before any row is touched.
+#
+# where_eval compares per row and has no error channel, so a type mismatch just
+# failed to match — `intcol != 'str'` excluded every row where it should have
+# matched them all, and the caller got a confidently wrong empty answer instead
+# of a diagnostic. v1.13.2 made `UPDATE SET` reject a mismatched assignment;
+# this is the same rule on the read side. patra does no type coercion by
+# design, so a mismatched comparison is a bug in the caller's SQL.
+#
+# BYTES/TEXT are deliberately NOT touched here. They are variable-length (the
+# row holds a chain ref, not the payload) and their documented, tested contract
+# is that a WHERE over them matches nothing. Turning that into an error is a
+# separate contract change, not a type mismatch, so it is left alone.
+#
+# A column that does not resolve is deliberately NOT an error here — that stays
+# where_eval's existing no-match behaviour. Returns PATRA_OK or PATRA_ERR_TYPE.
+# (audit 2026-08-18 S2-7)
+fn where_validate_types(schema, ncols, pr): i64 {
+    var wcount = load64(pr + PR_WHERE_N);
+    for (var i = 0; i < wcount; i = i + 1) {
+        var cond = pr + PR_WHERE + i * WH_ENTRY_SZ;
+        var ci = _wh_resolve_col(schema, ncols,
+        load64(cond + WH_COL_PTR), load64(cond + WH_COL_LEN));
+        if (ci >= 0) {
+            var ct = load64(schema + SCH_START + ci * SCH_ENTRY_SZ + SCH_CTYPE);
+            var vt = load64(cond + WH_VAL_TYPE);
+            if (ct == COL_INT) {
+                if (vt != COL_INT) { return PATRA_ERR_TYPE; }
+            }
+            if (ct == COL_STR) {
+                if (vt != COL_STR) { return PATRA_ERR_TYPE; }
+            }
+        }
+    }
+    return PATRA_OK;
+}
+
 fn where_eval(row, schema, ncols, pr): i64 {
     var wcount = load64(pr + PR_WHERE_N);
     if (wcount == 0) { return 1; }

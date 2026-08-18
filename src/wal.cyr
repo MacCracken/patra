@@ -4,11 +4,12 @@
 # On commit: WAL is deleted. On crash recovery: WAL is replayed (undo).
 # Integrates with page_write via globals — no call-site changes needed.
 #
-# File format (1.5.3+; v3 since 1.13.4, v2 still accepted on recovery):
+# File format (1.5.3+; v4 since 1.13.8; v2/v3 accepted on recovery, best-effort):
 #   [0..3]       magic "PTWA" (0x41575450 little-endian)
 #   [4..7]       version (2)
 #   [8..15]      salt1 (i64, fresh per transaction)
 #   [16..23]     salt2 (i64, fresh per transaction)
+#   [24..31]     dbid  (i64, the owning database's HDR_DBID; v4+)
 #   [24..]       records, each 4112 bytes:
 #                  [0..7]       page_num (i64; -1 = the header at offset 0)
 #                  [8..4103]    before-image page (4096 bytes)
@@ -38,13 +39,16 @@ enum WalConst {
     # v1.13.4, which made an over-64-page transaction silently unrollback-able.
     WAL_INIT_PAGES = 64;
     WAL_REC_SZ = 4112;
-    WAL_HDR_SZ = 24;
+    WAL_HDR_SZ = 32;
     WAL_MAGIC = 0x41575450;
     # v3 adds the header-page record (page_num == WAL_HDR_PAGE -> file offset
     # 0). v2 WALs contain no such record, so they replay correctly under v3
     # logic and are still accepted on recovery.
-    WAL_VER = 3;
+    # v4 adds the owning database's HDR_DBID at header offset 24, so an
+    # orphaned WAL can no longer be replayed into a different file.
+    WAL_VER = 4;
     WAL_VER_MIN = 2;
+    WAL_HDR_SZ_V3 = 24;
 }
 # Randomness is acquired per-target, never via a hardcoded syscall number:
 #   - Linux x86_64 / aarch64 / macos / agnos: the syscall peer defines the
@@ -59,6 +63,33 @@ enum WalConst {
 # Draw 16 bytes of randomness into (salt1, salt2). Prefers the OS CSPRNG;
 # if unavailable (very old kernel / restricted container / CSPRNG failure),
 # falls back to a time + tx-counter mix — weaker but still unique per txn.
+# One 64-bit random value, same OS-CSPRNG-then-fallback policy as the salts.
+# Shared with the database-identity assignment in patra_open.
+fn _pt_rand64(): i64 {
+    var buf = _pt_alloc(8);
+    #ifdef CYRIUS_TARGET_WIN
+    var nr = sys_getrandom(buf, 8, 0);
+    #else
+    var nr = syscall(SYS_GETRANDOM, buf, 8, 0);
+    #endif
+    var v = 0;
+    if (nr == 8) {
+        v = load64(buf);
+    } else {
+        #ifdef CYRIUS_TARGET_AGNOS
+        var t = syscall(SYS_TIME_UNIX);
+        #else
+        var t = syscall(201, 0);
+        #endif
+        _wal_tx_counter = _wal_tx_counter + 1;
+        v = t * 2654435761 + _wal_tx_counter * 1099511628211;
+    }
+    _pt_free(buf);
+    # 0 is the "unassigned" sentinel; never hand it back.
+    if (v == 0) { v = 1; }
+    return v;
+}
+
 fn _wal_gen_salts(): i64 {
     var buf = _pt_alloc(16);
     #ifdef CYRIUS_TARGET_WIN
@@ -111,7 +142,7 @@ fn _wal_hash(pg, page_data, salt1, salt2): i64 {
 }
 
 # Begin WAL logging for a transaction
-fn wal_start(db_fd, wal_path): i64 {
+fn wal_start(db_fd, wal_path, dbid): i64 {
     _wal_fd = file_open(wal_path, 578, 420);
     # O_RDWR | O_CREAT | O_TRUNC = 2 + 64 + 512 = 578
     # file_open (io): portable — bridges agnos's namelen + AO_* flag ABI.
@@ -134,6 +165,7 @@ fn wal_start(db_fd, wal_path): i64 {
     store32(hdr + 4, WAL_VER);
     store64(hdr + 8, _wal_salt1);
     store64(hdr + 16, _wal_salt2);
+    store64(hdr + 24, dbid);
     sys_write(_wal_fd, hdr, WAL_HDR_SZ);
     _pt_free(hdr);
     return PATRA_OK;
@@ -246,19 +278,31 @@ fn wal_commit(wal_path): i64 {
 
 # Verify WAL header and load its salts into the module globals. Returns
 # PATRA_OK, or PATRA_ERR_MAGIC on bad magic / unsupported version / short read.
+# Verify the WAL header and load its salts. Returns the WAL version (>= 2), or
+# a negative PATRA_ERR_* on bad magic / unsupported version / short read.
+# Leaves the fd positioned at the first record, which differs by version: a
+# v2/v3 header is 24 bytes, v4 is 32.
+var _wal_hdr_dbid = 0;
+
 fn _wal_hdr_verify(fd): i64 {
-    if (syscall(SYS_LSEEK, fd, 0, 0) < 0) { return PATRA_ERR_IO; }
+    if (syscall(SYS_LSEEK, fd, 0, 0) < 0) { return 0 - PATRA_ERR_IO; }
     var hdr = _pt_alloc(WAL_HDR_SZ);
-    var nr = sys_read(fd, hdr, WAL_HDR_SZ);
-    if (nr != WAL_HDR_SZ) { _pt_free(hdr); return PATRA_ERR_MAGIC; }
-    if (load32(hdr) != WAL_MAGIC) { _pt_free(hdr); return PATRA_ERR_MAGIC; }
+    var nr = sys_read(fd, hdr, WAL_HDR_SZ_V3);
+    if (nr != WAL_HDR_SZ_V3) { _pt_free(hdr); return 0 - PATRA_ERR_MAGIC; }
+    if (load32(hdr) != WAL_MAGIC) { _pt_free(hdr); return 0 - PATRA_ERR_MAGIC; }
     var wv = load32(hdr + 4);
-    if (wv < WAL_VER_MIN) { _pt_free(hdr); return PATRA_ERR_MAGIC; }
-    if (wv > WAL_VER) { _pt_free(hdr); return PATRA_ERR_MAGIC; }
+    if (wv < WAL_VER_MIN) { _pt_free(hdr); return 0 - PATRA_ERR_MAGIC; }
+    if (wv > WAL_VER) { _pt_free(hdr); return 0 - PATRA_ERR_MAGIC; }
     _wal_salt1 = load64(hdr + 8);
     _wal_salt2 = load64(hdr + 16);
+    _wal_hdr_dbid = 0;
+    if (wv >= 4) {
+        var nr2 = sys_read(fd, hdr + 24, 8);
+        if (nr2 != 8) { _pt_free(hdr); return 0 - PATRA_ERR_MAGIC; }
+        _wal_hdr_dbid = load64(hdr + 24);
+    }
     _pt_free(hdr);
-    return PATRA_OK;
+    return wv;
 }
 
 # Rollback: restore before-images from WAL, delete it. Stops replay on a
@@ -266,7 +310,7 @@ fn _wal_hdr_verify(fd): i64 {
 # hash and everything after it is skipped.
 fn wal_rollback(wal_path): i64 {
     if (_wal_fd < 0) { return 0; }
-    if (_wal_hdr_verify(_wal_fd) != PATRA_OK) {
+    if (_wal_hdr_verify(_wal_fd) < 0) {
         sys_close(_wal_fd);
         _wal_fd = 0 - 1;
         _wal_nlog = 0;
@@ -302,15 +346,47 @@ fn wal_rollback(wal_path): i64 {
 
 # Recover from crash: if WAL file exists, replay it. Returns 1 on replay
 # attempt (even if bad magic — the file is then left for inspection).
-fn wal_recover(db_fd, wal_path): i64 {
+# Recover from a crash: if a WAL exists, replay it. Returns 1 on a replay
+# attempt (even when refused — the file is then left on disk for inspection).
+#
+# `dbid` is the opening database's HDR_DBID and `pgcount` its HDR_PGCOUNT.
+#
+# A WAL used to be replayed into whatever file occupied its path. Its salts
+# authenticate its records against ITS OWN header, not against any database, so
+# an orphaned .wal — left by a crash, then outliving the database it belonged to
+# — was replayed wholesale into an unrelated file. Measured: a fresh database
+# that should hold 1 row held 30, resurrected from a previous database's
+# abandoned transaction. The realistic shape is restoring a backup over a
+# database that had crashed. (audit 2026-08-18 S1-8)
+#
+# v4+ carries the owning database's id and is refused outright on mismatch.
+# v2/v3 predate the id and cannot be bound, so they are replayed BEST-EFFORT:
+# every record must name a page that exists in this database. That is a
+# sanity check, not proof of ownership — but refusing them outright would drop
+# undo for a database that genuinely crashed under an older binary, leaving its
+# half-written pages in place, which is its own corruption.
+fn wal_recover(db_fd, wal_path, dbid, pgcount): i64 {
     var wfd = file_open(wal_path, 0, 0);
     if (wfd < 0) { return 0; }
-    if (_wal_hdr_verify(wfd) != PATRA_OK) {
+    var wv = _wal_hdr_verify(wfd);
+    if (wv < 0) {
         # Bad magic / stale format: refuse to replay. Leave the file on disk
         # so an operator can inspect it; we will not silently corrupt the DB.
         sys_close(wfd);
         return 1;
     }
+    if (wv >= 4) {
+        if (dbid == 0) { sys_close(wfd); return 1; }
+        if (_wal_hdr_dbid != dbid) {
+            # This WAL belongs to a different database. Leave it for inspection.
+            sys_close(wfd);
+            return 1;
+        }
+    }
+
+    var legacy = 0;
+    if (wv < 4) { legacy = 1; }
+
     var buf = _pt_alloc(WAL_REC_SZ);
     var done = 0;
     while (done == 0) {
@@ -320,6 +396,14 @@ fn wal_recover(db_fd, wal_path): i64 {
         var want = load64(buf + 8 + PAGE_SIZE);
         var got = _wal_hash(pg, buf + 8, _wal_salt1, _wal_salt2);
         if (want != got) { done = 1; continue; }
+        if (legacy == 1) {
+            # Unbindable: require the record to name a page this database
+            # actually has. A foreign WAL almost always fails here.
+            var ok = 0;
+            if (pg == WAL_HDR_PAGE) { ok = 1; }
+            elif (pg >= 1) { if (pg < pgcount) { ok = 1; } }
+            if (ok == 0) { done = 1; continue; }
+        }
         if (_pt_seek(db_fd, _wal_rec_offset(pg)) < 0) { done = 1; continue; }
         sys_write(db_fd, buf + 8, PAGE_SIZE);
     }

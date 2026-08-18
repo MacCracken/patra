@@ -5568,6 +5568,126 @@ fn test_row_geometry_property() {
     cleanup();
 }
 
+# -- v1.13.8: a WAL is bound to its database (audit S1-8) ----
+
+fn _wpath(): i64 { return "/tmp/patra_test.patra.wal"; }
+
+fn test_wal_bound_to_database() {
+    test_group("a WAL is bound to its database (S1-8)");
+    cleanup();
+    syscall(SYS_UNLINK, _wpath());
+
+    # Database A: 30 committed rows, then a transaction abandoned without
+    # commit or rollback, so its .wal survives — exactly as after a crash.
+    var a = patra_open(_tpath);
+    patra_exec(a, "CREATE TABLE t (id INT, v INT)");
+    var i = 0;
+    while (i < 30) { patra_exec(a, "INSERT INTO t VALUES (1, 11)"); i = i + 1; }
+    patra_begin(a);
+    patra_exec(a, "INSERT INTO t VALUES (2, 22)");
+    patra_exec(a, "DELETE FROM t WHERE id = 1");
+    patra_close(a);
+
+    # Replace the database, leaving the orphaned WAL in place — the shape of
+    # restoring a backup over a database that had crashed. Before v1.13.8 the
+    # foreign WAL was replayed wholesale and this fresh file came back holding
+    # A's 30 rows.
+    cleanup();
+    var b = patra_open(_tpath);
+    patra_exec(b, "CREATE TABLE t (id INT, v INT)");
+    patra_exec(b, "INSERT INTO t VALUES (7, 77)");
+    var rs = patra_query(b, "SELECT COUNT(*) FROM t");
+    assert_eq(patra_result_get_int(rs, 0, 0), 1, "foreign WAL not replayed");
+    patra_result_free(rs);
+    # The row must be OURS, not a resurrected one.
+    var rs2 = patra_query(b, "SELECT v FROM t WHERE id = 7");
+    assert_eq(patra_result_count(rs2), 1, "our own row survived");
+    assert_eq(patra_result_get_int(rs2, 0, 0), 77, "and holds our value");
+    patra_result_free(rs2);
+    patra_close(b);
+    syscall(SYS_UNLINK, _wpath());
+
+    # A database's OWN WAL must still be replayed — binding must not cost us
+    # crash recovery.
+    cleanup();
+    var c = patra_open(_tpath);
+    patra_exec(c, "CREATE TABLE t (id INT, v INT)");
+    var k = 0;
+    while (k < 10) { patra_exec(c, "INSERT INTO t VALUES (1, 11)"); k = k + 1; }
+    patra_begin(c);
+    var m = 0;
+    while (m < 10) { patra_exec(c, "INSERT INTO t VALUES (2, 22)"); m = m + 1; }
+    patra_close(c);                 # abandoned mid-transaction
+
+    var d = patra_open(_tpath);
+    var rs3 = patra_query(d, "SELECT COUNT(*) FROM t");
+    assert_eq(patra_result_get_int(rs3, 0, 0), 10, "own WAL replayed: txn undone");
+    patra_result_free(rs3);
+    patra_close(d);
+
+    # Every database gets a non-zero identity, and two databases differ.
+    cleanup();
+    var e = patra_open(_tpath);
+    var id1 = load64(_db_hdr(e) + HDR_DBID);
+    assert(id1 != 0, "database identity assigned");
+    patra_close(e);
+    cleanup();
+    var f = patra_open(_tpath);
+    var id2 = load64(_db_hdr(f) + HDR_DBID);
+    assert(id2 != 0, "second database identity assigned");
+    assert(id1 != id2, "distinct databases have distinct identities");
+    patra_close(f);
+
+    cleanup();
+    syscall(SYS_UNLINK, _wpath());
+}
+
+# -- v1.13.8: WHERE type mismatch is an error (audit S2-7) ---
+
+fn test_where_type_mismatch() {
+    test_group("WHERE type mismatch is rejected, not silently false (S2-7)");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE w (id INT, name STR)");
+    patra_exec(db, "INSERT INTO w VALUES (1, 'alice')");
+    patra_exec(db, "INSERT INTO w VALUES (2, 'bob')");
+
+    # A string compared against an INT column. where_eval had no error channel,
+    # so this matched nothing — and `!=` in particular returned an empty set
+    # where every row should have matched.
+    assert_eq(patra_query(db, "SELECT id FROM w WHERE id = 'alice'"), 0,
+              "STR literal vs INT column rejected");
+    assert_eq(patra_query(db, "SELECT id FROM w WHERE id != 'alice'"), 0,
+              "the != case too — this is the one that returned a wrong answer");
+
+    # And an INT compared against a STR column.
+    assert_eq(patra_query(db, "SELECT id FROM w WHERE name = 5"), 0,
+              "INT literal vs STR column rejected");
+
+    # UPDATE and DELETE validate the same way, before touching a row.
+    assert_eq(patra_exec(db, "UPDATE w SET name = 'x' WHERE id = 'alice'"),
+              PATRA_ERR_TYPE, "UPDATE rejects a mismatched WHERE");
+    assert_eq(patra_exec(db, "DELETE FROM w WHERE name = 5"),
+              PATRA_ERR_TYPE, "DELETE rejects a mismatched WHERE");
+    var rs = patra_query(db, "SELECT id FROM w");
+    assert_eq(patra_result_count(rs), 2, "no row touched by a rejected statement");
+    patra_result_free(rs);
+
+    # Correctly-typed comparisons are unaffected.
+    var ok1 = patra_query(db, "SELECT id FROM w WHERE id = 1");
+    assert_eq(patra_result_count(ok1), 1, "INT vs INT still works");
+    patra_result_free(ok1);
+    var ok2 = patra_query(db, "SELECT id FROM w WHERE name = 'bob'");
+    assert_eq(patra_result_count(ok2), 1, "STR vs STR still works");
+    patra_result_free(ok2);
+    var ok3 = patra_query(db, "SELECT id FROM w WHERE id != 1");
+    assert_eq(patra_result_count(ok3), 1, "!= with matching types still works");
+    patra_result_free(ok3);
+
+    patra_close(db);
+    cleanup();
+}
+
 fn main() {
     alloc_init();
     fl_init();
@@ -5838,6 +5958,8 @@ fn main() {
     test_parser_strictness();
     test_str_overlong_rejected();
     test_row_geometry_property();
+    test_wal_bound_to_database();
+    test_where_type_mismatch();
     test_bind_where();
     test_bind_update();
     test_bind_rebind();

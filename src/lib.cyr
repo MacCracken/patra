@@ -186,7 +186,22 @@ fn patra_open(path): i64 {
     # instead would self-deadlock a consumer that opens a second handle while
     # holding a transaction on the first. (audit 2026-08-18 S1-4)
     if (_pt_flock(fd, LOCK_EX + LOCK_NB) == 0) {
-        wal_recover(fd, wpath);
+        var ohdr = pg_alloc();
+        if (patra_hdr_read(fd, ohdr) == PATRA_OK) {
+            wal_recover(fd, wpath, load64(ohdr + HDR_DBID), load64(ohdr + HDR_PGCOUNT));
+            # Assign this database its identity if it does not have one — a
+            # freshly created file, or any file written before v1.13.8. Done
+            # once, under the same exclusive lock, and re-read afterwards so
+            # the handle sees it. Without an id a WAL cannot be bound, which is
+            # the whole point. (audit 2026-08-18 S1-8)
+            if (patra_hdr_read(fd, ohdr) == PATRA_OK) {
+                if (load64(ohdr + HDR_DBID) == 0) {
+                    store64(ohdr + HDR_DBID, _pt_rand64());
+                    patra_hdr_write(fd, ohdr);
+                }
+            }
+        }
+        pg_free(ohdr);
         patra_unlock(fd);
     }
 
@@ -1218,7 +1233,7 @@ fn patra_begin(db): i64 {
     var wpath = load64(db + DB_PATH);
     patra_lock_ex(fd);
     _pc_refresh(fd, _db_hdr(db));
-    wal_start(fd, wpath);
+    wal_start(fd, wpath, load64(_db_hdr(db) + HDR_DBID));
     store64(db + DB_TX, 1);
     return PATRA_OK;
 }
@@ -1604,6 +1619,15 @@ fn _patra_query_exec(db): i64 {
     var schema = pg_alloc();
     page_read(fd, spg, schema);
     var rsz = row_compute_size(schema, ncols);
+
+    # Type-check the WHERE before scanning. where_eval runs per row and has no
+    # error channel, so a mismatch used to surface as a confidently wrong empty
+    # result. (audit 2026-08-18 S2-7)
+    if (where_validate_types(schema, ncols, _spr()) != PATRA_OK) {
+        pg_free(schema);
+        _tx_unlock(db, fd);
+        return 0;
+    }
 
     # Check for aggregate query
     var agg = load64(_spr() + PR_AGG_TYPE);

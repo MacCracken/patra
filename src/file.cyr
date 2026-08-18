@@ -62,7 +62,7 @@ enum PatraErr {
 # (PATRA_VER stays 1; an old binary just ignores it). Every committed header
 # write bumps it; a reader (on any handle or process) that finds the on-disk gen
 # != its cached gen flushes the shared page cache (pcache.cyr). 8 of the 32
-# reserved bytes are now used; 40..63 stay reserved.
+# reserved bytes are now used; HDR_DBID takes 40..47 (v1.13.8); 48..63 stay reserved.
 enum HdrOff {
     HDR_MAGIC = 0;
     HDR_VER = 4;
@@ -70,6 +70,12 @@ enum HdrOff {
     HDR_FREEHEAD = 16;
     HDR_TBLCOUNT = 24;
     HDR_COMMITGEN = 32;
+    # v1.13.8: random per-database identity, assigned on first open. Binds a
+    # .wal to the database it protects — without it, wal_recover replayed an
+    # orphaned WAL into whatever file later took that path. 0 = not yet
+    # assigned (every file predating this, plus every freshly created one,
+    # since patra_hdr_init zeroes the page). (audit 2026-08-18 S1-8)
+    HDR_DBID = 40;
     HDR_TBLDIR = 64;
 }
 

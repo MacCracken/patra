@@ -355,6 +355,11 @@ fn tbl_update(fd, hdr, idx, row_sz, schema, ncols, pr): i64 {
     var nsets = load64(pr + PR_COUNT);
     _tbl_rows_affected = 0;
 
+    # WHERE conditions are type-checked before any row is touched, same as the
+    # SET list below. (audit 2026-08-18 S2-7)
+    var wvu = where_validate_types(schema, ncols, pr);
+    if (wvu != PATRA_OK) { pg_free(buf); return wvu; }
+
     # Validate every SET value's type against its column BEFORE touching a row.
     # Done up-front, not mid-loop, so a bad statement cannot leave a partial
     # update behind. Without this a STR value assigned to an INT column falls
@@ -480,6 +485,8 @@ fn tbl_update(fd, hdr, idx, row_sz, schema, ncols, pr): i64 {
 # Delete matching rows with page compaction. Returns PATRA_OK.
 # Delete matching rows with page compaction
 fn tbl_delete(fd, hdr, idx, row_sz, schema, ncols, pr): i64 {
+    var wvd = where_validate_types(schema, ncols, pr);
+    if (wvd != PATRA_OK) { return wvd; }
     var entry = _tbl_entry(hdr, idx);
     var cur = load64(entry + TBL_ROOT);
     var buf = pg_alloc();
