@@ -235,6 +235,46 @@ a 4 KB buffer with no cap against `DP_NROWS`. A ref of `0x000000010000FFFF`
 points ~16 MB past the slab; on a `where_eval` match its bytes are memcpy'd into
 the caller's result set — an out-of-bounds read and **heap-memory disclosure**.
 
+### S1-8 [REPRO] A WAL is not bound to the database it belongs to — found by the gates, after the audit
+
+**Added 2026-08-18, during the 1.13.7 gates batch.** This defect was NOT found by
+the 16-dimension audit above. It was found by `fuzz/fuzz_stmtseq.fcyr`, the
+statement-sequence harness written *because* of this report's "what the gates did
+not catch" section — which is the strongest available evidence that the gap it
+identified was the real one.
+
+Nothing ties a `.wal` file to the database it protects. The salts
+(`_wal_hdr_verify`) authenticate a WAL's records against **its own header**, not
+against any database, so `wal_recover` will happily replay an orphaned WAL into
+whatever file later occupies that path.
+
+Reproduced: database A accumulates 30 rows, opens a transaction, and is closed
+without commit or rollback, leaving `A.patra.wal` on disk. `A.patra` is then
+deleted and recreated — the shape of restoring a backup over a database that had
+crashed. Opening the fresh file replays the foreign WAL:
+
+```
+fresh DB should hold exactly 1 row; it holds:
+30
+```
+
+Thirty rows that were never inserted into this database appear in it, and the
+row the caller *did* insert is overwritten by foreign page images.
+
+**Fix direction (not yet implemented).** Give the database an identity — the
+header has reserved bytes at 40..63, and `patra_hdr_init` already zeroes the page,
+so an id written at create time is backward-compatible (old files read 0). Carry
+it in the WAL header and refuse to replay on mismatch. That widens
+`WAL_HDR_SZ` (24 → 32) and so moves the record offset, making it a **format
+change: v3 → v4**.
+
+The open decision is what to do with a v2/v3 WAL, which carries no id and
+therefore cannot be bound. Refusing it is safe but drops crash recovery for a
+database that crashed under an older binary; accepting it preserves recovery but
+leaves exactly this hole open for those files. That is a deliberate call, not a
+mechanical fix, which is why it was recorded rather than rushed into a batch
+about gates.
+
 ### S1-7 `json_build_lens` ignores its `max` argument
 
 `src/jsonl.cyr:93` takes a `max` capacity parameter and never reads it — `max`

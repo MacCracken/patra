@@ -1,0 +1,203 @@
+# fuzz_stmtseq.fcyr — statement-SEQUENCE invariants.
+#
+# Every other harness fuzzes a single input: SQL text (fuzz_sql), file bytes
+# (fuzz_file), a WAL image (fuzz_wal). None of them drive the API through
+# ORDERS of operations, and that blind spot is why the 2026-08-18 audit found
+# defects in a fully green tree:
+#
+#   * an explicit transaction dropped its exclusive flock after its FIRST
+#     statement (S0-4)
+#   * the header page was never WAL-logged, so `BEGIN; DELETE; ROLLBACK` put
+#     the rows back but left TBL_NROWS decremented (S1-2)
+#
+# Both need a SEQUENCE to observe. This harness walks transaction / mutation /
+# read orderings and asserts the invariants that must hold after each.
+#
+# Exit 0 = all pass. Non-zero = the invariant ID that failed.
+
+include "src/lib.cyr"
+
+alloc_init();
+fl_init();
+patra_init();
+
+var _p = "fuzz_stmtseq.patra";
+
+fn fresh(): i64 {
+    sys_unlink(_p);
+    # The WAL must go too. Leaving it behind is not merely untidy: patra does
+    # not bind a WAL to the database it belongs to, so an orphaned .wal is
+    # replayed into whatever file later takes that name. This harness found
+    # that defect the hard way — an earlier revision unlinked only the .patra
+    # and a previous run's WAL resurrected 30 rows into a fresh database.
+    # Tracked in the roadmap; until it is fixed, clean up explicitly.
+    sys_unlink("fuzz_stmtseq.patra.wal");
+    var db = patra_open(_p);
+    if (db == 0) { syscall(SYS_EXIT, 1); }
+    patra_exec(db, "CREATE TABLE t (id INT, v INT)");
+    return db;
+}
+
+fn nrows(db): i64 {
+    var rs = patra_query(db, "SELECT COUNT(*) FROM t");
+    if (rs == 0) { return 0 - 1; }
+    var n = patra_result_get_int(rs, 0, 0);
+    patra_result_free(rs);
+    return n;
+}
+
+# Header's own idea of the row count, which is what sizes a scan's result
+# buffer. It must never disagree with the rows actually present.
+fn hdr_nrows(db): i64 {
+    var idx = tbl_find(_db_hdr(db), "t", 1);
+    if (idx < 0) { return 0 - 1; }
+    return load64(_tbl_entry(_db_hdr(db), idx) + TBL_NROWS);
+}
+
+fn seed(db, n): i64 {
+    for (var i = 0; i < n; i = i + 1) {
+        patra_exec(db, "INSERT INTO t VALUES (1, 10)");
+    }
+    return 0;
+}
+
+# ── 1. Rollback must restore BOTH the rows and the header ──
+
+var db = fresh();
+seed(db, 20);
+if (nrows(db) != 20) { syscall(SYS_EXIT, 10); }
+if (hdr_nrows(db) != 20) { syscall(SYS_EXIT, 11); }
+
+patra_begin(db);
+patra_exec(db, "DELETE FROM t WHERE id = 1");
+patra_rollback(db);
+if (nrows(db) != 20) { syscall(SYS_EXIT, 12); }
+if (hdr_nrows(db) != 20) { syscall(SYS_EXIT, 13); }
+patra_close(db);
+
+# ── 2. Commit must persist, and the two counts must agree ──
+
+db = fresh();
+seed(db, 5);
+patra_begin(db);
+seed(db, 5);
+patra_exec(db, "DELETE FROM t WHERE id = 1");
+patra_commit(db);
+if (nrows(db) != 0) { syscall(SYS_EXIT, 20); }
+if (hdr_nrows(db) != 0) { syscall(SYS_EXIT, 21); }
+patra_close(db);
+
+# ── 3. A transaction holds its exclusive lock for its WHOLE span ──
+#
+# Probed from a second open file description, which contends exactly as a
+# second process would. LOCK_NB so a failure cannot hang the harness.
+
+fn lock_is_free(): i64 {
+    var f = _pt_file_open(_p);
+    if (f < 0) { return 0 - 1; }
+    var r = _pt_flock(f, LOCK_EX + LOCK_NB);
+    if (r == 0) { _pt_flock(f, LOCK_UN); sys_close(f); return 1; }
+    sys_close(f);
+    return 0;
+}
+
+db = fresh();
+seed(db, 3);
+if (lock_is_free() != 1) { syscall(SYS_EXIT, 30); }
+patra_begin(db);
+if (lock_is_free() != 0) { syscall(SYS_EXIT, 31); }
+patra_exec(db, "INSERT INTO t VALUES (2, 20)");
+if (lock_is_free() != 0) { syscall(SYS_EXIT, 32); }
+patra_exec(db, "UPDATE t SET v = 21 WHERE id = 2");
+if (lock_is_free() != 0) { syscall(SYS_EXIT, 33); }
+var rsq = patra_query(db, "SELECT id FROM t WHERE id = 1");
+if (rsq != 0) { patra_result_free(rsq); }
+if (lock_is_free() != 0) { syscall(SYS_EXIT, 34); }
+patra_exec(db, "DELETE FROM t WHERE id = 2");
+if (lock_is_free() != 0) { syscall(SYS_EXIT, 35); }
+patra_commit(db);
+if (lock_is_free() != 1) { syscall(SYS_EXIT, 36); }
+
+patra_begin(db);
+patra_exec(db, "INSERT INTO t VALUES (3, 30)");
+patra_rollback(db);
+if (lock_is_free() != 1) { syscall(SYS_EXIT, 37); }
+patra_close(db);
+
+# ── 4. Redundant / out-of-order transaction calls are inert ──
+
+db = fresh();
+seed(db, 4);
+if (patra_commit(db) != PATRA_OK) { syscall(SYS_EXIT, 40); }
+if (patra_rollback(db) != PATRA_OK) { syscall(SYS_EXIT, 41); }
+patra_begin(db);
+patra_begin(db);
+patra_exec(db, "INSERT INTO t VALUES (9, 90)");
+patra_commit(db);
+if (patra_commit(db) != PATRA_OK) { syscall(SYS_EXIT, 42); }
+if (nrows(db) != 5) { syscall(SYS_EXIT, 43); }
+if (hdr_nrows(db) != 5) { syscall(SYS_EXIT, 44); }
+if (lock_is_free() != 1) { syscall(SYS_EXIT, 45); }
+patra_close(db);
+
+# ── 5. Interleaved mutation orderings keep index and rows agreeing ──
+#
+# After any sequence, an indexed lookup and a full scan must return the same
+# rows. Divergence there is how the DELETE ref-desync (S2-4) presented.
+
+fn idx_vs_scan(db, key): i64 {
+    var a = patra_query(db, "SELECT id FROM t WHERE id = 5");
+    if (a == 0) { return 0 - 1; }
+    var na = patra_result_count(a);
+    patra_result_free(a);
+    # COUNT(*) with the same predicate takes the aggregate path, which always
+    # walks the page chain rather than the index.
+    var b = patra_query(db, "SELECT COUNT(*) FROM t WHERE id = 5");
+    if (b == 0) { return 0 - 1; }
+    var nb = patra_result_get_int(b, 0, 0);
+    patra_result_free(b);
+    if (na != nb) { return 0 - 1; }
+    return na;
+}
+
+db = fresh();
+for (var r = 0; r < 12; r = r + 1) {
+    patra_exec(db, "INSERT INTO t VALUES (5, 50)");
+    patra_exec(db, "INSERT INTO t VALUES (6, 60)");
+}
+if (idx_vs_scan(db, 5) != 12) { syscall(SYS_EXIT, 50); }
+
+patra_exec(db, "DELETE FROM t WHERE id = 6");
+if (idx_vs_scan(db, 5) != 12) { syscall(SYS_EXIT, 51); }
+
+patra_exec(db, "UPDATE t SET v = 55 WHERE id = 5");
+if (idx_vs_scan(db, 5) != 12) { syscall(SYS_EXIT, 52); }
+
+patra_begin(db);
+patra_exec(db, "DELETE FROM t WHERE id = 5");
+patra_rollback(db);
+if (idx_vs_scan(db, 5) != 12) { syscall(SYS_EXIT, 53); }
+if (hdr_nrows(db) != 12) { syscall(SYS_EXIT, 54); }
+
+patra_exec(db, "DELETE FROM t WHERE id = 5");
+if (idx_vs_scan(db, 5) != 0) { syscall(SYS_EXIT, 55); }
+if (hdr_nrows(db) != 0) { syscall(SYS_EXIT, 56); }
+patra_close(db);
+
+# ── 6. Reopen after each shape: recovery must leave a consistent file ──
+
+db = fresh();
+seed(db, 7);
+patra_begin(db);
+seed(db, 7);
+patra_close(db);            # abandon a transaction WITHOUT commit/rollback
+var db2 = patra_open(_p);
+if (db2 == 0) { syscall(SYS_EXIT, 60); }
+var after = nrows(db2);
+if (after < 0) { syscall(SYS_EXIT, 61); }
+if (hdr_nrows(db2) != after) { syscall(SYS_EXIT, 62); }
+if (lock_is_free() != 1) { syscall(SYS_EXIT, 63); }
+patra_close(db2);
+
+sys_unlink(_p);
+syscall(SYS_EXIT, 0);

@@ -34,6 +34,20 @@ jobs:
       - name: Resolve deps
         run: cyrius deps
 
+      - name: Format check
+        # Per-file loop, deliberately NOT `cyrfmt --check src/*.cyr`: cyrfmt
+        # reads only argv[1] and silently ignores the rest, so the glob form
+        # only ever checks the first entry and exits 0. libro had exactly that
+        # gate sitting green over five unformatted files until 2026-08-18.
+        # patra had no format gate at all, and src/lib.cyr had drifted.
+        run: |
+          fail=0
+          for f in src/*.cyr programs/*.cyr; do
+            cyrfmt --check "$f" >/dev/null 2>&1 || { echo "unformatted: $f"; fail=1; }
+          done
+          [ $fail -eq 0 ] || { echo "format: run cyrfmt -w on the files above"; exit 1; }
+          echo "format: all src/ and programs/ files formatted"
+
       - name: Lint
         # Hard gate: any `warn` line fails CI (matches sigil / agnosys).
         # patra's src + programs lint clean with zero warnings, so no
@@ -59,7 +73,22 @@ jobs:
         run: xxd -l 4 build/demo | grep -q "7f45 4c46"
 
       - name: Unit tests
-        run: cyrius test tests/tcyr/patra.tcyr
+        run: |
+          set -o pipefail
+          cyrius test tests/tcyr/patra.tcyr 2>&1 | tee build/test.out
+
+      - name: Assert test count matches the documented count
+        # Every release has hand-copied this number into several files, and it
+        # has disagreed with reality before (CHANGELOG said 894 while the suite
+        # reported 893). Derive it from the run and fail when a doc disagrees.
+        run: |
+          ACTUAL=$(sed -n 's/^\([0-9][0-9]*\) passed, .*/\1/p' build/test.out | tail -1)
+          [ -n "$ACTUAL" ] || { echo "could not read the test count"; exit 1; }
+          echo "actual: $ACTUAL assertions"
+          CLAIMED=$(sed -n 's/.*\*\*\([0-9][0-9]*\) \/ [0-9]*\*\* assertions pass.*/\1/p' docs/development/state.md | head -1)
+          [ -n "$CLAIMED" ] || { echo "state.md has no assertion-count line to check"; exit 1; }
+          [ "$ACTUAL" = "$CLAIMED" ] || { echo "state.md claims $CLAIMED assertions, suite reports $ACTUAL"; exit 1; }
+          echo "test count consistent: $ACTUAL"
 
       - name: Fuzz
         run: |
@@ -81,6 +110,28 @@ jobs:
           ./build/test_libro
           CYRIUS_DCE=1 cyrius build programs/test_vidya.cyr build/test_vidya
           ./build/test_vidya
+
+      - name: dist/ is in sync
+        # Regenerating must be a no-op. This also catches an under-declared
+        # sidecar: dist/patra.deps silently shipped 11 stdlib leaves against the
+        # 12 declared (sakshi missing) from <=1.12.11 through 1.13.1, because
+        # `cyrius distlib` matches a bracketed deps header inside comment prose.
+        # distlib's own self-check cannot catch it — undefined *functions* are
+        # only warnings.
+        run: |
+          cyrius distlib
+          git diff --exit-code -- dist/ || {
+            echo "dist/ is stale — run 'cyrius distlib' and commit the result";
+            exit 1;
+          }
+          DECLARED=$(sed -n '/^\[deps\]/,/^\[/p' cyrius.cyml | grep -o '"[a-z_]*"' | wc -l)
+          EMITTED=$(grep -cv '^#' dist/patra.deps)
+          [ "$DECLARED" = "$EMITTED" ] || {
+            echo "sidecar declares $DECLARED stdlib leaves but emits $EMITTED";
+            echo "(a bracketed deps.NAME header inside a comment eats a leaf)";
+            exit 1;
+          }
+          echo "dist/ in sync; sidecar has $EMITTED leaves"
 
   security:
     name: Security Scan
@@ -123,5 +174,21 @@ jobs:
               CYML_VERSION="$CYML_RAW"
           fi
           [ "$FILE_VERSION" = "$CYML_VERSION" ] || { echo "VERSION ($FILE_VERSION) != cyrius.cyml ($CYML_RAW)"; exit 1; }
-          grep -q "$FILE_VERSION" CHANGELOG.md || { echo "version not in changelog"; exit 1; }
-          echo "Version consistent: $FILE_VERSION (cyml: $CYML_RAW)"
+
+          # The CHANGELOG's TOP entry must be this version. A bare grep passes
+          # on any historical mention, which is how a release can ship with no
+          # entry of its own.
+          CL_TOP=$(grep -m1 '^## \[' CHANGELOG.md | sed 's/^## \[\([^]]*\)\].*/\1/')
+          [ "$CL_TOP" = "$FILE_VERSION" ] || { echo "CHANGELOG top entry is [$CL_TOP], expected [$FILE_VERSION]"; exit 1; }
+
+          # README's [deps.patra] example tag. This has drifted four separate
+          # times (1.12.2-1.12.5, 1.12.8-1.12.11, and twice since), always
+          # caught by an audit rather than by CI.
+          RM_TAG=$(grep -m1 '^tag = ' README.md | sed 's/tag = "\(.*\)"/\1/')
+          [ "$RM_TAG" = "$FILE_VERSION" ] || { echo "README [deps.patra] tag is $RM_TAG, expected $FILE_VERSION"; exit 1; }
+
+          # The committed bundle must carry this version too.
+          DIST_V=$(sed -n 's/^# Version: \(.*\)/\1/p' dist/patra.cyr | head -1)
+          [ "$DIST_V" = "$FILE_VERSION" ] || { echo "dist/patra.cyr is v$DIST_V, expected v$FILE_VERSION"; exit 1; }
+
+          echo "Version consistent: $FILE_VERSION (cyml: $CYML_RAW, changelog, README tag, dist)"

@@ -5498,6 +5498,76 @@ fn test_str_overlong_rejected() {
     cleanup();
 }
 
+# -- v1.13.7: row geometry property test ---------------------
+
+# Build "CREATE TABLE g (c0 T, c1 T, ...)" with `n` columns of one type.
+fn _mk_create(dst, n, tname, tlen): i64 {
+    var w = 0;
+    memcpy(dst + w, "CREATE TABLE g (", 16); w = w + 16;
+    for (var i = 0; i < n; i = i + 1) {
+        if (i > 0) { store8(dst + w, 44); w = w + 1; store8(dst + w, 32); w = w + 1; }
+        store8(dst + w, 99); w = w + 1;             # 'c'
+        w = w + fmt_int_buf(i, dst + w);
+        store8(dst + w, 32); w = w + 1;
+        memcpy(dst + w, tname, tlen); w = w + tlen;
+    }
+    store8(dst + w, 41); w = w + 1;                 # ')'
+    store8(dst + w, 0);
+    return w;
+}
+
+# CREATE TABLE must accept a schema exactly when its row fits one data page,
+# and reject it otherwise — for every column count, not just the ones a
+# hand-written test happens to pick. The 16-STR case (a legal column count and
+# an impossible 4096-byte row) shipped as a silent 24-byte page-buffer overflow
+# until v1.13.2 because nothing swept the space. (audit 2026-08-18 S0-1)
+fn test_row_geometry_property() {
+    test_group("row geometry: CREATE accepts exactly what fits a page");
+    var cap = PAGE_SIZE - DP_DATA;
+    var sql[8192];
+
+    # INT columns: 8 bytes each. MAX_COLS (32) binds long before page capacity.
+    for (var n = 1; n <= 32; n = n + 1) {
+        cleanup();
+        var db = patra_open(_tpath);
+        _mk_create(&sql, n, "INT", 3);
+        var want = PATRA_OK;
+        if (n * 8 > cap) { want = PATRA_ERR_ROWSZ; }
+        assert_eq(patra_exec(db, &sql), want, "INT column count accepted per geometry");
+        patra_close(db);
+    }
+
+    # STR columns: 256 bytes each, so the row exceeds the page at n = 16.
+    for (var m = 1; m <= 20; m = m + 1) {
+        cleanup();
+        var db2 = patra_open(_tpath);
+        _mk_create(&sql, m, "STR", 3);
+        var want2 = PATRA_OK;
+        if (m * 256 > cap) { want2 = PATRA_ERR_ROWSZ; }
+        var got2 = patra_exec(db2, &sql);
+        assert_eq(got2, want2, "STR column count accepted per geometry");
+
+        # Whatever CREATE accepted must survive a real insert — the overflow
+        # was on the INSERT path, not the CREATE path.
+        if (got2 == PATRA_OK) {
+            var ins[8192];
+            var iw = 0;
+            memcpy(&ins + iw, "INSERT INTO g VALUES (", 22); iw = iw + 22;
+            for (var k = 0; k < m; k = k + 1) {
+                if (k > 0) { store8(&ins + iw, 44); iw = iw + 1; store8(&ins + iw, 32); iw = iw + 1; }
+                store8(&ins + iw, 39); iw = iw + 1;   # '
+                store8(&ins + iw, 120); iw = iw + 1;  # x
+                store8(&ins + iw, 39); iw = iw + 1;   # '
+            }
+            store8(&ins + iw, 41); iw = iw + 1;
+            store8(&ins + iw, 0);
+            assert_eq(patra_exec(db2, &ins), PATRA_OK, "accepted schema also inserts");
+        }
+        patra_close(db2);
+    }
+    cleanup();
+}
+
 fn main() {
     alloc_init();
     fl_init();
@@ -5767,6 +5837,7 @@ fn main() {
     test_idx_range_full_i64();
     test_parser_strictness();
     test_str_overlong_rejected();
+    test_row_geometry_property();
     test_bind_where();
     test_bind_update();
     test_bind_rebind();

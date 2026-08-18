@@ -5,6 +5,94 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.7] - 2026-08-18 — gates, so this class cannot recur (and one of them immediately found a new bug)
+
+**The gates batch of the 1.13.x arc.** The audit's central finding was that all
+26 defects lived in a tree where every gate passed, so fixes without gates only
+reset the clock. 1043 tests (was 976, +67), **8 fuzz harnesses** (was 7),
+libro 15/15, vidya 19/19, benchmarks unchanged, lint 0-warn, vet/deny clean.
+
+### Added
+
+- **`fuzz/fuzz_stmtseq.fcyr` — statement-SEQUENCE invariants.** Every other
+  harness fuzzes a single input: SQL text, file bytes, a WAL image. None drove
+  the API through *orders* of operations, which is precisely why the transaction
+  lock span (S0-4) and the unlogged header page (S1-2) were invisible — both
+  need a sequence to observe. It walks transaction / mutation / read orderings
+  and asserts, after each: rows and `TBL_NROWS` agree, an indexed lookup and a
+  page-chain scan return the same rows, the exclusive lock is held for a
+  transaction's whole span, redundant `commit`/`rollback` are inert, and a
+  reopen after an abandoned transaction leaves a consistent file.
+
+  Verified to catch what it was written for: removing the header WAL logging
+  exits 13, removing the transaction-lock fix exits 32.
+
+  **It also found a defect the 16-dimension audit did not** — see below.
+
+- **Row-geometry property test.** Sweeps every column count 1..32 for INT and
+  1..20 for STR, asserting `CREATE TABLE` accepts a schema exactly when its row
+  fits a data page, and that anything accepted also survives a real `INSERT`.
+  The 16-STR case — a legal column count and an impossible 4096-byte row —
+  shipped as a silent page-buffer overflow until v1.13.2 because nothing swept
+  the space rather than sampling it.
+
+- **Four CI gates, each verified to fail when it should.** A gate nobody has
+  watched fail is not a gate; libro's format check sat green over five
+  unformatted files for exactly that reason.
+
+  | Gate | Catches |
+  |---|---|
+  | Format check (per-file loop) | patra had **no format gate at all**; `src/lib.cyr` had drifted |
+  | Test count vs `state.md` | the documented count disagreeing with the suite (CHANGELOG once said 894 against 893) |
+  | `dist/` in sync + sidecar leaf count | a stale bundle, and an under-declared sidecar — `dist/patra.deps` shipped 11 leaves against 12 declared from ≤1.12.11 through 1.13.1 |
+  | Version consistency | CHANGELOG **top** entry, README `[deps.patra]` tag, and `dist/` header all matching `VERSION` |
+
+  The format gate is deliberately a per-file loop, never `cyrfmt --check src/*.cyr`
+  — cyrfmt reads only `argv[1]` and silently ignores the rest, so the glob form
+  exits 0 no matter what follows. The version check now compares the CHANGELOG's
+  *top* entry rather than grepping for the string anywhere, which previously
+  passed on any historical mention. The README tag check exists because that one
+  value has drifted four separate times, caught by an audit every time and by CI
+  never.
+
+### Security
+
+- **A WAL is not bound to the database it belongs to.** Found by the new
+  sequence harness, hours after the audit that missed it. The salts authenticate
+  a WAL's records against **its own header**, not against any database, so
+  `wal_recover` replays an orphaned `.wal` into whatever file later occupies that
+  path. Reproduced: a fresh database that should hold 1 row holds **30**,
+  resurrected from a previous database's abandoned transaction. The realistic
+  shape is restoring a backup over a database that had crashed.
+
+  **Not fixed in this release.** The fix is a format change — a database id in
+  the header's reserved 40..63 region, carried in the WAL header, widening
+  `WAL_HDR_SZ` 24 → 32 and moving the record offset (v3 → v4) — and it carries a
+  genuine compatibility decision: a v2/v3 WAL has no id and cannot be bound, so
+  refusing it drops crash recovery for databases that crashed under an older
+  binary while accepting it leaves the hole open for exactly those files. That is
+  a maintainer call, not a mechanical fix, and rushing it into a batch about
+  gates would have been the wrong instinct. Tracked as **1.13.8** with the
+  reproduction; recorded as S1-8 in the audit report.
+
+### Changed
+
+- **`src/lib.cyr` reformatted** — the pre-existing drift carried unbundled since
+  1.13.2, landed as its own change and proven binary-identical (same DCE hash,
+  `git diff -w` empty) so it can never be confused with a functional diff. This
+  is what the new format gate would have caught years earlier.
+
+### Notes
+
+- The multi-process invariants are probed from a **second open file
+  description**, not a forked child. For `flock` that is exact — locks contend
+  between open file descriptions exactly as they do between processes — and it
+  keeps the harness single-binary and deterministic. It does **not** cover
+  cross-process page-cache coherence, which still has no automated gate.
+- `cyrfmt`'s scope is indentation, not signature spacing: `fn f(x):i64   {` is
+  left untouched. Worth knowing before trusting the format gate to catch a style
+  question it does not govern.
+
 ## [1.13.6] - 2026-08-18 — silent wrong answers
 
 **S2 batch of the 1.13.x repair arc**

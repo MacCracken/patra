@@ -47,6 +47,35 @@ The `.patra` file is an untrusted input. Grep for every on-disk value used as a 
 - `json_build_lens` ignores its `max` argument entirely (`jsonl.cyr:93`).
 - `page_alloc` failure return never checked (`page.cyr:57`).
 
+### 1.13.8 — bind the WAL to its database (found by the 1.13.7 gates)
+
+**Data corruption, and the audit missed it.** `fuzz/fuzz_stmtseq.fcyr` — the
+statement-sequence harness added in 1.13.7 — found that nothing ties a `.wal`
+to the database it protects. The salts authenticate a WAL's records against its
+own header, not against a database, so an orphaned WAL is replayed into whatever
+file later takes that path. Reproduced: a fresh database that should hold 1 row
+holds **30**, resurrected from a previous database's abandoned transaction. The
+realistic shape is restoring a backup over a database that had crashed.
+
+Fix: write a database id into the header's reserved 40..63 region at create time
+(zeroed by `patra_hdr_init`, so old files read 0 and stay compatible), carry it
+in the WAL header, and refuse to replay on mismatch. This widens `WAL_HDR_SZ`
+24 → 32 and moves the record offset — **WAL format v3 → v4**.
+
+**Open decision, needs a maintainer call:** a v2/v3 WAL carries no id and cannot
+be bound. Refusing it is safe but drops crash recovery for a database that
+crashed under an older binary; accepting it leaves the hole open for exactly
+those files. See [`../audit/2026-08-18/security-review.md`](../audit/2026-08-18/security-review.md) S1-8.
+
+Also carried here from 1.13.6:
+
+- **WHERE type mismatch evaluates to false rather than erroring** (`where.cyr`).
+  `intcol != 'str'` excludes every row where it should match them all. A contract
+  decision: patra does no coercion by design and v1.13.2 made `UPDATE SET` reject
+  mismatches, so WHERE rejecting is the consistent end state. Needs per-statement
+  validation across three exec paths — `where_eval` runs per-row with no error
+  channel.
+
 ### ~~1.13.6 — S2 silent wrong answers~~ ✅ SHIPPED 2026-08-18
 
 *(`tbl_delete` ref desync already shipped in 1.13.5 — see below.)*
@@ -58,7 +87,7 @@ The `.patra` file is an untrusted input. Grep for every on-disk value used as a 
 - All shipped in v1.13.6 **except one**, carried into 1.13.7:
   - **WHERE type mismatch evaluates to false rather than erroring** (`where.cyr`). `intcol != 'str'` excludes every row where it should match them all. This is a **contract decision**, not just a bug: patra does no type coercion by design, and v1.13.2 made `UPDATE SET` reject mismatches, so WHERE rejecting is the consistent end state. Doing it properly means validating conditions against the schema once per statement across three exec paths — `where_eval` runs per-row inside the scan loop and has no error channel.
 
-### 1.13.7 — gates, so this class cannot recur
+### ~~1.13.7 — gates, so this class cannot recur~~ ✅ SHIPPED 2026-08-18
 
 The audit's central finding is that **all 26 defects live in a fully green tree**. Fixes without gates just reset the clock.
 
