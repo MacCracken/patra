@@ -29,7 +29,14 @@ the `issues/` convention.
 
 *None.*
 
-(The argonaut audit-value escaping P1 shipped in v1.12.10 — tokenizer `''`
-escaping + `patra_quote_str`; the sit BYTES `OR IGNORE` request shipped in
-v1.12.6 (`patra_insert_row_or_ignore`); the yeo-cy-test concurrent-readers P2
-shipped in v1.12.0 — see [`archive/`](archive/).)
+Five requests have shipped and are indexed in [`archive/`](archive/): the
+yeo-cy-test concurrent-readers P2 (v1.12.0) and insert-returning-id (v1.11.5),
+sit's BYTES `OR IGNORE` (v1.12.6), the argonaut audit-value escaping P1
+(v1.12.10), and sit's whole-table result-buffer report (v1.13.1).
+
+**Partially-shipped work does not stay here.** sit's v1.13.1 request had a second
+half — scan-path `LIMIT` sizing — that did not ship. The request is archived
+because the consumer's blocker is gone; the remaining half is carried on
+[`../roadmap.md`](../roadmap.md) under Deferred, where an item without a live
+consumer belongs. Leaving the request open would have mis-stated the consumer's
+position.

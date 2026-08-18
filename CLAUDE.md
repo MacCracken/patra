@@ -196,7 +196,24 @@ src/
   - `.github/workflows/release.yml` — version gate → CI gate → DCE build → artifacts (source tarball, bundled `dist/patra.cyr`, DCE demo binary, SHA256SUMS)
 - **Concurrency**: CI uses `cancel-in-progress: true` keyed on workflow + ref
 - **State sync**: release post-hook should bump `docs/development/state.md` (version, binary size, test/bench counts, latest release row). If the hook doesn't, fix the hook — don't hand-maintain state
-- **Version-bump script**: `./scripts/version-bump.sh X.Y.Z` writes `VERSION` (the single source of truth — `cyrius.cyml package.version` tracks it via `${file:VERSION}`) and adds a CHANGELOG stub. Bumping the cyrius pin is still manual (separate from package version)
+- **Version bump — no script.** `VERSION` is the single source of truth;
+  `cyrius.cyml package.version` derives from it via `${file:VERSION}`, so there
+  is exactly one file to edit. The old `scripts/version-bump.sh` was removed
+  after v1.13.8: it wrote `VERSION`, added a CHANGELOG stub, and carried a
+  `sed` for `cyrius.cyml`'s `version =` line that had been **dead since that
+  field became `${file:VERSION}`** — a documented step that silently did
+  nothing. To cut a release:
+  1. `echo X.Y.Z > VERSION`
+  2. Add the `## [X.Y.Z] - YYYY-MM-DD` CHANGELOG entry (no stub to fill in)
+  3. Update the README `[deps.patra]` example tag
+  4. `cyrius distlib` to regenerate `dist/`
+  5. Refresh `docs/development/state.md`
+
+  Steps 1–4 are **CI-enforced** (v1.13.7): the version gate fails unless
+  `VERSION`, `cyrius.cyml`, the CHANGELOG's *top* entry, the README tag, and the
+  `dist/` header all agree, and a separate gate fails if `dist/` is stale or its
+  sidecar leaf count disagrees with `[deps].stdlib`. Bumping the **cyrius pin**
+  is separate from the package version and stays manual.
 
 ## Docs
 

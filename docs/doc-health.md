@@ -81,12 +81,14 @@ the archives have grown).
 | File | Last touched | Status | Notes |
 |---|---|---|---|
 | `state.md` | 2026-08-18 | ✅ Fresh | Current block at v1.13.8; assertion count **1059** (now the value CI compares the suite against). Two interior errors fixed this sweep: the binary block claimed **290,392 bytes "at v1.12.11 under 6.4.64"** — conflating v1.13.7's size with a v1.12.11 attribution, when the real figure is **302,744** at v1.13.8; and the CI line still described 893 tests / 7 fuzz with no mention of the four gates added in v1.13.7. |
-| `roadmap.md` | 2026-08-18 | ✅ Fresh | Current block moved v1.13.1 → **v1.13.8** with measured gates. The 1.13.x arc is marked complete; the deferred list is accurate (no item that has shipped is still listed — the failure that let "drop the statement mutex on the read path" sit there for thirteen releases). |
+| `roadmap.md` | 2026-08-18 | ✅ Fresh | Current block at **v1.13.8** with measured gates. **Stripped to forward-facing only** (125 → 118 lines, 14 shipped markers → 0): seven struck-through 1.13.x sections, a "Closed during this pass" section, and a duplicate `1.13.8` heading all removed — shipped work belongs in the CHANGELOG and `completed-phases.md`, which is what CLAUDE.md says this file is *not*. What remains is genuinely open: one upstream cyrius bug to file, two release-tooling decisions, and eleven trigger-stated deferrals. Added a trigger-discipline note, since a self-referential trigger is what let a shipped item sit on the deferred list for thirteen releases. |
 | `BENCHMARKS.md` | 2026-08-18 | ✅ Fresh (baseline + dated note) | Legacy rows remain the v1.9.5 / cyrius 6.0.1 baseline. Currency note rewritten for v1.13.8, and it now says the two things that matter: **v1.13.1 changed the read path materially** (41× on indexed lookups, curve flat — the legacy rows understate the index path), and **the repair arc did not move the numbers**, with the reason rather than just the assertion. |
 | `completed-phases.md` | 2026-08-18 | ✅ Fresh (append-only) | Extended from v1.12.6 through **v1.13.8** — the v1.12.7–1.13.1 patch tail plus a per-release breakdown of the repair arc. It had been carrying a promise to "fold into a 1.12.x phase row at the next phase rewrite" since v1.12.6; that promise is now kept. |
-| `requests/README.md` | 2026-07-16 | ✅ Fresh | Open list correctly empty. |
+| `requests/README.md` | 2026-08-18 | ✅ Fresh | Open list correctly empty — verified against the folder (README + `archive/` only). Rewritten this sweep to name all five archived requests and to state the partial-ship rule explicitly: sit's v1.13.1 request archived with its second half (scan-path `LIMIT`) carried to the roadmap's Deferred list, because the *consumer's* blocker is gone and leaving the request open would mis-state their position. |
+| `requests/archive/README.md` | 2026-08-18 | ✅ Fresh | **Index was incomplete** — it listed 3 of the 5 archived requests, missing the argonaut escaping P1 (v1.12.10) and sit's result-buffer report (v1.13.1). Both rows added. |
 | `requests/archive/2026-08-18-sit-result-buffer-sized-by-table.md` | 2026-08-18 | 📦 Archived + corrected | Recorded "894 tests" for v1.13.1 when the suite reported **893**, and no test was added by that release. Annotated with a correction rather than rewritten, since it is the archived record. The same error reached the CHANGELOG and was fixed at v1.13.2. |
 | `requests/archive/*` (4 others) | various | 📦 Shipped — archived | yeo-cy-test concurrent readers, insert-returning-id, sit OR IGNORE, argonaut escaping. All verified shipped. |
+| `issues/2026-08-18-cyrius-distlib-named-deps-unanchored-scan.md` | 2026-08-18 | 🟡 **OPEN — filed upstream** | First open entry in `issues/` since the folder was emptied. `cyrius distlib`'s unanchored `[deps.` scan matches comment prose and deletes that leaf from the sidecar. Worked around v1.13.2, CI-gated v1.13.7, filed upstream in cyrius's issue tree the same day. |
 | `issues/archive/*` (6) | various | 📦 Frozen — RESOLVED | cyrfmt buffer truncation, distlib blank lines, no-portable-mutex, agnos cross-target ABI, tail-cache race, TEXT/BLOB readback. |
 
 ---
@@ -143,8 +145,11 @@ did not have for seven cuts.
    in 8+ places, the binary size in 5, the test count in 4 — and at v1.13.1 those
    four disagreed (893 vs 894).
 3. **The promised automation never existed.** `CLAUDE.md` has asserted a release
-   post-hook since `state.md` was created; `scripts/` holds only
-   `version-bump.sh`, and `release.yml` never touched these files.
+   post-hook since `state.md` was created; `release.yml` never touched these
+   files, and after v1.13.8 there is no `scripts/` directory at all — its only
+   occupant, `version-bump.sh`, was removed as redundant (`VERSION` is the single
+   source of truth) and partly dead (its `cyrius.cyml` `sed` stopped matching
+   when that field became `${file:VERSION}`).
 
 **What changed at v1.13.7**: four CI gates now derive the load-bearing numbers
 from the build and fail when a doc disagrees. That does not make this ledger
