@@ -159,9 +159,10 @@ process-global (not per-DB) *because* the racing scratch is — a per-DB lock
 would leave a two-handle race. Hold time is the whole tokenize+parse+exec, so
 concurrent ops are memory-safe and serializable (the P1 bar; reader/writer
 parallelism is the open P2). **Caveat:** per-call locking does **not** make an
-explicit `patra_begin … patra_commit` span atomic across threads — transaction
-control is intentionally unlocked; keep a transaction on one thread or serialize
-the span yourself. Result-set accessors touch only caller-owned memory (no lock).
+explicit `patra_begin … patra_commit` span atomic across *threads* — the
+statement mutex is per-call, so keep a transaction on one thread or serialize the
+span yourself. Across *processes* the span **is** now protected: v1.13.3 made
+statements defer to the transaction's `flock` (see below). Result-set accessors touch only caller-owned memory (no lock).
 
 ## Durability (sync modes, v1.8.0)
 
@@ -184,3 +185,69 @@ INSERT) and `DB_ROWS_AFFECTED` (`patra_rows_affected` — rows matched by the la
 INSERT / UPDATE / DELETE). Captured at the `_exec_insert` / `_exec_update` /
 `_exec_delete` choke points; UPDATE/DELETE counts flow up from `table.cyr` via
 the `_tbl_rows_affected` global.
+
+
+## The 1.13.x repair arc (v1.13.2 – v1.13.8)
+
+A 16-dimension audit of v1.13.1 found 26 distinct defects in a tree where every
+gate passed — that finding, more than any individual bug, is what shaped this
+arc. Full report: [`../audit/2026-08-18/security-review.md`](../audit/2026-08-18/security-review.md).
+The durable shape changes are below; per-release detail is in the CHANGELOG.
+
+**Transactions own their lock (v1.13.3).** `DB_TX` was read only in
+`patra_begin` / `patra_commit` / `patra_rollback`, so the first statement inside
+a transaction ran its own unconditional `patra_unlock` — and flock being
+non-counted, that released the transaction's lock outright. `_tx_unlock` and
+`_tx_lock_sh` now no-op while `DB_TX` is set, across 47 unlock sites and the one
+shared-lock site; commit/rollback own the lock end to end. The 13
+`patra_lock_ex` sites are deliberately untouched — re-acquiring a held exclusive
+lock is a harmless no-op, and leaving them keeps statements correct even if the
+`DB_TX` bookkeeping were ever wrong.
+
+**The WAL is actually write-ahead (v1.13.4).** Before-images are `fdatasync`ed
+before `wal_log_page` returns, and `page_write` refuses to modify a page whose
+before-image is not durable. Cost is bounded to explicit transactions (`_wal_fd`
+is -1 outside one), which is why benchmarks did not move. The **header page**
+now gets a WAL record of its own via a sentinel key (`WAL_HDR_PAGE = -1` →
+file offset 0, since page N lives at `PAGE_SIZE + N*PAGE_SIZE` and offset 0 has
+no page number) — without it, `BEGIN; DELETE; ROLLBACK` restored the rows but
+left `TBL_NROWS` decremented. The WAL's dedup list **grows** rather than capping
+at 64: refusing the write instead was tried and is not viable, because callers
+ignore `page_write`'s return and a failed `page_alloc` leaves a garbage page
+whose `DP_NEXT` spins `tbl_insert`'s tail-walk.
+
+**A WAL belongs to a database (v1.13.8).** `HDR_DBID` (header reserved region,
+assigned on first open) is carried in the WAL header — **format v4**,
+`WAL_HDR_SZ` 24 → 32. The salts only ever authenticated a WAL against its own
+header, so an orphaned `.wal` was replayed into whatever file later took that
+path. v2/v3 carry no id and replay best-effort with a page-existence check.
+
+**The `.patra` file is untrusted input (v1.13.5).** `BT_NKEYS` is clamped at all
+ten read sites (four *mutation* paths were unclamped while every reader
+clamped); row refs resolve through `page_read_checked` + `_bt_row_ptr`, which
+validates the slot against a clamped `DP_NROWS`; `tbl_scan_where` takes a row
+capacity so the result buffer's size and its fill agree.
+
+**Index mutations see every leaf a key can occupy (v1.13.5 / v1.13.6).** Two
+coupled defects. `tbl_delete` compacts a page by shifting survivors into lower
+slots, but a B-tree value is a `(page, slot)` pair and only the *deleted* rows'
+refs were invalidated — so index correctness silently depended on reading past
+`DP_NROWS`, and bounding the slot broke lookups until `btree_update_ref` landed
+with it. Separately, `_bt_find_leaf`'s single-path descent could not reach
+duplicate keys stranded on the far side of a leaf split, so `remove_ref` /
+`update_ref` touched nothing; both now use `_bt_mut_walk`, whose descent mirrors
+`_bt_rwalk` exactly, so reads and mutations agree on which leaves can hold a key.
+
+**The parser rejects what it cannot represent (v1.13.6).** Token-limit
+truncation, unterminated literals, dangling `AND`/`OR`, and integer overflow all
+report through a **per-thread** `TLS_LEXERR` — per-thread because readers parse
+concurrently since v1.12.0. `sql_parse` gates it on both sides of dispatch: the
+tokenizer's failures are known up front, but an out-of-range literal is only
+found when `_pt_atoi` converts it, inside the parser.
+
+**Types are checked before rows are touched (v1.13.2 / v1.13.8).** `UPDATE SET`
+values and `WHERE` conditions are validated against the schema once per
+statement, so a mismatch returns `PATRA_ERR_TYPE` instead of writing 256 bytes
+into an 8-byte slot or silently matching nothing. BYTES/TEXT in a `WHERE` keep
+their documented match-nothing contract — that is a column-type boundary, not a
+mismatch.

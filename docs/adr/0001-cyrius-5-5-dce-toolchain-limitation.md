@@ -17,6 +17,16 @@ pin (cyrius **6.4.64**):
   byte-identical, DCE effectively a no-op); under 6.4.x the pass now genuinely
   overwrites the unreachable function bodies in place.
 
+> **Re-verified 2026-08-18 under cyrius 6.5.27** (patra v1.13.7; three pin bumps
+> after the 6.4.64 check below, which is what the standing commitment in §3 asks
+> for). DCE-on and DCE-off builds are **size-identical at 290,376 bytes** and
+> **not** byte-identical — `cmp -l` reports **79,391** differing bytes, matching
+> the compiler's own `79,449 bytes NOPed` note. Behaviour is unchanged from
+> 6.4.x: genuine NOP-fill, still no strip. **Conclusion stands; not superseded.**
+>
+> (The 290,376 figure is v1.13.7's binary. v1.13.8 is 302,744 B — the growth is
+> the repair arc's added checks, not a DCE change.)
+
 Still **no strip** — the image does not shrink, so the size regression this ADR
 documents persists and the decision stands unchanged: keep `CYRIUS_DCE=1`
 (now real NOP-fill, harmless, forward-compatible). **Not** superseded —

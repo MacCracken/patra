@@ -15,18 +15,31 @@ All patra modules draw from **one** 16-slot namespace. There is no
 per-module partitioning enforced by the compiler — it's convention. This is
 the authoritative map:
 
-| Slot | Owner | Meaning |
-|---|---|---|
-| 0 | `src/sql.cyr` (`SqlTls.TLS_TOKS`) | SQL token array ptr |
-| 1 | `src/sql.cyr` (`SqlTls.TLS_PR`) | parse-result buffer ptr (4096 B) |
-| 2 | `src/sql.cyr` (`SqlTls.TLS_NTOKS`) | token count (`ntoks`) |
-| 3 | `src/file.cyr` (`SlabTls.TLS_SLAB_STACK`) | page-slab LIFO array ptr |
-| 4 | `src/file.cyr` (`SlabTls.TLS_SLAB_TOP`) | page-slab top index |
-| 5–15 | — | free |
+> **Indices are no longer hardcoded (v1.12.12).** The slots are claimed at
+> runtime by `_patra_tls_ensure` (`src/file.cyr`) via `thread_local_alloc()`,
+> in the order below, behind a CAS gate so exactly one thread publishes them.
+> The numbers here are therefore the *claim order*, not literals in the source.
 
-Accessors: `_stoks()` / `_spr()` / `_sntoks()` read slots 0–2,
-`_set_sntoks()` writes slot 2 (`src/sql.cyr:185-190`). The slab uses slots
-3–4 directly (`src/file.cyr:271`).
+| Claim order | Owner | Meaning |
+|---|---|---|
+| 0 | `src/sql.cyr` (`TLS_TOKS`) | SQL token array ptr |
+| 1 | `src/sql.cyr` (`TLS_PR`) | parse-result buffer ptr (4096 B) |
+| 2 | `src/sql.cyr` (`TLS_NTOKS`) | token count (`ntoks`) |
+| 3 | `src/file.cyr` (`TLS_LEXERR`) | lexer/parser error flag (**v1.13.6**) |
+| 4 | `src/file.cyr` (`TLS_SLAB_STACK`) | page-slab LIFO array ptr |
+| 5 | `src/file.cyr` (`TLS_SLAB_TOP`) | page-slab top index |
+| 6–15 | — | free |
+
+Accessors: `_stoks()` / `_spr()` / `_sntoks()` read the first three,
+`_set_sntoks()` writes the third; `_lexerr()` / `_set_lexerr()` the fourth.
+The slab uses the last two directly.
+
+**Why `TLS_LEXERR` is per-thread and not a global.** v1.12.0 dropped the
+statement mutex on the read path, so readers tokenize and parse concurrently. A
+shared flag would let one thread's truncated statement poison another's parse.
+It is declared in `src/file.cyr` rather than `src/sql.cyr` only because
+`_patra_tls_ensure` — which claims every slot — lives there and `file.cyr` is
+included first.
 
 ## Why per-thread at all
 

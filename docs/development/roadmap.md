@@ -4,9 +4,9 @@
 >
 > Thin **backlog index**, forward-looking only. Open consumer requests live one-file-each in [`requests/`](requests/); upstream cyrius bugs live in [`issues/`](issues/). Shipped work lives in [`../../CHANGELOG.md`](../../CHANGELOG.md) + [`completed-phases.md`](completed-phases.md); live state in [`state.md`](state.md).
 
-> **Current**: **v1.13.1**, cyrius pin **6.5.27**, zero `[deps.*]` git blocks. Gates green: 893 tests, 7/7 fuzz, lint 0-warn, vet/deny clean, libro 15/15, vidya 19/19, `dist/` in sync.
+> **Current**: **v1.13.8**, cyrius pin **6.5.27**, zero `[deps.*]` git blocks. Gates green: **1059 tests**, **8/8 fuzz**, 40 benchmarks, lint 0-warn, fmt clean, vet/deny clean, libro 15/15, vidya 19/19, `dist/` in sync (12 sidecar leaves). Binary 302,744 B.
 >
-> ⚠ **A full audit on 2026-08-18 found 26 distinct defects in this green tree** — four of them S0 (reachable from ordinary SQL on a healthy database, every one returning `PATRA_OK`), reproduced with standalone programs. See [`../audit/2026-08-18/security-review.md`](../audit/2026-08-18/security-review.md). **The 1.13.x line below is the repair arc.** This supersedes the previous "no open backlog" posture: correctness work is exempt from the consumer-driven gate under CLAUDE.md's *"Correctness is the optimum sovereignty"*.
+> ✅ **The 1.13.x repair arc is complete (1.13.2 – 1.13.8).** A full audit on 2026-08-18 found **26 distinct defects in a tree where every gate passed** — four of them S0 (reachable from ordinary SQL on a healthy database, every one returning `PATRA_OK`), reproduced with standalone programs. See [`../audit/2026-08-18/security-review.md`](../audit/2026-08-18/security-review.md). All are fixed. The arc also added 8 fuzz harnesses (from 7), a row-geometry property test, and four CI gates that did not exist before — and one of those gates immediately found a 27th defect the audit had missed (the WAL/database binding, fixed in 1.13.8). This superseded the previous "no open backlog" posture: correctness work is exempt from the consumer-driven gate under CLAUDE.md's *"Correctness is the optimum sovereignty"*.
 
 ## Driven by consumer needs — with one standing exception
 

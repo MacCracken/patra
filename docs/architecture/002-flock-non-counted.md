@@ -56,3 +56,40 @@ the flock is now held through ORDER BY / LIMIT / projection and released only
 at return. `read_bytes` / `read_text` are pure memcpys from the snapshot — no
 chain walk escapes the lock window anymore. See note 003's matching update and
 CHANGELOG [1.12.8].
+
+
+## Transactions depend on this property — and were broken by it (v1.13.3)
+
+Property (1) — one `LOCK_UN` releases the lock no matter how many times it was
+taken — is exactly what made explicit transactions unsafe until v1.13.3.
+
+`patra_begin` took `LOCK_EX` and set `DB_TX`, but `DB_TX` was read **only** in
+`patra_begin` / `patra_commit` / `patra_rollback`. Every `_exec_*` and the query
+path ran its own unconditional `patra_unlock(fd)` on the way out, so the *first*
+statement inside a transaction released the transaction's lock outright. Worse,
+`_patra_query_exec` took `patra_lock_sh` — inside a transaction that is an
+EX→SH **downgrade** before the release, briefly publishing a shared lock other
+readers could join.
+
+Measured from a second open file description (which contends exactly as a second
+process does):
+
+| point | before v1.13.3 | after |
+|---|---|---|
+| after `patra_begin` | EXCLUSIVE | EXCLUSIVE |
+| after 1st statement in txn | **FREE** | EXCLUSIVE |
+| after `SELECT` in txn | **FREE** | EXCLUSIVE |
+| after `patra_commit` | FREE | FREE |
+
+From the first statement until commit, another process could take `LOCK_EX` and
+write the same file — and a later `patra_rollback` would restore before-images
+over its committed pages via raw `sys_write`.
+
+**Fix**: statements defer to the transaction. `_tx_unlock` / `_tx_lock_sh`
+no-op while `DB_TX` is set, so commit/rollback own the lock end to end. The
+`patra_lock_ex` sites are deliberately left alone — re-acquiring a held
+exclusive lock is a harmless no-op under property (1), and leaving them keeps
+statements correct even if the `DB_TX` bookkeeping were ever wrong.
+
+This defect was written down as an action in the 2026-04-21 audit (§3.5) and
+never dispositioned or run; running it four months later is what found it.

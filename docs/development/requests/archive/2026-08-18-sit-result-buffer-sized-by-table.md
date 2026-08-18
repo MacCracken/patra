@@ -1,5 +1,12 @@
 # sit — every query allocates and zeroes a result buffer sized for the WHOLE TABLE
 
+> **Correction (2026-08-18 doc sweep).** The "894 tests" figure below was wrong
+> when written — the suite reported **893** at v1.13.1, and no test was added by
+> that release (it was a pure refactor). The CHANGELOG carried the same error and
+> was corrected at v1.13.2. Left in place here as the archived record, with this
+> note, rather than rewritten. The v1.13.7 CI gate now derives the count from the
+> run and fails when a doc disagrees, so this class of drift cannot recur.
+
 **SHIPPED v1.13.1** (2026-08-18). Fixed via shape (1) below — `_idx_plan` runs the
 index planning before the allocation and returns the ref count, so the buffer is
 sized by the actual result and the B-tree is descended once. **41× at 32 MB

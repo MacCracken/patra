@@ -11,20 +11,28 @@ Benches under `/tmp` (tmpfs, fdatasync is a no-op) are noted explicitly.
 The group-commit comparison uses a real-disk path (`./bench_groupcommit.patra`,
 btrfs/NVMe under the repo) to avoid hiding the win.
 
-> **Currency note (updated 2026-07-16, v1.12.11).** The bulk of this table is the
-> v1.9.5 / cyrius 6.0.1 baseline. Patra is now at **v1.12.11** (cyrius pin
-> **6.4.64**) and the suite stands at **40 benchmarks**. Since the v1.9.5
-> sweep: the 1.10.x / 1.11.x arcs added SQL/data-model surface (column-list
-> INSERT, AUTOINCREMENT, TEXT, bind params, write-readback); v1.12.0 added the
-> concurrent-reader benches (`read_scan_4t_par` ~140 µs); and **v1.12.6 added the
-> BYTES-path dedup benches** below (`dedup_insert_row_or_ignore_500` ~10 µs vs the
-> `dedup_select_then_insert_row_500` workaround ~273 µs, **~26×**). No hot-path
-> rewrite since v1.8.2 — spot re-runs at each release stay within noise (v1.12.11
-> full 40-bench run under 6.4.64: `insert_1k` 21.6 µs, `read_scan_4t_par`
-> 135.1 µs, `dedup_insert_row_or_ignore_500` 9.7 µs — all at or under the prior
-> cut). A full re-baseline of the legacy rows is still deferred:
-> read the un-dated rows as the standing v1.9.5 reference and the dated additions
-> as current.
+> **Currency note (updated 2026-08-18, v1.13.8).** The bulk of this table is
+> still the v1.9.5 / cyrius 6.0.1 baseline. Patra is now at **v1.13.8** (cyrius
+> pin **6.5.27**) and the suite stands at **40 benchmarks**. Two spot re-runs
+> matter for this cut:
+>
+> - **v1.13.1 changed the read path materially** — `_patra_query_exec` had sized
+>   its result buffer by the *table's* row count rather than the query's, so an
+>   indexed equality lookup allocated and zeroed a buffer for every row in the
+>   table. Indexed lookups went **41× faster at 32 MB** (1,989,206 → 47,977 ns)
+>   and the curve went **flat** across 1.2 / 4.8 / 32 MB. Scan-path queries are
+>   unchanged. The legacy rows below predate this and understate the index path.
+> - **The 1.13.2 – 1.13.8 repair arc did not move the benchmarks.** Full runs at
+>   each cut stayed within noise (v1.13.8: `insert_1k_exec` 24.2 µs,
+>   `read_scan_4t_par` 141.8 µs, `select_idx_eq_unique_500` 22.1 µs,
+>   `btree_search_1k` 2.1 µs). That is expected rather than lucky: the added
+>   bounds checks are O(1) per call, the type validation is once per statement
+>   over ≤15 items, and the WAL's new `fdatasync` is bounded to explicit
+>   transactions (`_wal_fd` is -1 outside one) — which is precisely why no
+>   auto-commit benchmark sees it.
+>
+> No hot-path rewrite since v1.8.2 apart from v1.13.1's buffer sizing. A full
+> legacy re-baseline is still deferred (open question #1 in `doc-health.md`).
 
 ## SQL parsing
 

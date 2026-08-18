@@ -118,7 +118,10 @@ runs `patra_init()`.
 **Thread-safety**: a patra db handle is safe to share across threads — auto-commit
 statement calls (`patra_exec` / `patra_query` / the prepared variants /
 `patra_insert_row`) are internally consistent. Explicit `patra_begin … patra_commit`
-spans are *not* internally serialized; keep transactions on a single thread.
+spans are *not* internally serialized across **threads**; keep a transaction on
+one thread. Across **processes** the span is protected: since v1.13.3 statements
+defer to the transaction's exclusive `flock` rather than releasing it, so a
+transaction holds its lock from `BEGIN` to `COMMIT`/`ROLLBACK`.
 
 **Concurrent readers (v1.12.0)**: `SELECT`s run in parallel — `patra_query` /
 `patra_query_prepared` no longer serialize on the statement lock; writes stay

@@ -57,10 +57,11 @@
   ⚠ **Do not re-add it**, and do not repeat the v1.12.11 reasoning that deferred
   a bump as "additive only, no consumer need" — for a folded module that test is
   wrong, because the pin *overrides* what consumers resolve.
-- **Binary**: ~290 KB demo (`programs/demo.cyr`, x86_64; **290,392 bytes** at
-  v1.12.11 under 6.4.64 — **−8,488** vs v1.12.7's 282,240 under 6.3.5, entirely
-  cyrius codegen improvement across the 6.3.5 → 6.4.64 span, zero patra source
-  changed). Prior: 282,240 at
+- **Binary**: ~303 KB demo (`programs/demo.cyr`, x86_64; **302,744 bytes** at
+  v1.13.8 under 6.5.27). The 1.13.x repair arc added **+12,368** over v1.13.1's
+  290,376 — bounds checks, type validation, the tx-aware lock helpers, the
+  growable WAL dedup list, and the database-identity binding. Prior: 290,392 at
+  v1.13.7; 273,752 at
   v1.12.7 under 6.3.5; +512 over v1.12.6's 281,728 — the wider db handle
   struct (64 → 88 B for the per-handle `DB_LP_*` tail-page cache) + gen-gate
   logic. Prior: 281,728 at v1.12.6 (+2,000 over v1.12.5's 279,728 — the
@@ -323,7 +324,7 @@ Full history in [`../../CHANGELOG.md`](../../CHANGELOG.md). Pre-1.6 narrative in
 
 ## CI / verification hosts
 
-- **CI**: x86_64 Linux only — `cyrius build` + lint (**hard gate** as of v1.10.1 — any `warn` fails) + 893 tests + 7 fuzz + 40 benchmarks + libro + vidya integration. Toolchain installed via the upstream `install.sh` (v1.10.1, patterned on sigil), version sourced from the `cyrius.cyml` pin; deps resolved via `cyrius deps`.
+- **CI**: x86_64 Linux only — `cyrius build` + **format check** (per-file loop, added v1.13.7; patra had no format gate before) + lint (**hard gate** as of v1.10.1 — any `warn` fails) + 1059 tests + **test-count-vs-state.md assertion** + 8 fuzz + 40 benchmarks + libro + vidya integration + **`dist/` sync and sidecar-leaf check** + **version consistency** across VERSION / cyrius.cyml / CHANGELOG top entry / README `[deps.patra]` tag / dist header (all four gates added v1.13.7, each verified to fail when it should). Toolchain installed via the upstream `install.sh` (v1.10.1, patterned on sigil), version sourced from the `cyrius.cyml` pin; deps resolved via `cyrius deps`.
 - **Release**: tag-driven on `[0-9]*`; verifies `VERSION == cyrius.cyml package.version == git tag`; ships source tarball + `dist/patra.cyr` bundle + DCE demo binary + SHA256SUMS. Same `install.sh` toolchain step as CI.
 - **aarch64**: best-effort. Library (`src/lib.cyr`) cross-builds clean; the `programs/` test binaries do not (still on raw `SYS_UNLINK`) — they're host-only.
 
