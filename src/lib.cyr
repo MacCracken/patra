@@ -262,7 +262,7 @@ fn _db_record_insert(db, schema, ncols, row): i64 {
         var acol = aic - 1;
         if (acol < ncols) {
             store64(db + DB_LAST_ID,
-            row_read_int(row, row_field_offset(schema, ncols, acol)));
+              row_read_int(row, row_field_offset(schema, ncols, acol)));
         }
     }
     return 0;
@@ -375,7 +375,7 @@ fn _exec_create(db): i64 {
     }
 
     var r = tbl_create(fd, hdr, load64(_spr() + PR_TNAME),
-    load64(_spr() + PR_TNLEN), names, types, ncols, load64(_spr() + PR_AUTOINC));
+      load64(_spr() + PR_TNLEN), names, types, ncols, load64(_spr() + PR_AUTOINC));
     _pt_free(names);
     _pt_free(types);
 
@@ -875,7 +875,7 @@ fn _exec_alter_add(db): i64 {
         var pn = load64(buf + DP_NROWS);
         for (var i = 0; i < pn; i = i + 1) {
             memcpy(scratch + written * rsz_new,
-            buf + DP_DATA + i * rsz_old, rsz_old);
+              buf + DP_DATA + i * rsz_old, rsz_old);
             written = written + 1;
         }
         cur = load64(buf + DP_NEXT);
@@ -1418,19 +1418,125 @@ fn _sort_result_multi(rs, ob_idxs, ob_types, ob_dirs, obn): i64 {
     var nrows = load64(rs + RS_NROWS);
     if (nrows <= 1) { return 0; }
 
-    var tmp = _pt_alloc(rsz);
-    for (var i = 1; i < nrows; i = i + 1) {
-        memcpy(tmp, data + i * rsz, rsz);
-        var j = i - 1;
-        while (j >= 0) {
-            var c = _cmp_rows(rs, data + j * rsz, tmp, ob_idxs, ob_types, ob_dirs, obn);
-            if (c <= 0) { break; }
-            memcpy(data + (j + 1) * rsz, data + j * rsz, rsz);
-            j = j - 1;
+    # v1.13.9: sort an INDEX PERMUTATION, then apply it — this was an insertion
+    # sort that memcpy'd a whole result row per shift.
+    #
+    # That made ORDER BY O(N^2 * rowsize) BYTES MOVED, not O(N^2) swaps. Filed
+    # by sit (docs/development/requests/archive/, 2026-08-19) with the curve:
+    # against the unordered scan's 1.96x per doubling, ORDER BY cost 3.9x —
+    # 831 ms vs 7.4 ms at 2,000 rows on a two-STR schema, i.e. 112x the cost of
+    # producing the rows it was sorting. The consumer dropped ORDER BY and
+    # sorted in-process rather than wait for this.
+    #
+    # Merge sort gives O(N log N) comparisons and is STABLE, which multi-column
+    # ORDER BY depends on: the `<= 0` below keeps equal rows in input order.
+    var idx = _pt_alloc(nrows * 8);
+    if (idx == 0) { return 0; }
+    var buf = _pt_alloc(nrows * 8);
+    if (buf == 0) { _pt_free(idx); return 0; }
+    for (var i = 0; i < nrows; i = i + 1) { store64(idx + i * 8, i); }
+
+    # Insertion-sort base runs before merging — the classic hybrid.
+    #
+    # Pure merge sort measured **+22% on `order_by_200`** (44.958 -> 54.642 us)
+    # against the insertion sort it replaced, because insertion sort is O(N) on
+    # near-sorted input and that benchmark is near-sorted. The quadratic only
+    # bites on scrambled data, where the same 250 rows cost 14,377 us. Sorting
+    # runs of RUN_MIN by insertion and merging those keeps the good case cheap
+    # while the merge keeps the bad case O(N log N). Note this insertion sort
+    # moves 8-byte INDICES, never rows, so its shifts cost nothing like the
+    # original's row memcpy.
+    var RUN_MIN = 32;
+    var rs_lo = 0;
+    while (rs_lo < nrows) {
+        var rs_hi = rs_lo + RUN_MIN;
+        if (rs_hi > nrows) { rs_hi = nrows; }
+        for (var ii = rs_lo + 1; ii < rs_hi; ii = ii + 1) {
+            var cur = load64(idx + ii * 8);
+            var jj = ii - 1;
+            var placed = 0;
+            while (placed == 0) {
+                if (jj < rs_lo) { placed = 1; }
+                else {
+                    var prev = load64(idx + jj * 8);
+                    if (_cmp_rows(rs, data + prev * rsz, data + cur * rsz,
+                        ob_idxs, ob_types, ob_dirs, obn) <= 0) { placed = 1; }
+                    else {
+                        store64(idx + (jj + 1) * 8, prev);
+                        jj = jj - 1;
+                    }
+                }
+            }
+            store64(idx + (jj + 1) * 8, cur);
         }
-        memcpy(data + (j + 1) * rsz, tmp, rsz);
+        rs_lo = rs_lo + RUN_MIN;
+    }
+
+    var width = RUN_MIN;
+    while (width < nrows) {
+        var lo = 0;
+        while (lo < nrows) {
+            var mid = lo + width;
+            var hi = lo + width + width;
+            if (mid > nrows) { mid = nrows; }
+            if (hi > nrows) { hi = nrows; }
+            var a = lo;
+            var b = mid;
+            var w = lo;
+            while (w < hi) {
+                var take_a = 0;
+                if (a >= mid) { take_a = 0; }
+                else {
+                    if (b >= hi) { take_a = 1; }
+                    else {
+                        var ra = load64(idx + a * 8);
+                        var rb = load64(idx + b * 8);
+                        if (_cmp_rows(rs, data + ra * rsz, data + rb * rsz,
+                            ob_idxs, ob_types, ob_dirs, obn) <= 0) { take_a = 1; }
+                    }
+                }
+                if (take_a == 1) { store64(buf + w * 8, load64(idx + a * 8)); a = a + 1; }
+                else { store64(buf + w * 8, load64(idx + b * 8)); b = b + 1; }
+                w = w + 1;
+            }
+            lo = lo + width + width;
+        }
+        for (var k = 0; k < nrows; k = k + 1) { store64(idx + k * 8, load64(buf + k * 8)); }
+        width = width + width;
+    }
+
+    # Apply the permutation IN PLACE by following cycles, with a single
+    # row-sized scratch. The obvious alternative — copy every row into a sorted
+    # block and copy back — needs nrows * rsz extra bytes, and patra's previous
+    # perf defect was an allocation sized by the whole table (v1.13.1). Not
+    # repeating that shape: this is O(rsz) extra no matter how large the result,
+    # and still moves each row at most twice.
+    #
+    # WARNING: swap-cycling a permutation applies its INVERSE. `idx[i]` is the
+    # source row for output position i, so the loop below must be fed `inv`,
+    # where inv[idx[i]] = i. Feeding it `idx` directly reverses the result —
+    # caught by 17 ORDER BY assertions, which is what they are for.
+    for (var i = 0; i < nrows; i = i + 1) { store64(buf + load64(idx + i * 8) * 8, i); }
+
+    var tmp = _pt_alloc(rsz);
+    if (tmp == 0) { _pt_free(buf); _pt_free(idx); return 0; }
+    for (var i = 0; i < nrows; i = i + 1) {
+        var cycling = 1;
+        while (cycling == 1) {
+            var j = load64(buf + i * 8);
+            if (j == i) { cycling = 0; }
+            else {
+                memcpy(tmp, data + i * rsz, rsz);
+                memcpy(data + i * rsz, data + j * rsz, rsz);
+                memcpy(data + j * rsz, tmp, rsz);
+                store64(buf + i * 8, load64(buf + j * 8));
+                store64(buf + j * 8, j);
+            }
+        }
     }
     _pt_free(tmp);
+    _pt_free(buf);
+    _pt_free(idx);
     return 0;
 }
 
@@ -1575,7 +1681,7 @@ fn _idx_plan(fd, hdr, schema, ncols, nrows, refs): i64 {
                     if (ictype_eq == COL_STR) {
                         if (load64(cond + WH_CMP_OP) == CMP_EQ) {
                             var hk = _str_hash64(load64(cond + WH_STR_PTR),
-                            load64(cond + WH_STR_LEN));
+                              load64(cond + WH_STR_LEN));
                             idx_lo = hk;
                             idx_hi = hk;
                             idx_found = 1;
@@ -1639,7 +1745,7 @@ fn _patra_query_exec(db): i64 {
         var agg_off = 0;
         if (agg != AGG_COUNT) {
             var aci = _wh_resolve_col(schema, ncols,
-            load64(_spr() + PR_AGG_COL_PTR), load64(_spr() + PR_AGG_COL_LEN));
+              load64(_spr() + PR_AGG_COL_PTR), load64(_spr() + PR_AGG_COL_LEN));
             if (aci < 0) { pg_free(schema); _tx_unlock(db, fd); return 0; }
             agg_off = row_field_offset(schema, ncols, aci);
         }
@@ -1878,7 +1984,7 @@ fn _patra_query_exec(db): i64 {
             var pj_ci3 = load64(pj_idxs + pji3 * 8);
             store64(pj_t + pji3 * 8, load64(pj_types + pji3 * 8));
             memcpy(pj_nm + pji3 * SCH_CNAME_MAX,
-            pj_names_src + pj_ci3 * SCH_CNAME_MAX, SCH_CNAME_MAX);
+              pj_names_src + pj_ci3 * SCH_CNAME_MAX, SCH_CNAME_MAX);
         }
 
         var pj_old_data = load64(rs + RS_DATA);

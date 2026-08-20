@@ -140,7 +140,7 @@ fn where_validate_types(schema, ncols, pr): i64 {
     for (var i = 0; i < wcount; i = i + 1) {
         var cond = pr + PR_WHERE + i * WH_ENTRY_SZ;
         var ci = _wh_resolve_col(schema, ncols,
-        load64(cond + WH_COL_PTR), load64(cond + WH_COL_LEN));
+          load64(cond + WH_COL_PTR), load64(cond + WH_COL_LEN));
         if (ci >= 0) {
             var ct = load64(schema + SCH_START + ci * SCH_ENTRY_SZ + SCH_CTYPE);
             var vt = load64(cond + WH_VAL_TYPE);
@@ -168,7 +168,7 @@ fn where_eval(row, schema, ncols, pr): i64 {
     for (var i = 0; i < wcount; i = i + 1) {
         var cond = pr + PR_WHERE + i * WH_ENTRY_SZ;
         var col_idx = _wh_resolve_col(schema, ncols,
-        load64(cond + WH_COL_PTR), load64(cond + WH_COL_LEN));
+          load64(cond + WH_COL_PTR), load64(cond + WH_COL_LEN));
         if (col_idx < 0) {
             if (join == WH_AND) { result = 0; }
             continue;
@@ -187,7 +187,7 @@ fn where_eval(row, schema, ncols, pr): i64 {
         } elif (col_type == COL_STR) {
             if (val_type == COL_STR) {
                 hit = _cmp_str(row_read_str(row, off),
-                load64(cond + WH_STR_PTR), load64(cond + WH_STR_LEN), cmp);
+                  load64(cond + WH_STR_PTR), load64(cond + WH_STR_LEN), cmp);
             }
         }
         # COL_BYTES / COL_TEXT: WHERE never matches — variable-length values

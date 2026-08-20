@@ -9,6 +9,19 @@
 
 ## Current
 
+> **v1.13.9 (2026-08-20)** — **`ORDER BY` stops being quadratic.**
+> `_sort_result_multi` was an insertion sort that memcpy'd a whole result row
+> per shift, so ordering cost O(N² × rowsize) *bytes moved*. Now a stable
+> bottom-up merge sort over an index permutation, applied in place:
+> **65× at 2,000 scrambled rows (831,005 → 12,792 µs)**, ~2.0× per doubling
+> against the unordered scan's 1.96×. ⚠ Pure merge sort regressed
+> `order_by_200` by 22% (insertion sort is O(N) on near-sorted input, which that
+> benchmark is); insertion-sorted base runs of 32 restore parity (45.135 µs)
+> with the 65× intact — do not "simplify" the hybrid away. Fixes half of sit's
+> 2026-08-19 report; **`DELETE` page reclamation stays open** as a
+> storage-layout change that should not ride along with a sort fix.
+> Toolchain 6.5.27 → 6.5.29.
+>
 > **v1.13.8 (2026-08-18)** — **a WAL now belongs to a database.** Its salts only
 > ever authenticated its records against its own header, so an orphaned `.wal`
 > was replayed into whatever file later took that path: a fresh database that
@@ -26,8 +39,8 @@
 > statement across all three exec paths. **Closes the 1.13.x repair arc.**
 > **1059 tests / 8 fuzz green.**
 
-- **Version**: 1.13.8 (read `VERSION` for the authoritative number)
-- **Cyrius toolchain**: 6.5.27 (pinned in `cyrius.cyml [package].cyrius`; 6.5.19 → 6.5.27 at v1.13.1, source-change-free).
+- **Version**: 1.13.9 (read `VERSION` for the authoritative number)
+- **Cyrius toolchain**: 6.5.29 (pinned in `cyrius.cyml [package].cyrius`; 6.5.19 → 6.5.27 at v1.13.1, → 6.5.29 at v1.13.9). The 6.5.29 bump reformatted `btree.cyr` / `table.cyr` / `where.cyr` — continuation-line indent only, `git diff -w` empty.
   Progression: 6.1.15 (v1.11.0) → 6.2.1 (v1.11.1, stdlib
   pin sweep) → 6.2.19 (v1.11.3) → 6.2.21 (v1.11.5) → 6.2.22 (v1.12.0) →
   6.2.28 (v1.12.1) → 6.2.44 (v1.12.5, dep-refresh patch) → 6.3.5 (v1.12.7,

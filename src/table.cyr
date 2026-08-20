@@ -370,7 +370,7 @@ fn tbl_update(fd, hdr, idx, row_sz, schema, ncols, pr): i64 {
     for (var vs = 0; vs < nsets; vs = vs + 1) {
         var vset = pr + PR_ITEMS + vs * SET_SZ;
         var vci = _wh_resolve_col(schema, ncols,
-        load64(vset + SET_CPTR), load64(vset + SET_CLEN));
+          load64(vset + SET_CPTR), load64(vset + SET_CLEN));
         if (vci < 0) { pg_free(buf); return PATRA_ERR_NOTFOUND; }
         var vct = load64(schema + SCH_START + vci * SCH_ENTRY_SZ + SCH_CTYPE);
         var vvt = load64(vset + SET_VTYPE);
@@ -432,7 +432,7 @@ fn tbl_update(fd, hdr, idx, row_sz, schema, ncols, pr): i64 {
                 for (var s = 0; s < nsets; s = s + 1) {
                     var set = pr + PR_ITEMS + s * SET_SZ;
                     var cidx = _wh_resolve_col(schema, ncols,
-                    load64(set + SET_CPTR), load64(set + SET_CLEN));
+                      load64(set + SET_CPTR), load64(set + SET_CLEN));
                     if (cidx < 0) {
                         pg_free(buf);
                         return PATRA_ERR_NOTFOUND;
@@ -535,7 +535,7 @@ fn tbl_delete(fd, hdr, idx, row_sz, schema, ncols, pr): i64 {
                         if (dir != 0) {
                             var mkey = _idx_key_from_row(schema, ncols, dic, rptr);
                             btree_update_ref(fd, hdr, dir, mkey,
-                            _bt_mkref(cur, i), _bt_mkref(cur, kept));
+                              _bt_mkref(cur, i), _bt_mkref(cur, kept));
                         }
                     }
                     memcpy(buf + DP_DATA + kept * row_sz, rptr, row_sz);

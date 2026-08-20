@@ -70,10 +70,31 @@ are **not scheduled**. Each states the trigger that would move it.
   argonaut both approached this and were served by narrower ships. *Trigger*: a
   consumer that must write binary through a prepared statement and cannot use
   `patra_insert_row*`. *Medium.*
-- **B-tree structural rebalancing (empty-leaf removal).** `_bt_leaf_compact`
-  reclaims within a leaf but never frees or merges one that empties. *Trigger*: a
-  delete-heavy consumer that abandons key ranges and measures the walk cost.
-  *Large.*
+- **Page reclamation on `DELETE` (freelist), and B-tree structural rebalancing.**
+  `_bt_leaf_compact` reclaims within a leaf but never frees or merges one that
+  empties, and no emptied page is returned for reuse.
+
+  ⚠ **The trigger has fired.** sit measured it (2026-08-19, archived under
+  `requests/`): a table's file grows with total rows **ever inserted**,
+  independent of how many are live — **~0.57 KB per insert across three delete
+  patterns, reclaiming nothing**:
+
+  | workload | live rows | total inserts | file |
+  |---|---:|---:|---:|
+  | insert 2,000, no deletes | 2,000 | 2,000 | 1,152 KB |
+  | 40 × (insert 200 → `DELETE FROM t`) | 200 | 8,000 | 4,604 KB |
+  | 40 × (targeted `DELETE … WHERE` + re-insert) | 200 | 8,000 | 5,516 KB |
+
+  The targeted-delete variant is slightly *worse* (index pages). Downstream this
+  reached **277 MB holding 1,000 live rows** in sit's staging index before sit
+  fixed its own write amplification. `_exec_delete` carries the comment "DELETE
+  compacts/frees data pages", so the intent exists but reuse does not.
+
+  Wanted: a page freelist in the DB header that `tbl_delete` pushes emptied
+  pages onto and the write path pops from before extending the file. Reuse alone
+  bounds the growth; returning space to the filesystem (a `VACUUM` equivalent) is
+  a strictly smaller follow-on. **Deferred out of 1.13.9 deliberately** — it is a
+  storage-layout change and should not ride along with a sort fix. *Large.*
 - **Sharded page-cache lock.** The opt-in cache's single global mutex
   re-serializes readers. *Trigger*: a cold/slow-disk read-heavy consumer that
   adopts the cache and profiles the lock. *Medium.*

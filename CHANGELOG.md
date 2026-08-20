@@ -5,6 +5,55 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.9] - 2026-08-20 — ORDER BY stops being quadratic
+
+Fixes the first half of sit's 2026-08-19 report. `_sort_result_multi` was an
+**insertion sort that memcpy'd a whole result row per shift**, so ORDER BY cost
+O(N² × rowsize) *bytes moved* — not O(N²) swaps.
+
+### Fixed
+
+- **`ORDER BY` is now O(N log N).** A stable bottom-up merge sort over an
+  **index permutation**, applied in place afterwards, so each row moves at most
+  twice regardless of N. Measured on a two-`STR` schema with scrambled keys:
+
+  | rows | plain scan | ORDER BY before | ORDER BY after | speedup |
+  |---:|---:|---:|---:|---:|
+  | 250 | 1,028 µs | 14,377 µs | 1,612 µs | 8.9× |
+  | 500 | 1,988 µs | 56,508 µs | 3,330 µs | 17× |
+  | 1,000 | 3,617 µs | 213,066 µs | 6,277 µs | 34× |
+  | 2,000 | 7,188 µs | 831,005 µs | **12,792 µs** | **65×** |
+
+  Per doubling it now costs ~2.0×, matching the unordered scan's 1.96×; it was
+  3.9×. Overhead over the scan that produces the rows fell from **112× to 1.8×**
+  at 2,000 rows.
+
+  Stability is preserved (`<= 0` keeps equal rows in input order), which
+  multi-column `ORDER BY` depends on.
+
+- ⚠ **Small results were a regression, and that is fixed too.** Pure merge sort
+  measured **+22% on `order_by_200`** (44.958 → 54.642 µs), because insertion
+  sort is O(N) on near-sorted input and that benchmark is near-sorted — the
+  quadratic only bites on scrambled data. Insertion-sorted base runs of 32 are
+  merged from there, the standard hybrid, which returns `order_by_200` to
+  **45.135 µs — parity** — while keeping the 65× on adversarial input. That base
+  sort moves 8-byte indices, never rows, so its shifts cost nothing like the
+  original's.
+
+### Changed
+
+- Toolchain pin `6.5.27` → `6.5.29`.
+
+### Still open
+
+The report's **second** finding is not addressed here: `DELETE` never returns
+emptied pages to a freelist, so a table's file grows with total rows *ever*
+inserted (~0.57 KB per insert across three delete patterns, reclaiming nothing).
+That is a storage-layout change and deserves its own release rather than riding
+along with a sort fix. It stays on the roadmap.
+
+1059 tests, benchmarks at parity or better, lint clean.
+
 ## [1.13.8] - 2026-08-18 — a WAL now belongs to a database, and WHERE stops lying about types
 
 Closes the 1.13.x repair arc. 1059 tests (was 1043, +16), 8/8 fuzz, libro 15/15,
