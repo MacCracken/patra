@@ -490,6 +490,8 @@ fn tbl_delete(fd, hdr, idx, row_sz, schema, ncols, pr): i64 {
     var entry = _tbl_entry(hdr, idx);
     var cur = load64(entry + TBL_ROOT);
     var buf = pg_alloc();
+    var prevbuf = pg_alloc();
+    var prev = 0;
     var deleted = 0;
 
     # Check for B-tree index
@@ -544,17 +546,50 @@ fn tbl_delete(fd, hdr, idx, row_sz, schema, ncols, pr): i64 {
             }
         }
 
-        if (kept != nrows) {
-            store64(buf + DP_NROWS, kept);
-            page_write(fd, cur, buf);
+        var next = load64(buf + DP_NEXT);
+
+        # v1.13.9: a data page that has just lost its last row is unlinked and
+        # returned to the free list.
+        #
+        # Before this, an emptied page was written back with DP_NROWS = 0 and
+        # left in the chain forever, so a table's file grew with the number of
+        # rows EVER inserted rather than the number live. sit measured ~0.57 KB
+        # per insert reclaimed-never across three delete patterns, and a staging
+        # index that reached 277 MB holding 1,000 live rows. The free list
+        # itself already existed and worked — `page_alloc` pops from it,
+        # `page_free` pushes, and bytes.cyr / btree.cyr both use it. Only the
+        # row-delete path never did. (sit report, 2026-08-19, second finding.)
+        #
+        # The ROOT page is kept even when empty: `TBL_ROOT == 0` means "this
+        # table has no data page at all", which tbl_create refuses to register
+        # and the insert path treats as corrupt. Freeing it would turn an empty
+        # table into a broken one. A table that churns N pages therefore
+        # reclaims N-1 of them, and the survivor is reused by the next insert.
+        var freed = 0;
+        if (kept == 0) {
+            if (prev != 0) {
+                page_read(fd, prev, prevbuf);
+                store64(prevbuf + DP_NEXT, next);
+                page_write(fd, prev, prevbuf);
+                page_free(fd, hdr, cur);
+                freed = 1;
+            }
         }
-        cur = load64(buf + DP_NEXT);
+        if (freed == 0) {
+            if (kept != nrows) {
+                store64(buf + DP_NROWS, kept);
+                page_write(fd, cur, buf);
+            }
+            prev = cur;
+        }
+        cur = next;
     }
 
     var rc = load64(entry + TBL_NROWS);
     store64(entry + TBL_NROWS, rc - deleted);
     _tbl_rows_affected = deleted;
 
+    pg_free(prevbuf);
     pg_free(buf);
     return PATRA_OK;
 }

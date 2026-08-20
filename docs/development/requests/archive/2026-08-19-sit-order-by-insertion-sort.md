@@ -1,6 +1,6 @@
 # sit — `ORDER BY` is an insertion sort, and `DELETE` never reclaims pages
 
-**PARTIALLY SHIPPED — v1.13.9 (2026-08-20).**
+**SHIPPED — v1.13.9 (2026-08-20). Both findings fixed.**
 
 **(1) `ORDER BY` — FIXED.** `_sort_result_multi` is now a stable bottom-up merge
 sort over an index permutation, applied in place, so each row moves at most
@@ -18,9 +18,31 @@ with insertion-sorted base runs of 32 merged from there: `order_by_200` back to
 first cut fed the loop `idx` directly and reversed every ordered result — caught
 by 17 existing ORDER BY assertions.
 
-**(2) `DELETE` page reclamation — STILL OPEN.** Not addressed in 1.13.9: it is a
-storage-layout change and deserves its own release rather than riding along with
-a sort fix. It remains on the roadmap. The measurements below stand.
+**(2) `DELETE` page reclamation — FIXED.** The report was right that pages were
+never reclaimed, but the diagnosis of *why* was incomplete on both sides: the
+free list **already existed and worked** (`page_alloc` pops, `page_free` pushes,
+`bytes.cyr` and `btree.cyr` both use it). Only `tbl_delete` never called it — an
+emptied data page was written back with `DP_NROWS = 0` and left in the chain.
+It is now unlinked and freed. Against the report's own workloads, at 200 live
+rows and 8,000 total inserts:
+
+| workload | before | after | reduction |
+|---|---:|---:|---:|
+| 40 × (insert 200 → `DELETE FROM t`) | 4,604 KB | **124 KB** | **37×** |
+| 40 × (targeted `DELETE … WHERE` + re-insert) | 5,516 KB | **952 KB** | 5.8× |
+
+That is **0.62 KB per live row** on the first workload against the report's own
+0.576 never-deleted baseline — growth is now bounded by live rows rather than
+total inserts, which is exactly what was asked for.
+
+The second workload improves less, and the reason is the remaining work:
+single-row deletes rarely empty a whole data page, and **B-tree index pages
+churn separately** — `_bt_leaf_compact` still never frees an emptied leaf. That
+is on the roadmap with these numbers. `VACUUM` (returning space to the
+filesystem rather than reusing it) is a separate, smaller follow-on.
+
+The ROOT data page is deliberately kept even when empty: `TBL_ROOT == 0` means
+"this table has no data page at all", which `tbl_create` refuses to register.
 
 ---
 

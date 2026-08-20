@@ -70,31 +70,27 @@ are **not scheduled**. Each states the trigger that would move it.
   argonaut both approached this and were served by narrower ships. *Trigger*: a
   consumer that must write binary through a prepared statement and cannot use
   `patra_insert_row*`. *Medium.*
-- **Page reclamation on `DELETE` (freelist), and B-tree structural rebalancing.**
-  `_bt_leaf_compact` reclaims within a leaf but never frees or merges one that
-  empties, and no emptied page is returned for reuse.
+- **B-tree structural rebalancing (empty-leaf removal), and `VACUUM`.**
+  *Data*-page reclamation shipped in **v1.13.9**: `tbl_delete` now unlinks an
+  emptied data page and returns it to the free list (which already existed and
+  was already used by `bytes.cyr` / `btree.cyr` — only the row-delete path never
+  called it). A 200-live-row table churned through 8,000 inserts went
+  **4,604 KB → 124 KB**, i.e. 0.62 KB per *live* row against a 0.576
+  never-deleted baseline. Two pieces remain.
 
-  ⚠ **The trigger has fired.** sit measured it (2026-08-19, archived under
-  `requests/`): a table's file grows with total rows **ever inserted**,
-  independent of how many are live — **~0.57 KB per insert across three delete
-  patterns, reclaiming nothing**:
+  **(a) Index pages.** `_bt_leaf_compact` reclaims within a leaf but never frees
+  or merges one that empties. This is visible in the half of sit's workload that
+  improved least: a targeted `DELETE … WHERE` + re-insert loop went
+  5,516 KB → **952 KB**, against 124 KB for the bulk-delete pattern at the same
+  live-row count. Single-row deletes rarely empty a data page, so most of what
+  is left is index churn.
 
-  | workload | live rows | total inserts | file |
-  |---|---:|---:|---:|
-  | insert 2,000, no deletes | 2,000 | 2,000 | 1,152 KB |
-  | 40 × (insert 200 → `DELETE FROM t`) | 200 | 8,000 | 4,604 KB |
-  | 40 × (targeted `DELETE … WHERE` + re-insert) | 200 | 8,000 | 5,516 KB |
+  **(b) `VACUUM`.** Freed pages are reused but never returned to the filesystem,
+  so a file that once grew stays large on disk even with a long free list.
+  Strictly less important than reuse, which is what bounds growth.
 
-  The targeted-delete variant is slightly *worse* (index pages). Downstream this
-  reached **277 MB holding 1,000 live rows** in sit's staging index before sit
-  fixed its own write amplification. `_exec_delete` carries the comment "DELETE
-  compacts/frees data pages", so the intent exists but reuse does not.
-
-  Wanted: a page freelist in the DB header that `tbl_delete` pushes emptied
-  pages onto and the write path pops from before extending the file. Reuse alone
-  bounds the growth; returning space to the filesystem (a `VACUUM` equivalent) is
-  a strictly smaller follow-on. **Deferred out of 1.13.9 deliberately** — it is a
-  storage-layout change and should not ride along with a sort fix. *Large.*
+  *Trigger*: a delete-heavy consumer that measures index-page growth
+  specifically, or one that needs the file itself to shrink. *Large.*
 - **Sharded page-cache lock.** The opt-in cache's single global mutex
   re-serializes readers. *Trigger*: a cold/slow-disk read-heavy consumer that
   adopts the cache and profiles the lock. *Medium.*

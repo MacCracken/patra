@@ -5,15 +5,15 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.13.9] - 2026-08-20 — ORDER BY stops being quadratic
+## [1.13.9] - 2026-08-20 — ORDER BY stops being quadratic; DELETE stops leaking pages
 
-Fixes the first half of sit's 2026-08-19 report. `_sort_result_multi` was an
-**insertion sort that memcpy'd a whole result row per shift**, so ORDER BY cost
-O(N² × rowsize) *bytes moved* — not O(N²) swaps.
+Closes **both** findings in sit's 2026-08-19 report.
 
 ### Fixed
 
-- **`ORDER BY` is now O(N log N).** A stable bottom-up merge sort over an
+- **`ORDER BY` is now O(N log N).** `_sort_result_multi` was an insertion sort
+  that memcpy'd a whole result row per shift, so ordering cost O(N² × rowsize)
+  *bytes moved* — not O(N²) swaps. Now a stable bottom-up merge sort over an
   **index permutation**, applied in place afterwards, so each row moves at most
   twice regardless of N. Measured on a two-`STR` schema with scrambled keys:
 
@@ -26,33 +26,53 @@ O(N² × rowsize) *bytes moved* — not O(N²) swaps.
 
   Per doubling it now costs ~2.0×, matching the unordered scan's 1.96×; it was
   3.9×. Overhead over the scan that produces the rows fell from **112× to 1.8×**
-  at 2,000 rows.
+  at 2,000 rows. Stability is preserved (`<= 0` keeps equal rows in input
+  order), which multi-column `ORDER BY` depends on.
 
-  Stability is preserved (`<= 0` keeps equal rows in input order), which
-  multi-column `ORDER BY` depends on.
-
-- ⚠ **Small results were a regression, and that is fixed too.** Pure merge sort
-  measured **+22% on `order_by_200`** (44.958 → 54.642 µs), because insertion
+  ⚠ **Small results regressed first, and that is fixed too.** Pure merge sort
+  measured **+22% on `order_by_200`** (44.958 → 54.642 µs) because insertion
   sort is O(N) on near-sorted input and that benchmark is near-sorted — the
   quadratic only bites on scrambled data. Insertion-sorted base runs of 32 are
-  merged from there, the standard hybrid, which returns `order_by_200` to
-  **45.135 µs — parity** — while keeping the 65× on adversarial input. That base
-  sort moves 8-byte indices, never rows, so its shifts cost nothing like the
-  original's.
+  merged from there, the standard hybrid, returning `order_by_200` to
+  **45.135 µs — parity** — with the 65× intact. That base sort moves 8-byte
+  indices, never rows.
+
+- **`DELETE` now returns emptied data pages to the free list.** A page that lost
+  its last row was written back with `DP_NROWS = 0` and left in the chain
+  forever, so a table's file grew with the number of rows **ever inserted**
+  rather than the number live.
+
+  The free list itself already existed and worked — `page_alloc` pops from it,
+  `page_free` pushes, and `bytes.cyr` / `btree.cyr` both use it. Only the
+  row-delete path never did. `tbl_delete` now unlinks an emptied page and frees
+  it, and the next insert reuses it.
+
+  | workload (200 live rows, 8,000 inserts total) | before | after | reduction |
+  |---|---:|---:|---:|
+  | 40 × (insert 200 → `DELETE FROM t`) | 4,604 KB | **124 KB** | **37×** |
+  | 40 × (targeted `DELETE … WHERE` + re-insert) | 5,516 KB | **952 KB** | 5.8× |
+
+  Workload A is now at the floor: **0.62 KB per *live* row**, against the
+  never-deleted baseline's 0.576. Growth is bounded by live rows, not by total
+  inserts. Workload B improves less because a single-row delete rarely empties a
+  whole page and its **B-tree index pages churn separately** — that half is the
+  remaining work and stays on the roadmap.
+
+  The **root** page is deliberately kept even when empty: `TBL_ROOT == 0` means
+  "this table has no data page at all", which `tbl_create` refuses to register
+  and the insert path treats as corrupt. A table that churns N pages reclaims
+  N−1.
+
+  Benchmarks show no cost: `delete_50` 135.739 → 132.670 µs, `insert_1k`
+  22.866 → 21.054 µs.
 
 ### Changed
 
-- Toolchain pin `6.5.27` → `6.5.29`.
+- Toolchain pin `6.5.27` → `6.5.29`. The newer formatter reindents continuation
+  lines in `btree.cyr` / `table.cyr` / `where.cyr` — whitespace only,
+  `git diff -w` empty.
 
-### Still open
-
-The report's **second** finding is not addressed here: `DELETE` never returns
-emptied pages to a freelist, so a table's file grows with total rows *ever*
-inserted (~0.57 KB per insert across three delete patterns, reclaiming nothing).
-That is a storage-layout change and deserves its own release rather than riding
-along with a sort fix. It stays on the roadmap.
-
-1059 tests, benchmarks at parity or better, lint clean.
+1059 tests, 8/8 fuzz, lint clean, benchmarks at parity or better.
 
 ## [1.13.8] - 2026-08-18 — a WAL now belongs to a database, and WHERE stops lying about types
 

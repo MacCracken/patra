@@ -9,17 +9,25 @@
 
 ## Current
 
-> **v1.13.9 (2026-08-20)** — **`ORDER BY` stops being quadratic.**
+> **v1.13.9 (2026-08-20)** — **ORDER BY stops being quadratic; DELETE stops
+> leaking pages.** Both findings in sit's 2026-08-19 report, closed together.
 > `_sort_result_multi` was an insertion sort that memcpy'd a whole result row
-> per shift, so ordering cost O(N² × rowsize) *bytes moved*. Now a stable
-> bottom-up merge sort over an index permutation, applied in place:
-> **65× at 2,000 scrambled rows (831,005 → 12,792 µs)**, ~2.0× per doubling
-> against the unordered scan's 1.96×. ⚠ Pure merge sort regressed
-> `order_by_200` by 22% (insertion sort is O(N) on near-sorted input, which that
-> benchmark is); insertion-sorted base runs of 32 restore parity (45.135 µs)
-> with the 65× intact — do not "simplify" the hybrid away. Fixes half of sit's
-> 2026-08-19 report; **`DELETE` page reclamation stays open** as a
-> storage-layout change that should not ride along with a sort fix.
+> per shift (O(N² × rowsize) *bytes moved*); it is now a stable merge sort over
+> an index permutation applied in place — **65× at 2,000 scrambled rows
+> (831,005 → 12,792 µs)**, ~2.0× per doubling against the scan's 1.96×.
+> ⚠ Pure merge sort regressed `order_by_200` by 22% (insertion sort is O(N) on
+> near-sorted input, which that benchmark is); insertion-sorted base runs of 32
+> restore parity (45.135 µs) with the 65× intact — **do not "simplify" the
+> hybrid away**. And `DELETE` now unlinks an emptied data page and returns it to
+> the free list, which already existed and was already used by `bytes.cyr` /
+> `btree.cyr` — only the row-delete path never called it. A 200-live-row table
+> churned through 8,000 inserts went **4,604 KB → 124 KB (37×)**, i.e. 0.62 KB
+> per *live* row against a 0.576 never-deleted baseline: growth is now bounded
+> by live rows, not total inserts. The targeted-delete pattern improves less
+> (5,516 → 952 KB) because single-row deletes rarely empty a page and **B-tree
+> index pages churn separately** — that remains on the roadmap. The ROOT page is
+> kept even when empty (`TBL_ROOT == 0` means "no data page", which the insert
+> path treats as corrupt). No benchmark cost: `delete_50` 135.7 → 132.7 µs.
 > Toolchain 6.5.27 → 6.5.29.
 >
 > **v1.13.8 (2026-08-18)** — **a WAL now belongs to a database.** Its salts only
