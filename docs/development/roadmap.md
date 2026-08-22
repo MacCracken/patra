@@ -9,7 +9,7 @@
 > [`requests/`](requests/); upstream cyrius bugs in [`issues/`](issues/).
 
 > **Current**: **v1.13.8**, cyrius pin **6.5.27**, zero `[deps.*]` git blocks.
-> Gates green: **1059 tests**, **8/8 fuzz**, 40 benchmarks, lint 0-warn, fmt
+> Gates green: **1061 tests**, **8/8 fuzz**, 40 benchmarks, lint 0-warn, fmt
 > clean, vet/deny clean, libro 15/15, vidya 19/19, `dist/` in sync (12 sidecar
 > leaves). Binary 302,744 B.
 >

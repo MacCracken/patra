@@ -26,7 +26,7 @@ Everything below was **measured**, not copied forward:
 |---|---|---|
 | Version | **1.13.8** | `cat VERSION` |
 | Cyrius pin | **6.5.27** | `cyrius.cyml [package].cyrius` |
-| Unit tests | **1059 / 1059** | `cyrius test tests/tcyr/patra.tcyr` |
+| Unit tests | **1061 / 1061** | `cyrius test tests/tcyr/patra.tcyr` |
 | Fuzz harnesses | **8 / 8** | `cyrius fuzz fuzz/` |
 | Benchmarks | **40** | `cyrius bench tests/bcyr/patra.bcyr` |
 | Demo binary | **302,744 B** | `CYRIUS_DCE=1 cyrius build programs/demo.cyr` |
@@ -80,7 +80,7 @@ the archives have grown).
 
 | File | Last touched | Status | Notes |
 |---|---|---|---|
-| `state.md` | 2026-08-18 | ✅ Fresh | Current block at v1.13.8; assertion count **1059** (now the value CI compares the suite against). Two interior errors fixed this sweep: the binary block claimed **290,392 bytes "at v1.12.11 under 6.4.64"** — conflating v1.13.7's size with a v1.12.11 attribution, when the real figure is **302,744** at v1.13.8; and the CI line still described 893 tests / 7 fuzz with no mention of the four gates added in v1.13.7. |
+| `state.md` | 2026-08-18 | ✅ Fresh | Current block at v1.13.8; assertion count **1061** (the value CI compares the suite against). Two interior errors fixed this sweep: the binary block claimed **290,392 bytes "at v1.12.11 under 6.4.64"** — conflating v1.13.7's size with a v1.12.11 attribution, when the real figure is **302,744** at v1.13.8; and the CI line still described 893 tests / 7 fuzz with no mention of the four gates added in v1.13.7. |
 | `roadmap.md` | 2026-08-18 | ✅ Fresh | Current block at **v1.13.8** with measured gates. **Stripped to forward-facing only** (125 → 118 lines, 14 shipped markers → 0): seven struck-through 1.13.x sections, a "Closed during this pass" section, and a duplicate `1.13.8` heading all removed — shipped work belongs in the CHANGELOG and `completed-phases.md`, which is what CLAUDE.md says this file is *not*. What remains is genuinely open: one upstream cyrius bug to file, two release-tooling decisions, and eleven trigger-stated deferrals. Added a trigger-discipline note, since a self-referential trigger is what let a shipped item sit on the deferred list for thirteen releases. |
 | `BENCHMARKS.md` | 2026-08-18 | ✅ Fresh (baseline + dated note) | Legacy rows remain the v1.9.5 / cyrius 6.0.1 baseline. Currency note rewritten for v1.13.8, and it now says the two things that matter: **v1.13.1 changed the read path materially** (41× on indexed lookups, curve flat — the legacy rows understate the index path), and **the repair arc did not move the numbers**, with the reason rather than just the assertion. |
 | `completed-phases.md` | 2026-08-18 | ✅ Fresh (append-only) | Extended from v1.12.6 through **v1.13.8** — the v1.12.7–1.13.1 patch tail plus a per-release breakdown of the repair arc. It had been carrying a promise to "fold into a 1.12.x phase row at the next phase rewrite" since v1.12.6; that promise is now kept. |

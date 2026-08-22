@@ -193,7 +193,7 @@
 
 ## Tests / Fuzz / Bench
 
-- **Unit**: `tests/tcyr/patra.tcyr` — **1059 / 1059** assertions pass under
+- **Unit**: `tests/tcyr/patra.tcyr` — **1061 / 1061** assertions pass under
   cyrius 6.4.64 (re-run at the v1.12.11 pin bump) (+8 at v1.12.10: the `exec '' escaping` group — a `''` value
   round-trips through STR + TEXT columns via `patra_exec`, a `''` WHERE literal
   matches, and `patra_quote_str` doubles quotes; +6 at v1.12.8: the `text readback snapshot (flock-window fix)`
@@ -361,7 +361,7 @@ Full history in [`../../CHANGELOG.md`](../../CHANGELOG.md). Pre-1.6 narrative in
 
 ## CI / verification hosts
 
-- **CI**: x86_64 Linux only — `cyrius build` + **format check** (per-file loop, added v1.13.7; patra had no format gate before) + lint (**hard gate** as of v1.10.1 — any `warn` fails) + 1059 tests + **test-count-vs-state.md assertion** + 8 fuzz + 40 benchmarks + libro + vidya integration + **`dist/` sync and sidecar-leaf check** + **version consistency** across VERSION / cyrius.cyml / CHANGELOG top entry / README `[deps.patra]` tag / dist header (all four gates added v1.13.7, each verified to fail when it should). Toolchain installed via the upstream `install.sh` (v1.10.1, patterned on sigil), version sourced from the `cyrius.cyml` pin; deps resolved via `cyrius deps`.
+- **CI**: x86_64 Linux only — `cyrius build` + **format check** (per-file loop, added v1.13.7; patra had no format gate before) + lint (**hard gate** as of v1.10.1 — any `warn` fails) + 1061 tests + **test-count-vs-state.md assertion** + 8 fuzz + 40 benchmarks + libro + vidya integration + **`dist/` sync and sidecar-leaf check** + **version consistency** across VERSION / cyrius.cyml / CHANGELOG top entry / README `[deps.patra]` tag / dist header (all four gates added v1.13.7, each verified to fail when it should). Toolchain installed via the upstream `install.sh` (v1.10.1, patterned on sigil), version sourced from the `cyrius.cyml` pin; deps resolved via `cyrius deps`.
 - **Release**: tag-driven on `[0-9]*`; verifies `VERSION == cyrius.cyml package.version == git tag`; ships source tarball + `dist/patra.cyr` bundle + DCE demo binary + SHA256SUMS. Same `install.sh` toolchain step as CI.
 - **aarch64**: best-effort. Library (`src/lib.cyr`) cross-builds clean; the `programs/` test binaries do not (still on raw `SYS_UNLINK`) — they're host-only.
 
