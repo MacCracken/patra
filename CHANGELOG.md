@@ -5,6 +5,54 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.10] - 2026-08-21 — `patra_init` stops clobbering the host's log level
+
+Closes the consumer request filed by **Agnostic** on 2026-08-21.
+
+### Fixed
+
+- **`patra_init` no longer calls `sakshi_set_level(SK_WARN)`.** That call is
+  process-global, so any host which had configured its own level lost it the
+  moment it opened a database — silently, with nothing logged to say so.
+
+  Agnostic hit it during its M4 persistence work: adding a `patra_open` to
+  start-up made **every `SK_INFO` line in the server disappear**, including
+  `listening`, which is how an operator knows the process came up. Nothing
+  failed; the log simply went quiet from INFO down. It took a live debugging
+  session to trace, because "the server serves fine but stopped logging" does
+  not point at the database.
+
+  It is not the first consumer to hit it. AgnosAI evaluated patra, chose
+  `lib/io.cyr` for unrelated format reasons, and left a warning in a downstream
+  comment for the next reader — a note doing work that belonged here.
+
+  ⚠ **The call was suppressing nothing of ours.** patra's entire sakshi surface
+  is a single `sakshi_error` in `src/file.cyr`, and ERROR passes at WARN
+  regardless. Global cost, no local benefit — so removing it changes nothing
+  about patra's own output and simply stops the side effect.
+
+  If patra ever grows chatty, the control belongs to patra: an internal level or
+  a `patra_set_log_level` a host opts into, never the host's global one. The
+  comment left at the call site says so.
+
+  **Regression-guarded.** `tests/tcyr/patra.tcyr` → `init/log-level` sets a level,
+  calls `patra_init`, and asserts it is unchanged — at both a verbose and a quiet
+  level. Mutation-verified: restoring the line fails both assertions
+  (`got 2, expected 4` / `got 2, expected 1`).
+
+  **No API change, no behaviour change for any correct consumer.** A host that
+  happened to rely on patra quieting its logs will now see its own configured
+  level honoured, which is what it asked for.
+
+### Changed
+
+- **Cyrius toolchain pin 6.5.29 → 6.5.33.** Source-change-free, and unlike the
+  6.5.29 bump it reformatted **nothing** — all 12 `src/` files pass `fmt --check`
+  and `lint` unchanged, and `dist/patra.cyr` differs from 1.13.9 only by the
+  version header and the log-level fix above. `lib/` re-synced with
+  `lib sync --full` (it is gitignored, so that is a local snapshot refresh, not a
+  tracked change). Full suite green on the new pin: **1061 tests, 8 fuzz**.
+
 ## [1.13.9] - 2026-08-20 — ORDER BY stops being quadratic; DELETE stops leaking pages
 
 Closes **both** findings in sit's 2026-08-19 report.

@@ -5688,10 +5688,42 @@ fn test_where_type_mismatch() {
     cleanup();
 }
 
+# -- 1.13.10: patra_init must leave the host's log level alone ------------
+
+fn test_init_preserves_log_level() {
+    test_group("init/log-level");
+
+    # ⚠ REGRESSION GUARD — this is easy to re-add and impossible to notice.
+    #
+    # Until 1.13.10 `patra_init` ended with `sakshi_set_level(SK_WARN)`. That is
+    # process-global, so any host which had configured its own level lost it the
+    # moment it opened a database, with nothing said. Agnostic lost every INFO
+    # line in its server — including `listening`, which is how an operator knows
+    # the process came up — and traced it back only after a live debugging
+    # session, because "the server serves but stopped logging" does not point at
+    # the database.
+    #
+    # It suppressed nothing of ours either: patra's entire sakshi surface is one
+    # `sakshi_error` in `file.cyr`, and ERROR passes at WARN regardless. Global
+    # cost, no local benefit.
+    sakshi_set_level(SK_DEBUG);
+    patra_init();
+    assert_eq(sakshi_get_level(), SK_DEBUG, "patra_init leaves a verbose level alone");
+
+    sakshi_set_level(SK_ERROR);
+    patra_init();
+    assert_eq(sakshi_get_level(), SK_ERROR, "and a quiet one");
+
+    # Restore something neutral for the rest of the suite.
+    sakshi_set_level(SK_WARN);
+}
+
 fn main() {
     alloc_init();
     fl_init();
     patra_init();
+
+    test_init_preserves_log_level();
 
     # v0.1
     test_header();

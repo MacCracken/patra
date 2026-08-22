@@ -9,6 +9,22 @@
 
 ## Current
 
+> **v1.13.10 (2026-08-21)** — **`patra_init` stops clobbering the host's log
+> level.** Its last line was an unconditional `sakshi_set_level(SK_WARN)`, which
+> is process-global: any host that had configured its own level silently lost it
+> on the first `patra_open`. Agnostic hit it during M4 persistence work — adding
+> a `patra_open` to start-up made every `SK_INFO` line in its server vanish,
+> including `listening`, and it took a live debugging session to trace because
+> "serves fine, stopped logging" does not point at the database. AgnosAI had hit
+> the same thing, chose `lib/io.cyr` instead, and left a warning in a downstream
+> comment rather than filing.
+> ⚠ The call suppressed **nothing of patra's own**: the whole sakshi surface here
+> is one `sakshi_error` in `file.cyr`, and ERROR passes at WARN regardless. So
+> removal needed no compensating change — no demotion of our own logs, no new
+> API. Regression-guarded (`init/log-level`) and mutation-verified.
+> **Also: cyrius pin 6.5.29 → 6.5.33**, source-change-free — no reformatting this
+> time, `dist/` byte-identical apart from the fix itself.
+
 > **v1.13.9 (2026-08-20)** — **ORDER BY stops being quadratic; DELETE stops
 > leaking pages.** Both findings in sit's 2026-08-19 report, closed together.
 > `_sort_result_multi` was an insertion sort that memcpy'd a whole result row
@@ -45,10 +61,10 @@
 > audit had missed it. Also: a **WHERE type mismatch** now returns
 > `PATRA_ERR_TYPE` instead of silently evaluating false, validated once per
 > statement across all three exec paths. **Closes the 1.13.x repair arc.**
-> **1059 tests / 8 fuzz green.**
+> **1061 tests / 8 fuzz green.**
 
-- **Version**: 1.13.9 (read `VERSION` for the authoritative number)
-- **Cyrius toolchain**: 6.5.29 (pinned in `cyrius.cyml [package].cyrius`; 6.5.19 → 6.5.27 at v1.13.1, → 6.5.29 at v1.13.9). The 6.5.29 bump reformatted `btree.cyr` / `table.cyr` / `where.cyr` — continuation-line indent only, `git diff -w` empty.
+- **Version**: 1.13.10 (read `VERSION` for the authoritative number)
+- **Cyrius toolchain**: 6.5.33 (pinned in `cyrius.cyml [package].cyrius`; 6.5.19 → 6.5.27 at v1.13.1, → 6.5.29 at v1.13.9, → 6.5.33 at v1.13.10). The 6.5.29 bump reformatted `btree.cyr` / `table.cyr` / `where.cyr` — continuation-line indent only, `git diff -w` empty. **The 6.5.33 bump reformatted nothing**: all 12 `src/` files pass `fmt --check` and `lint` unchanged, and `dist/patra.cyr` differs from 1.13.9 only by the version header and the log-level fix. `lib/` re-synced with `lib sync --full` (101 `.cyr` + the `unicode/` subtree; `lib/` is gitignored, so this is a local snapshot refresh).
   Progression: 6.1.15 (v1.11.0) → 6.2.1 (v1.11.1, stdlib
   pin sweep) → 6.2.19 (v1.11.3) → 6.2.21 (v1.11.5) → 6.2.22 (v1.12.0) →
   6.2.28 (v1.12.1) → 6.2.44 (v1.12.5, dep-refresh patch) → 6.3.5 (v1.12.7,

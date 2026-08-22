@@ -28,9 +28,19 @@ sovereignty"*.
 
 ## Open backlog
 
-**Consumer requests**: none open ([`requests/`](requests/) holds only its README
-and five archived requests). **Consumer-filed bugs**: none open. **Upstream
-cyrius issues**: one open, filed upstream 2026-08-18 — see below.
+**Consumer requests**: none open — one shipped in 1.13.10, see below.
+**Consumer-filed bugs**: none open. **Upstream cyrius issues**: one open, filed
+upstream 2026-08-18 — see below.
+
+### Recently shipped
+
+- **[`requests/archive/2026-08-21-patra-init-must-not-set-the-host-log-level.md`](requests/archive/2026-08-21-patra-init-must-not-set-the-host-log-level.md)**
+  — filed by **Agnostic** 2026-08-21, **shipped v1.13.10 the same day.**
+  `patra_init` ended with an unconditional `sakshi_set_level(SK_WARN)`, which is
+  process-global: a host that had configured its own level silently lost every
+  `INFO` line the moment it opened a database. Removed; the call suppressed
+  nothing of patra's own (its whole sakshi surface is one `sakshi_error`, which
+  passes at WARN anyway). Regression-guarded and mutation-verified.
 
 ### To file upstream (cyrius)
 

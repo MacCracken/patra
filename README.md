@@ -81,7 +81,7 @@ from the version-pinned snapshot.
 ```toml
 [deps.patra]
 git = "https://github.com/MacCracken/patra.git"
-tag = "1.13.9"
+tag = "1.13.10"
 ```
 
 > ⚠ **If you are carrying a `[deps.sakshi]` block "required alongside patra",
