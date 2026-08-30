@@ -217,8 +217,10 @@
 
 ## Tests / Fuzz / Bench
 
-- **Unit**: `tests/tcyr/patra.tcyr` — **1061 / 1061** assertions pass under
-  cyrius 6.4.64 (re-run at the v1.12.11 pin bump) (+8 at v1.12.10: the `exec '' escaping` group — a `''` value
+- **Unit**: `tests/tcyr/patra.tcyr` — **1064 / 1064** assertions pass under
+  cyrius 6.5.36 (re-run at the v1.13.11 pin bump) (+3 at v1.13.11: the page-cache
+  pool-built invariant — an armed cache has both tables non-null and all 1024
+  slot buffers allocated, pinning the `_pc_alloc` publish order) (+8 at v1.12.10: the `exec '' escaping` group — a `''` value
   round-trips through STR + TEXT columns via `patra_exec`, a `''` WHERE literal
   matches, and `patra_quote_str` doubles quotes; +6 at v1.12.8: the `text readback snapshot (flock-window fix)`
   group — query a multi-page TEXT row, free + reuse its pages, and assert the
