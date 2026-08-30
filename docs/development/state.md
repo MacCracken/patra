@@ -9,6 +9,30 @@
 
 ## Current
 
+> **v1.13.11 (2026-08-30)** — **the page-cache pool is built before the cache
+> is armed.** `_pc_alloc` guarded on `_pc_keys` and then assigned that same
+> global on its first statement — before `_pc_bufs` existed and before either
+> table was filled — and it ran outside `_pc_mtx`. Two concurrent
+> `patra_cache_enable(1)` calls could therefore interleave so that the second
+> skips the init, sets `_pc_on = 1`, and arms every entry point over an unbuilt
+> pool; `_pc_put`'s `load64(_pc_bufs + slot * 8)` then reads through a null
+> base. The allocation now happens under `_pc_mtx`, and `_pc_alloc` builds into
+> locals and publishes `_pc_keys` **last** (it is the global its own guard
+> tests), which keeps it correct standalone — the agnos build's `mutex_lock` is
+> a no-op. Found by a samay v1.0.4 concurrency audit scanning the vendored
+> cyrius stdlib for a lazy-init pattern; the `chrono` sibling is filed upstream
+> and is cyrius's to fix.
+> ⚠ **Not reproduced.** ~1,600 runs across four harness shapes (barrier release,
+> observer thread, staggered arrival) found zero occurrences pre-fix, with the
+> detector validated against hand-built bad states. Threads released together
+> both see `_pc_keys == 0` and both run a full `_pc_alloc`, so neither observes
+> a partial pool — the bad interleaving needs one thread strictly inside the
+> other's fill loop. Real by inspection, free to fix, **not demonstrated** —
+> read the severity accordingly. Reaching it also needs a concurrent
+> `patra_cache_enable`, which the API doc already tells callers not to do.
+> **Also: cyrius pin 6.5.33 → 6.5.36**, no tracked churn (`lib/` is gitignored).
+> 1064 assertions (was 1061).
+
 > **v1.13.10 (2026-08-21)** — **`patra_init` stops clobbering the host's log
 > level.** Its last line was an unconditional `sakshi_set_level(SK_WARN)`, which
 > is process-global: any host that had configured its own level silently lost it

@@ -4870,6 +4870,24 @@ fn test_pcache() {
     test_group("page cache (P2 pcache)");
     patra_cache_enable(1);   # opt-in: off by default
     assert_eq(patra_cache_enabled(), 1, "cache enabled");
+
+    # v1.13.11 invariant: when the cache is ARMED the pool behind it is fully
+    # built. _pc_alloc used to assign _pc_keys (the global its own guard tests)
+    # BEFORE filling either table, so a second concurrent patra_cache_enable
+    # could skip the init, set _pc_on = 1, and arm every entry point over
+    # unbuilt slots -- _pc_put's load64(_pc_bufs + slot * 8) then reads through
+    # a null base. The allocation now happens under _pc_mtx and publishes
+    # _pc_keys last. Single-threaded this is an invariant check, not a race
+    # repro; it fails loudly if the publish order is ever reverted.
+    assert(_pc_keys != 0, "armed cache has a key table");
+    assert(_pc_bufs != 0, "armed cache has a buffer table");
+    var _pc_nullslots = 0;
+    var _pc_i = 0;
+    while (_pc_i < PC_CAP) {
+        if (load64(_pc_bufs + _pc_i * 8) == 0) { _pc_nullslots = _pc_nullslots + 1; }
+        _pc_i = _pc_i + 1;
+    }
+    assert_eq(_pc_nullslots, 0, "every slot buffer built before the cache is armed");
     var buf = pg_alloc();
     var out = pg_alloc();
 

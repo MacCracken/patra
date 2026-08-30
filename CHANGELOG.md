@@ -5,6 +5,74 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.11] - 2026-08-30 — page-cache pool is built before the cache is armed
+
+Closes [`docs/development/issues/archive/2026-08-30-pcache-publish-before-fill.md`](docs/development/issues/archive/2026-08-30-pcache-publish-before-fill.md),
+found by a samay v1.0.4 concurrency audit that was scanning the vendored
+`cyrius/lib/*.cyr` for a lazy-init pattern it had just hit in `chrono`.
+
+### Fixed — `_pc_alloc` published `_pc_keys` before filling it
+
+`_pc_alloc` guarded on `_pc_keys` and then assigned that same global on its
+**first** statement, before allocating `_pc_bufs` and before filling either
+table:
+
+```
+if (_pc_keys != 0) { return 0; }
+_pc_keys = alloc(PC_CAP * 8);      # published
+_pc_bufs = alloc(PC_CAP * 8);      # still 0 for anyone who just skipped the guard
+while (i < PC_CAP) { ... }         # slots filled only now
+```
+
+It also ran **outside** `_pc_mtx`. So two concurrent `patra_cache_enable(1)`
+calls could interleave as: thread A publishes `_pc_keys` and starts filling;
+thread B sees `_pc_keys != 0`, skips the init, takes the mutex, and sets
+`_pc_on = 1` — arming every cache entry point over a pool that is not built.
+`_pc_put`'s `load64(_pc_bufs + slot * 8)` then reads through a null base.
+
+Two changes, both in `src/pcache.cyr`:
+
+- **The pool allocation now happens under `_pc_mtx`**, so two enables cannot
+  observe each other's partial state.
+- **`_pc_alloc` builds into locals and publishes `_pc_keys` last**, after
+  `_pc_bufs`. `_pc_keys` is the global its own guard tests, so it has to be the
+  last thing to become visible. This keeps the function correct even called
+  standalone, which matters on the agnos build where `mutex_lock` is a no-op.
+
+The `DESIGN` note's LOCK-ORDER paragraph is updated: the cache still allocates
+nothing at **runtime** and still never nests with the freelist mutex, but the
+one-time pool allocation now nests `_pc_mtx` → the bump allocator's spinlock.
+That is safe — nothing takes those two in the opposite order, because the
+allocator never calls into patra.
+
+**Reproduction: not achieved.** ~1,600 runs across four harness shapes
+(simultaneous barrier release, dedicated observer thread, and staggered arrival
+at 50/200/800/3000 spin iterations) produced **zero** occurrences on the
+pre-fix source. The detector itself was validated against hand-built
+armed-but-unbuilt states and fires correctly on both, so the null result is
+meaningful rather than a broken instrument. The likeliest explanation is that
+threads released together both observe `_pc_keys == 0` and both run a full
+`_pc_alloc`, so neither sees a partial pool; the dangerous interleaving needs
+one thread to arrive strictly inside the other's fill loop. **The defect is
+real by inspection and the fix costs nothing — but it is not demonstrated, and
+the severity should be read accordingly.**
+
+Reaching it at all requires calling `patra_cache_enable(1)` from two threads at
+once, which the API's own doc comment already tells callers not to do ("call
+once at startup before spawning worker threads"). `_pc_alloc` has exactly one
+caller, so it is *not* lazy with respect to first cache use — an earlier draft
+of the issue claimed otherwise and was wrong.
+
+### Added
+Three assertions in `test_pcache` pinning the invariant that an armed cache has
+a fully-built pool — both tables non-null and every one of the 1024 slot
+buffers allocated (1064 assertions, was 1061).
+
+### Changed — toolchain pinned to cyrius 6.5.36
+`[package].cyrius` was **6.5.33** against a 6.5.36 toolchain, which warned on
+every build. Re-pinned and `lib/` re-synced (gitignored, so no tracked churn);
+1064 assertions green after.
+
 ## [1.13.10] - 2026-08-21 — `patra_init` stops clobbering the host's log level
 
 Closes the consumer request filed by **Agnostic** on 2026-08-21.
