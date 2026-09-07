@@ -75,13 +75,14 @@ patra_close(db);
 **Patra has no external dependencies.** As of **v1.13.0** `cyrius.cyml` carries
 zero `[deps.*]` blocks — everything patra needs, including
 [sakshi](https://github.com/MacCracken/sakshi) (structured logging, called from
-`sakshi_error` / `sakshi_set_level`), is folded into the cyrius stdlib and comes
+`sakshi_error` — the fold's entire sakshi surface since v1.13.10 removed the
+`sakshi_set_level` call from `patra_init`), is folded into the cyrius stdlib and comes
 from the version-pinned snapshot.
 
 ```toml
 [deps.patra]
 git = "https://github.com/MacCracken/patra.git"
-tag = "1.13.11"
+tag = "1.13.12"
 ```
 
 > ⚠ **If you are carrying a `[deps.sakshi]` block "required alongside patra",
@@ -110,10 +111,15 @@ stdlib = ["syscalls", "string", "alloc", "freelist", "io", "fmt", "str", "vec", 
 ```
 
 The single-include bundle (`dist/patra.cyr`) needs the same list. It references
-`sakshi_*` without defining them and `dist/patra.deps` does not list `sakshi`,
-but cyrius resolves the folded module automatically — verified with a clean-room
-build from the bundle plus only the sidecar's declared leaves, which compiles and
-runs `patra_init()`.
+`sakshi_error` without defining it, and **`dist/patra.deps` does list `sakshi`** —
+12 leaves, matching `[deps].stdlib` exactly, and CI fails the build if those two
+numbers ever disagree.
+
+> ⚠ This paragraph asserted the opposite ("`dist/patra.deps` does not list
+> `sakshi`") from v1.13.2 until v1.13.12, and used it as the premise for a
+> clean-room-build argument. The sidecar *did* omit `sakshi` from ≤1.12.11
+> through 1.13.1 — a `cyrius distlib` parser bug, fixed upstream in cyrius
+> 6.5.28 — and the doc was never corrected once it stopped being true.
 
 **Thread-safety**: a patra db handle is safe to share across threads — auto-commit
 statement calls (`patra_exec` / `patra_query` / the prepared variants /

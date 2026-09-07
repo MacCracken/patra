@@ -11,10 +11,28 @@ Benches under `/tmp` (tmpfs, fdatasync is a no-op) are noted explicitly.
 The group-commit comparison uses a real-disk path (`./bench_groupcommit.patra`,
 btrfs/NVMe under the repo) to avoid hiding the win.
 
-> **Currency note (updated 2026-08-18, v1.13.8).** The bulk of this table is
-> still the v1.9.5 / cyrius 6.0.1 baseline. Patra is now at **v1.13.8** (cyrius
-> pin **6.5.27**) and the suite stands at **40 benchmarks**. Two spot re-runs
-> matter for this cut:
+> **Currency note (updated 2026-09-07, v1.13.12).** The bulk of this table is
+> still the v1.9.5 / cyrius 6.0.1 baseline. Patra is now at **v1.13.12** (cyrius
+> pin **6.6.0**) and the suite stands at **40 benchmarks**.
+>
+> - **v1.13.12 full run under cyrius 6.6.0: no regression.** The four
+>   regression-sensitive benchmarks against their recorded figures —
+>   `order_by_200` **43.4 µs** (vs 45.1 at v1.13.9, the hybrid-sort parity
+>   number), `delete_50` **127.5 µs** (vs 132.7), `read_scan_4t_par`
+>   **141.1 µs** (vs 143), `insert_1k` **21.7 µs**. A 38-release toolchain span
+>   with a genuine codegen change (6.5.72's dead-code elimination) moved none of
+>   them, which is the expected result: DCE removes *unreachable* code and the
+>   benchmarks exercise reachable paths only.
+> - ⚠ **`state.md`'s representative subset was an order of magnitude wrong on
+>   several rows** until v1.13.12 — it had been carried forward from a
+>   v1.9.5/v1.10.3-era copy without re-measurement
+>   (`select_idx_eq_unique_500` read 239 µs against a measured 23.4 µs;
+>   `insert_500_sync_full` 3.22 ms against 949 µs). Re-anchored there. **This
+>   table's legacy rows have the same problem** and are the reason the
+>   re-baseline below keeps mattering — treat any row not dated 2026-09-07 as
+>   indicative, not current.
+>
+> Two spot re-runs from earlier cuts still matter:
 >
 > - **v1.13.1 changed the read path materially** — `_patra_query_exec` had sized
 >   its result buffer by the *table's* row count rather than the query's, so an
@@ -31,8 +49,10 @@ btrfs/NVMe under the repo) to avoid hiding the win.
 >   transactions (`_wal_fd` is -1 outside one) — which is precisely why no
 >   auto-commit benchmark sees it.
 >
-> No hot-path rewrite since v1.8.2 apart from v1.13.1's buffer sizing. A full
-> legacy re-baseline is still deferred (open question #1 in `doc-health.md`).
+> No hot-path rewrite since v1.8.2 apart from v1.13.1's buffer sizing and
+> v1.13.9's merge sort. A full legacy re-baseline is still deferred (open
+> question #1 in `doc-health.md`) — **it has now slipped past its own trigger
+> more than once**, and the measured-vs-recorded gaps above are what that deferral costs.
 
 ## SQL parsing
 

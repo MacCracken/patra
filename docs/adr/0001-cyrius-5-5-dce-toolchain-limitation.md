@@ -1,8 +1,67 @@
 # ADR 0001 — Cyrius 5.5.x DCE is a Toolchain No-op
 
-**Status**: Accepted (workaround in place) — re-verified under cyrius 6.4.64 (2026-07-16); behavior changed again, conclusion unchanged
-**Date**: 2026-04-21 (re-verified 2026-06-17, 2026-07-16)
+**Status**: **SUPERSEDED 2026-09-07** (patra v1.13.12, cyrius 6.6.0) — the premise no longer holds: `CYRIUS_DCE=1` now genuinely removes bytes
+**Date**: 2026-04-21 (re-verified 2026-06-17, 2026-07-16, 2026-08-18; **superseded 2026-09-07**)
 **Affects**: Patra 1.1.0+ (CI/release pipelines), all `cyrius build` invocations
+**Supersedes note**: the decision it records — keep `CYRIUS_DCE=1` on every build — is **unchanged and still correct**. What is superseded is the *reason*: the flag is no longer a forward-compatibility no-op, it is a 29.8 % size win. Nothing needs migrating.
+
+## SUPERSEDED 2026-09-07 — cyrius 6.5.72 made `CYRIUS_DCE=1` actually eliminate
+
+This ADR's standing instruction was explicit: *"re-file / annotate again only if
+a future cyrius release actually shrinks the output."* One has — after three
+dated re-verifications here (6.2.19, 6.4.64, 6.5.27) plus repeated spot checks
+recorded in the CHANGELOG, spanning 2026-04-21 → 2026-09-07, four and a half
+months, every one of which concluded "still no strip".
+
+Measured on `programs/demo.cyr` under the **6.6.0** pin, both builds from the
+same tree, at the v1.13.12 cut:
+
+| Build | Size | Compiler note |
+|---|---:|---|
+| `cyrius build` | **302,856 B** | `428 unreachable fns (92506 bytes — set CYRIUS_DCE=1 to eliminate)` |
+| `CYRIUS_DCE=1 cyrius build` | **212,744 B** | `92506 bytes of dead code eliminated` |
+
+**−90,112 B, −29.75 %.** The 2,394 B between the compiler's 92,506 and the
+observed 90,112 is section/page alignment, not unstripped code. The eliminated
+binary runs correctly: `build/demo`, all 8 fuzz harnesses, the benchmark harness
+and both integration suites are built with `CYRIUS_DCE=1` and pass.
+
+Upstream landed it at **cyrius 6.5.72** (`CHANGELOG.md` [6.5.72]:
+*"`CYRIUS_DCE=1` did not eliminate anything — it padded … Now: 36,864 bytes
+removed from a cycc self-compile"*), inside the 6.5.36 → 6.6.0 span this cut
+crosses. Its own comment had called the padding an *"intentional tradeoff"*
+because *"code shifting would break cycc==cycc byte-identity"*; that was
+disproved at 6.5.68 — compaction is deterministic, so a compacted compiler
+reaches the same fixpoint. Four attempts and six distinct causes upstream.
+
+⚠ **Attribution caveat.** The 6.5.72 attribution is upstream's CHANGELOG, not a
+local A/B, and the A/B was attempted and failed. **Every `cyrius` driver on this
+host runs the installed `cycc` regardless of the manifest pin** —
+`~/.cyrius/versions/6.5.36/bin/cyrius --version` reports `6.6.0`, and pinning a
+scratch manifest to 6.5.36 (even with that version's `bin/` first on `PATH`)
+compiled with 6.6.0 and said so: `warning: cyrius.cyml pins 6.5.36 but cycc is
+6.6.0 — toolchain drift`. The per-version `cycc` binaries *are* genuine and
+distinct (`~/.cyrius/versions/6.5.36/bin/cycc --version` → `cycc 6.5.36`, and it
+does not emit the drift warning), but invoking one directly is not a usable
+route: it takes no `<src> <out>` or `-o` form, writing a stub ELF to stdout
+instead, and blocks when handed a source path. **Reinstalling 6.5.36 over
+`~/.cyrius/bin` would settle it**; that was not done, because it would disturb
+the host's toolchain to date a change patra does not need dated.
+
+Two earlier updates in this file recorded confident readings that later proved
+partly wrong, so the limit of this one is stated rather than papered over: what
+is **measured** is that DCE strips under 6.6.0; *when* it started is **cited**.
+
+⚠ Not all 90,112 B is DCE's doing in the version-over-version sense — cyrius
+6.5.68's `DECODE_LEN` fix independently removed ~4,088 B of generated code on the
+default path. The table above is a same-tree, same-compiler A/B, so it isolates
+the flag correctly; the *release-over-release* figure (v1.13.11's 306,952 B →
+212,744 B) mixes the two and should not be quoted as a DCE delta.
+
+Everything below is retained verbatim as the historical record.
+
+---
+
 
 ## Update 2026-07-16 — re-verified under cyrius 6.4.64 (v1.12.11 pin bump)
 

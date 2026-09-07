@@ -1,8 +1,14 @@
 # Build
 /build/
 /target/
+# Since cyrius 6.5.49/6.5.51 a bare `cyrius build` reads `[build] entry`
+# and drops the `[build] output` binary at the repo root.
+/patra
 
-# Stdlib symlink
+# Vendored stdlib snapshot (`cyrius deps` / `cyrius lib sync --full`).
+# NOT a symlink — a real directory. cyrius 6.5.37's write-through guard
+# (a symlinked lib/ could corrupt the shared ~/.cyrius/lib snapshot for
+# every other repo) protects only repos pinned >= 6.5.37.
 /lib
 
 # Database files (test artifacts)

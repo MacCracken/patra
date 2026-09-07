@@ -1,6 +1,6 @@
 # Patra Development Roadmap
 
-> **Last refreshed**: 2026-08-18 (v1.13.8)
+> **Last refreshed**: 2026-09-07 (v1.13.12)
 >
 > Thin **backlog index**, **forward-looking only**. Nothing shipped belongs here —
 > per-release detail lives in [`../../CHANGELOG.md`](../../CHANGELOG.md), the
@@ -8,10 +8,15 @@
 > in [`state.md`](state.md). Open consumer requests live one-file-each in
 > [`requests/`](requests/); upstream cyrius bugs in [`issues/`](issues/).
 
-> **Current**: **v1.13.8**, cyrius pin **6.5.27**, zero `[deps.*]` git blocks.
-> Gates green: **1061 tests**, **8/8 fuzz**, 40 benchmarks, lint 0-warn, fmt
-> clean, vet/deny clean, libro 15/15, vidya 19/19, `dist/` in sync (12 sidecar
-> leaves). Binary 302,744 B.
+> **Current**: **v1.13.12**, cyrius pin **6.6.0**, zero `[deps.*]` git blocks.
+> Gates green: **1064 tests**, **8/8 fuzz**, 40 benchmarks (no regression),
+> lint 0-warn, fmt clean, libro 15/15, vidya 19/19, `dist/` in sync (12 sidecar
+> leaves). Binary **212,744 B** DCE-on / 302,856 B DCE-off — those stopped being
+> equal at v1.13.12, when cyrius 6.5.72's genuine dead-code elimination reached
+> patra's pin (−29.75 %) and superseded ADR-0001.
+>
+> **The upstream-issue queue is empty** as of v1.13.12 — the one open filing was
+> fixed in cyrius 6.5.28 and archived.
 >
 > The **1.13.x repair arc is complete**. It is recorded in
 > [`completed-phases.md`](completed-phases.md) and
@@ -29,8 +34,9 @@ sovereignty"*.
 ## Open backlog
 
 **Consumer requests**: none open — one shipped in 1.13.10, see below.
-**Consumer-filed bugs**: none open. **Upstream cyrius issues**: one open, filed
-upstream 2026-08-18 — see below.
+**Consumer-filed bugs**: none open. **Upstream cyrius issues**: **none open** —
+the last filing was archived at v1.13.12 (fixed upstream in cyrius 6.5.28), see
+below. Two cross-build warnings are open but **unfiled**, pending a decision.
 
 ### Recently shipped
 
@@ -44,16 +50,25 @@ upstream 2026-08-18 — see below.
 
 ### To file upstream (cyrius)
 
-- **[`issues/2026-08-18-cyrius-distlib-named-deps-unanchored-scan.md`](issues/2026-08-18-cyrius-distlib-named-deps-unanchored-scan.md)** — **filed upstream 2026-08-18.** `_distlib_named_deps` scans the manifest unanchored (`cbt/commands.cyr:2486`),
-  matching the literal `[deps.` inside `#` comment prose and adding that name to
-  the fold/exclude set — silently deleting a stdlib leaf from the `.deps`
-  sidecar. Its neighbour `_distlib_enum_profiles` (`:2364`) is line-anchored
-  **on purpose** and its comment already warns that this one is not. Measured:
-  `dist/patra.deps` carried 11 leaves against 12 declared, missing `sakshi`,
-  identically at 1.12.11 / 1.12.12 / 1.13.0 / 1.13.1. Worked around in patra and
-  libro by backticking the prose (patra 11→12, libro 26→27, both bundles
-  byte-identical) and guarded by a CI leaf-count check; **the parser fix belongs
-  upstream** and is now filed there. Affects the libro, patra, sigil, majra and bote sidecars.
+**Empty as of v1.13.12.** The one filing here —
+`2026-08-18-cyrius-distlib-named-deps-unanchored-scan` — was fixed upstream in
+cyrius **6.5.28**, mutation-verified under 6.6.0, and moved to
+[`issues/archive/`](issues/archive/2026-08-18-cyrius-distlib-named-deps-unanchored-scan.md).
+It had been stale for three shipped cuts.
+
+⚠ **Two cross-build warnings are open but unfiled** (found at the v1.13.12 pin
+bump, both cyrius stdlib, neither patra's and neither gated by CI, which does not
+cross-build): `--aarch64` emits `lib/io.cyr:442:31: raw syscall 32 is x86_64 dup`,
+a false positive — the call is inside `#ifdef CYRIUS_ARCH_AARCH64`, where 32 *is*
+`flock`; `--agnos` emits `undefined function '_agnos_getenv'`, defined in
+`lib/args_agnos.cyr` but not pulled into the closure. Both reproduce against the **pre-refresh lib
+snapshot** under this compiler, so the snapshot refresh did not cause them;
+whether the 6.6.0 *compiler* did is **undetermined** — the old-vs-new A/B could
+not be run on this host (see the toolchain note in `state.md`). So they do not
+falsify the "cross-builds warning-free" line archived with the 2026-06-18 agnos
+ABI issue, which was accurate when written under 6.2.44; they establish only
+that it does not hold under 6.6.0.
+**Decide at the next cut**: file them upstream, or record them as accepted noise.
 
 ### Release tooling — one decision left
 

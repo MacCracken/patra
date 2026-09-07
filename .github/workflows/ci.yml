@@ -115,16 +115,34 @@ jobs:
         # Regenerating must be a no-op. This also catches an under-declared
         # sidecar: dist/patra.deps silently shipped 11 stdlib leaves against the
         # 12 declared (sakshi missing) from <=1.12.11 through 1.13.1, because
-        # `cyrius distlib` matches a bracketed deps header inside comment prose.
+        # `cyrius distlib` matched a bracketed deps header inside comment prose.
         # distlib's own self-check cannot catch it — undefined *functions* are
         # only warnings.
+        #
+        # That root cause was fixed upstream in cyrius 6.5.28 and re-verified
+        # under 6.6.0 at v1.13.12. This gate STAYS. Upstream's regression gate
+        # (tests/gates/toolchain/distlib_named_deps_anchored.sh) is three source
+        # axes over the parser plus a fourth that reads THIS repo's
+        # dist/patra.deps — but only if ~/Repos/patra happens to be checked out
+        # (it skips otherwise), and it asserts `>= 12`, a floor. A floor cannot
+        # catch declaring 13 and emitting 12, which is exactly how this gate
+        # false-failed at v1.13.12. The equality below is the stronger check,
+        # it runs in CI rather than on one machine, and nothing else verifies
+        # the sidecar.
         run: |
           cyrius distlib
           git diff --exit-code -- dist/ || {
             echo "dist/ is stale — run 'cyrius distlib' and commit the result";
             exit 1;
           }
-          DECLARED=$(sed -n '/^\[deps\]/,/^\[/p' cyrius.cyml | grep -o '"[a-z_]*"' | wc -l)
+          # Read ONLY the `stdlib = ` line. The previous form sed'd from the
+          # section header to the next line starting with `[` — which is EOF in
+          # this manifest — and grepped a quoted-token pattern over the whole
+          # tail, so a double-quoted word in the comment block below counted as
+          # a declared leaf. That false-failed at the v1.13.12 cut (13 vs 12).
+          # Same defect shape as the distlib bug this gate was written for: an
+          # unanchored scan matching comment prose.
+          DECLARED=$(grep -m1 '^stdlib = ' cyrius.cyml | grep -o '"[^"]*"' | wc -l)
           EMITTED=$(grep -cv '^#' dist/patra.deps)
           [ "$DECLARED" = "$EMITTED" ] || {
             echo "sidecar declares $DECLARED stdlib leaves but emits $EMITTED";

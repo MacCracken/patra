@@ -5,6 +5,169 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.12] - 2026-09-07 — cyrius 6.6.0, and `CYRIUS_DCE=1` finally eliminates
+
+Toolchain-pin cut: cyrius **6.5.36 → 6.6.0** — 6.5.37 through 6.6.0, **38
+releases**. No patra source
+changed. The span carries one headline break that does not reach patra and one
+codegen change that does: dead-code elimination now removes bytes instead of
+padding them, which **supersedes [ADR-0001](docs/adr/0001-cyrius-5-5-dce-toolchain-limitation.md)**
+after three dated re-verifications (6.2.19, 6.4.64, 6.5.27) that each concluded
+"still no strip". Also closes the
+last open upstream issue, which had been fixed since cyrius 6.5.28 and sat open
+through three cuts.
+
+### Changed — cyrius pin 6.5.36 → 6.6.0, source-change-free
+
+Verified rather than assumed, because a *minor* jump is where target codegen drifts:
+
+- **6.6.0's `Result` / `Option` / `Either` value-form arity break does not reach
+  patra.** `payload()` and `tagged_new()` are deleted upstream and seven more —
+  `result_unwrap`, `result_unwrap_or`, `err_code_of`, `result_print`, `unwrap`,
+  `unwrap_or`, `option_print` — gained a tag argument. (Upstream's own headline
+  names only five; `result_unwrap_or` and `option_print` are omitted there, but
+  6.6.0's `lib/result.cyr` header documents `result_unwrap_or(t, v, fallback)`.) patra has **zero call sites** for any of the 17 affected
+  symbols across `src/`, `programs/`, `tests/`, `fuzz/` and `dist/patra.cyr`; it
+  uses no `?` propagation and declares no payload-carrying enum (all 40+ enums in
+  `src/` are C-style constants). `lib/result.cyr` *is* in the include closure
+  transitively via `lib/io.cyr`, but only as a declaration — the six
+  Result-returning `io` entry points are all `_r`-suffixed (`file_open_r` …) and
+  patra calls none of them. A full `fn`-signature diff of the 27-file closure
+  across 6.5.36…6.6.0 finds arity changes in **`lib/result.cyr` only** — of the
+  five stdlib files that changed arity in the window (`result.cyr`, `tagged.cyr`,
+  `mabda.cyr`, `sigil.cyr`, `vani.cyr`) it is the sole closure member, and
+  `lib/tagged.cyr` is not reachable from patra at all. Every other change inside
+  the closure is additive and target-gated.
+- **The 6.6.0 P0 struct-pointer miscompile never touched patra.** It was live
+  6.5.57 → 6.5.73; patra was pinned 6.5.36, *below* the window, so no shipped
+  patra binary was built by an affected compiler. The shape is unreachable
+  regardless: patra declares no `struct` and no typed `var x: T`.
+- **No formatter drift.** All 15 `src/` + `programs/` files pass `cyrfmt --check`
+  unchanged — unlike the 6.5.19 bump (reformatted `lib.cyr` / `wal.cyr`) and the
+  6.5.29 bump (`btree.cyr` / `table.cyr` / `where.cyr`). `cyrius lint` is 0-warn.
+- **`dist/` regenerates byte-identically** apart from the version header.
+
+### Changed — stdlib snapshot re-synced (`cyrius lib sync --full`)
+
+**108 → 109 `.cyr` files** — 37 changed, 1 added (`hashseed.cyr`). The only folded
+module patra actually calls moved **sakshi 2.4.11 → 2.4.12** (a
+`if (_sk_span_depth < 0)` lower-bound guard in `sakshi_span_enter`, which
+otherwise wrote 24 bytes *before* `_sk_span_stack`). Inert for patra: the fold's
+entire sakshi surface is one `sakshi_error` in `src/file.cyr`.
+
+### Performance — dead-code elimination now removes bytes (−90,112 B, −29.8 %)
+
+Landed upstream at **cyrius 6.5.72**, inside this cut's span. Measured here on
+`programs/demo.cyr` under 6.6.0, both builds from the same tree:
+
+| Build | Size | Compiler note |
+|---|---:|---|
+| `cyrius build` | **302,856 B** | `428 unreachable fns (92506 bytes — set CYRIUS_DCE=1 to eliminate)` |
+| `CYRIUS_DCE=1 cyrius build` | **212,744 B** | `92506 bytes of dead code eliminated` |
+
+**−90,112 B (−29.75 %)**, and the eliminated binary runs correctly (demo, all 8
+fuzz harnesses, both integration suites and the benchmark harness are built with
+`CYRIUS_DCE=1`). The 2,394 B between the compiler's 92,506 and the observed
+90,112 is section/page alignment, not unstripped code.
+
+ADR-0001 asked to be re-filed "if a future cyrius actually shrinks the output".
+One has, so it is now marked **Superseded** rather than annotated a sixth time.
+⚠ **Attribution caveat, stated because the ADR's own history is a chain of
+confident wrong readings**: the 6.5.72 attribution comes from the upstream
+CHANGELOG, not from a local A/B. Every `cyrius` entry point on the verification
+host dispatches to the installed `cycc` regardless of the manifest pin — pinning
+a scratch manifest to 6.5.36 still compiled with 6.6.0 and said so
+(`pins 6.5.36 but cycc is 6.6.0 — toolchain drift`) — so an old-vs-new
+measurement could not be taken here.
+
+### Fixed — documentation asserting things that are measurably false
+
+None of these are new to this cut; all were found by auditing it.
+
+- **`README.md` and `docs/development/state.md` both claimed `dist/patra.deps`
+  does not list `sakshi` ("it never did").** It does, and it has since v1.13.2:
+  the sidecar emits **12** leaves and `sakshi` is one of them. The claim was
+  load-bearing — it was the premise of the clean-room-build argument for why
+  consumers need not declare it.
+- **`cyrius.cyml` claimed patra uses "two sakshi symbols".** One, since v1.13.10
+  removed the `sakshi_set_level` call from `patra_init`; `src/lib.cyr:150` already
+  said so. The remaining `sakshi_set_level` / `sakshi_get_level` calls are
+  test-only, exercising that fix.
+- **`CLAUDE.md` omitted `src/pcache.cyr`** from both the architecture block and
+  the include order — **since v1.12.0, when the module landed: 25 shipped
+  releases** — and a reader following that include order would have produced a
+  broken bundle. Its "sakshi is the only external dep" line
+  has been false since v1.13.0 (zero `[deps.*]` blocks), and its SQL-subset
+  contract omitted `TEXT`, `ORDER BY` and `LIMIT`, all of which ship.
+- **`.gitignore` described `/lib` as a "Stdlib symlink".** It is a real
+  109-file snapshot directory. The distinction became load-bearing at cyrius
+  6.5.37, whose write-through guard protects only repos pinned ≥ 6.5.37 — patra
+  was at 6.5.36, so a genuine symlink would have been in the unprotected set.
+  `/patra` is now ignored too: since cyrius 6.5.49/6.5.51 a bare `cyrius build`
+  reads `[build] entry` and drops the `[build] output` binary at the repo root —
+  **302,592 B** measured under 6.6.0 (93,696 B with `CYRIUS_DCE=1`).
+
+### Fixed — the CI sidecar gate had the same unanchored-scan defect it guards against
+
+Caught by the gate false-failing during this cut: it derived the declared leaf
+count by `sed`-ing from `[deps]` to the next line starting with `[` — which is
+**EOF** in this manifest, since `stdlib = [` is not at column 0 — and then
+grepping a quoted-token pattern over the entire tail. Any double-quote character in the
+comment block below therefore fed that scan — the token it actually matched was
+the empty `""` inside a triple quote written in prose, counting as a 13th
+declared leaf against 12 emitted, and a plain `"word"` does the same. Now it
+reads only the `stdlib = ` line.
+
+That is precisely the shape of the `distlib` bug the gate was written to catch:
+an unanchored scan matching comment prose. Mutation-verified both ways — a
+quoted word in the comment tail moves the old form 12 → 13 and leaves the
+hardened form at 12; removing a real leaf from `stdlib` still moves it 12 → 11,
+so the gate has not been made vacuous. `cyrius.cyml` gains a third rule saying
+so, and the comment that tripped it was rewritten.
+
+### Closed — `2026-08-18-cyrius-distlib-named-deps-unanchored-scan`
+
+`cyrius distlib`'s `_distlib_named_deps` scanned the manifest for the literal
+`[deps.` with no line anchoring, so a bracketed deps header in **comment prose**
+registered as a named dep and deleted a real leaf from the sidecar — patra
+shipped 11 leaves against 12, missing `sakshi`, from ≤ 1.12.11 through 1.13.1.
+
+**Fixed upstream in cyrius 6.5.28 (2026-08-18)** — the *same day* patra filed
+it; the upstream filing landed at 12:24 and the parser fix 14 minutes later.
+patra's pin reached 6.5.29 at v1.13.9, so the issue has been stale for **three
+shipped cuts** (1.13.9 / 1.13.10 / 1.13.11), each of which bumped the pin without
+re-triaging it.
+
+Mutation-verified here under 6.6.0 rather than taken from the upstream CHANGELOG
+— the manifest's own two-rule block exists because this was misdiagnosed once
+already. Re-introducing the bracketed literal in three comment shapes
+(mid-line, comment-begins-with-header, indented) each still emits **12** leaves
+with `sakshi` present; a *real* `[deps.sakshi]` header emits **11** without it,
+which is correct behaviour and proves the probe discriminates.
+
+The backtick convention in `cyrius.cyml` and the v1.13.7 CI leaf-count gate both
+**stay**, with their rationale rewritten from "the tool has this defect" to
+"defence in depth". patra's gate asserts **equality** between emitted and
+declared leaves; upstream's regression gate is three source axes over the parser
+plus a `>= 12` floor on patra's own sidecar that only runs when `~/Repos/patra`
+is checked out on the machine. A floor cannot catch declaring 13 and emitting
+12 — which is exactly what happened during this cut.
+
+### Verification
+
+`1064 / 1064` assertions · `8 / 8` fuzz harnesses · 40 benchmarks, no regression
+(`order_by_200` 43.4 µs vs 45.1 µs at v1.13.9, `delete_50` 127.5 vs 132.7 µs,
+`read_scan_4t_par` 141.1 vs 143 µs, `insert_1k` 21.7 µs) · libro **15/15** ·
+vidya **19/19** · `dist/` in sync, sidecar 12 leaves == 12 declared.
+
+⚠ **Both cross-builds succeed but neither is warning-free**, contrary to the
+claim archived with the 2026-06-18 agnos ABI issue. `--aarch64` emits
+`lib/io.cyr:442:31: raw syscall 32 is x86_64 dup` (a false positive — the call
+sits inside `#ifdef CYRIUS_ARCH_AARCH64`, where 32 *is* `flock`), and `--agnos`
+emits `undefined function '_agnos_getenv'` (defined in `lib/args_agnos.cyr`,
+which is not pulled into the closure). Both originate in the cyrius stdlib, not
+in patra, and neither is gated by patra's CI, which does not cross-build.
+
 ## [1.13.11] - 2026-08-30 — page-cache pool is built before the cache is armed
 
 Closes [`docs/development/issues/archive/2026-08-30-pcache-publish-before-fill.md`](docs/development/issues/archive/2026-08-30-pcache-publish-before-fill.md),

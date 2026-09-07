@@ -65,7 +65,7 @@ cyrius distlib                               # regenerate dist/patra.cyr from [l
 - **3 failed attempts = defer and document** — don't burn time in a rabbit hole
 - **Fuzz every parser path** — SQL edge cases get invariants, not assertions
 - **Benchmark before claiming perf** — numbers or it didn't happen
-- **Include order matters** — `file → wal → page → row → bytes → sql → where → btree → table → jsonl`
+- **Include order matters** — `file → pcache → wal → page → row → bytes → sql → where → btree → table → jsonl` (`pcache` after `file` for `PAGE_SIZE`/`HDR_*`, before `page`, which calls into it)
 - **Driven by consumer needs** — patra has no queued feature backlog. Work lands when a consumer hits a concrete limit; new items name the consumer and the blocker they remove
 
 ## Rules (Hard Constraints)
@@ -149,11 +149,13 @@ Run before tagging `X.Y.0` or `X.0.0`. Ship as the last patch of the current min
 src/
   lib.cyr       — public API + includes (entry point) + patra_insert_row / result_read_bytes
   file.cyr      — .patra format, header, flock, fdatasync, constants (incl. COL_BYTES, PAGE_BYTES, BY_*)
+  pcache.cyr    — opt-in shared page cache: 1024-slot open-addressed, single global
+                  mutex, HDR_COMMITGEN gen gate. DEFAULT OFF (patra_cache_enable)
   page.cyr      — 4KB page alloc/read/write/free list + WAL integration
   row.cyr       — row encoding: i64, 256-byte strings, 16-byte (page, len) bytes-refs
   bytes.cyr     — variable-length binary: chain write/read/free across PAGE_BYTES pages
   sql.cyr       — tokenizer + recursive descent parser
-  where.cyr     — WHERE evaluation: 7 operators (incl LIKE), AND/OR; BYTES columns never match
+  where.cyr     — WHERE evaluation: 7 operators (incl LIKE), AND/OR; BYTES/TEXT columns never match
   wal.cyr       — Write-ahead logging: page before-images, crash recovery
   btree.cyr     — B+ tree: order-64, insert/split/search/range/lazy delete/compaction/whole-tree free
   table.cyr     — table create/insert/scan/update/delete + index maintenance + bytes chain cleanup
@@ -162,12 +164,12 @@ src/
 
 ## Key Constraints
 
-- **Zero dependencies** — no libsqlite3, no FFI, pure Cyrius (sakshi is the only external dep, via Cyrius git registry)
-- **Column types**: `INT` (i64), `STR` (256-byte fixed), `BYTES` (variable-length binary via chain-page overflow; `BLOB` is a legacy alias)
+- **Zero dependencies** — no libsqlite3, no FFI, pure Cyrius. Since **v1.13.0** `cyrius.cyml` carries **zero `[deps.*]` blocks**: sakshi is folded into the cyrius stdlib and declared in `[deps].stdlib` like any other leaf. Do not re-add a git pin for a folded module — it overrides what every downstream consumer resolves (see the rules in `cyrius.cyml`)
+- **Column types**: `INT` (i64), `STR` (256-byte fixed), `TEXT` (variable-length text on chain pages, SQL-writable, v1.10.2), `BYTES` (variable-length binary via chain-page overflow; `BLOB` is a legacy alias)
 - **4 KB pages** — standard page size, B-tree nodes fit one page
 - **flock for concurrency** — advisory locking, multi-reader / single-writer
 - **No floating point** — integer comparisons only in WHERE
-- **SQL subset only** — CREATE TABLE, CREATE INDEX, ALTER TABLE (ADD / DROP COLUMN, RENAME TO, RENAME COLUMN), DROP TABLE, INSERT (with optional `OR IGNORE`), SELECT (`*` / column-list / COUNT/SUM/MIN/MAX aggregates), UPDATE, DELETE, VACUUM. WHERE supports `=, !=, <, >, <=, >=, LIKE` + AND/OR. BYTES columns are programmatic-only (no SQL INSERT / UPDATE / WHERE). No JOINs, no subqueries
+- **SQL subset only** — CREATE TABLE, CREATE INDEX, ALTER TABLE (ADD / DROP COLUMN, RENAME TO, RENAME COLUMN), DROP TABLE, INSERT (with optional `OR IGNORE`), SELECT (`*` / column-list / COUNT/SUM/MIN/MAX aggregates, with optional `ORDER BY col [ASC|DESC][, ...]` and `LIMIT`), UPDATE, DELETE, VACUUM. WHERE supports `=, !=, <, >, <=, >=, LIKE` + AND/OR. BYTES columns are programmatic-only (no SQL INSERT / UPDATE / WHERE); TEXT is SQL-writable. No JOINs, no subqueries
 
 ## Cyrius Conventions
 

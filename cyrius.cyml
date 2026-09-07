@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "Patra — structured storage and SQL queries for Cyrius. The sovereign database."
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.5.36"
+cyrius = "6.6.0"
 repository = "https://github.com/MacCracken/patra"
 
 [build]
@@ -30,18 +30,32 @@ modules = [
 ]
 
 # Order mirrors the includes at the top of src/lib.cyr — sakshi last.
-# patra uses two sakshi symbols: sakshi_error (file.cyr), sakshi_set_level (lib.cyr).
+# patra's fold uses ONE sakshi symbol: sakshi_error (src/file.cyr:206). The
+# sakshi_set_level call was removed from patra_init at v1.13.10 (it clobbered
+# the host's process-global log level); src/lib.cyr:150 says so. The remaining
+# sakshi_set_level / sakshi_get_level calls are test-only, exercising that fix.
 [deps]
 stdlib = ["syscalls", "string", "alloc", "freelist", "io", "fmt", "str", "vec", "atomic", "sync", "thread_local", "sakshi"]
 
-# Two rules for this file. Both have already been violated once.
+# Three rules for this file. All three have already been violated once —
+# rule 3 during the very cut that added it.
 #
 # 1. Never write a bracketed deps.NAME section header inside a comment —
-#    backtick it as `deps.NAME` instead. `cyrius distlib` scans for that opening
-#    bracket sequence unanchored (cbt/commands.cyr _distlib_named_deps), matches
-#    it inside comment prose, and drops NAME from the .deps sidecar. Cost:
-#    dist/patra.deps silently shipped 11 leaves against 12, missing sakshi, from
-#    <=1.12.11 through 1.13.1. Fixed 1.13.2; filed upstream.
+#    backtick it as `deps.NAME` instead.
+#
+#    ⚠ This is now DEFENCE IN DEPTH, not a live defect. The upstream cause was
+#    fixed in cyrius 6.5.28 (2026-08-18): `_distlib_named_deps` scanned for the
+#    opening bracket sequence unanchored (cbt/commands.cyr) and matched it inside
+#    comment prose, dropping NAME from the .deps sidecar — dist/patra.deps
+#    silently shipped 11 leaves against 12, missing sakshi, from <=1.12.11
+#    through 1.13.1. Worked around here at 1.13.2, CI-gated at 1.13.7, and the
+#    filing archived at 1.13.12 after mutation-verifying the upstream fix under
+#    6.6.0: three comment shapes all still emit 12 leaves.
+#
+#    The rule stays because the convention costs nothing, protects anyone
+#    building on a pre-6.5.28 toolchain, and two narrow parser holes remain
+#    upstream (an unbounded `]` search; TOML triple-quoted strings) — see
+#    docs/development/issues/archive/2026-08-18-cyrius-distlib-named-deps-unanchored-scan.md.
 #
 # 2. Never add a git `deps.X` block for anything the cyrius stdlib folds.
 #    `cyrius deps` overlays a git dep on top of the snapshot on every build,
@@ -51,3 +65,16 @@ stdlib = ["syscalls", "string", "alloc", "freelist", "io", "fmt", "str", "vec", 
 #    itself folded, so this reached four levels down. On a bundle-publishing
 #    library it also drops the module from the .deps sidecar.
 #    History: `deps.sakshi` 2.4.2, removed at 1.13.0. See CHANGELOG [1.13.0].
+#
+# 3. Never write a double-quote character in a comment below the `deps`
+#    section. Added at 1.13.12, after a comment edit in THIS block broke the CI
+#    sidecar gate: it counted the declared leaves by sed-ing from the section
+#    header to the next line starting with `[` — which is EOF here — and then
+#    grepping a quoted-lowercase-token pattern over the whole tail, so a stray
+#    triple-quote in prose read as
+#    a 13th declared leaf against 12 emitted. Same shape as the distlib bug in
+#    rule 1: an unanchored scan matching comment prose.
+#
+#    The gate was hardened at the same time to read only the `stdlib = ` line,
+#    so this rule is now belt-and-braces — but the rule is cheaper than
+#    re-learning it.
