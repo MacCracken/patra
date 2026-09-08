@@ -1,6 +1,6 @@
 # Patra Development Roadmap
 
-> **Last refreshed**: 2026-09-07 (v1.14.0)
+> **Last refreshed**: 2026-09-07 (v1.14.1)
 >
 > Thin **backlog index**, **forward-looking only**. Nothing shipped belongs here —
 > per-release detail lives in [`../../CHANGELOG.md`](../../CHANGELOG.md), the
@@ -8,8 +8,8 @@
 > in [`state.md`](state.md). Open consumer requests live one-file-each in
 > [`requests/`](requests/); upstream cyrius bugs in [`issues/`](issues/).
 
-> **Current**: **v1.14.0**, cyrius pin **6.6.0**, zero `[deps.*]` git blocks.
-> Gates green: **1260 tests**, **8/8 fuzz**, 41 benchmarks, lint 0-warn, fmt
+> **Current**: **v1.14.1**, cyrius pin **6.6.0**, zero `[deps.*]` git blocks.
+> Gates green: **1288 tests**, **8/8 fuzz**, 41 benchmarks, lint 0-warn, fmt
 > clean, vet/deny clean, libro 15/15, vidya 19/19, `dist/` in sync (12 sidecar
 > leaves). Binary **225,312 B** DCE-on / 319,520 B DCE-off.
 >
@@ -53,13 +53,9 @@ below. Two cross-build warnings are open but **unfiled**, pending a decision.
 
 ### Open — patra's own
 
-- **[`issues/2026-09-07-schema-load-prologue-cloned-ten-times.md`](issues/2026-09-07-schema-load-prologue-cloned-ten-times.md)**
-  — the schema-load prologue is cloned ten times and each copy discards
-  `page_read`'s return. v1.14.0 mitigated the correctness half (`_sch_load`
-  zeroes on failure, so a failed read is a no-op rather than an operation
-  against another table's schema); the extraction into one `_tbl_open` that
-  propagates the status is deferred, because ten non-uniform cleanup paths in
-  `lib.cyr` is not work to bolt onto the end of a 23-defect diff. *Medium.*
+**Empty as of v1.14.1.** The one filing —
+`2026-09-07-schema-load-prologue-cloned-ten-times` — shipped as v1.14.1 and is
+[archived](issues/archive/2026-09-07-schema-load-prologue-cloned-ten-times.md).
 
 ### Deliberately not fixed at v1.14.0 — wrong answers, not corruption
 

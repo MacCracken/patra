@@ -538,16 +538,15 @@ fn _exec_insert(db): i64 {
 
     var tname = load64(_spr() + PR_TNAME);
     var tnlen = load64(_spr() + PR_TNLEN);
-    var idx = tbl_find(hdr, tname, tnlen);
-    if (idx < 0) {
+    var idx = 0;
+    var spg = 0;
+    var schema = 0;
+    var tor = _tbl_open(fd, hdr, tname, tnlen, &idx, &spg, &schema);
+    if (tor != PATRA_OK) {
         _tx_unlock(db, fd);
-        return PATRA_ERR_NOTFOUND;
+        return tor;
     }
-
     var entry = _tbl_entry(hdr, idx);
-    var spg = load64(entry + TBL_SCHEMA);
-    var schema = pg_alloc();
-    _sch_load(fd, hdr, spg, schema);
 
     var ncols = _sch_ncols_clamped(schema);
     var nvals = load64(_spr() + PR_COUNT);
@@ -802,16 +801,14 @@ fn _exec_update(db): i64 {
 
     var tname = load64(_spr() + PR_TNAME);
     var tnlen = load64(_spr() + PR_TNLEN);
-    var idx = tbl_find(hdr, tname, tnlen);
-    if (idx < 0) {
+    var idx = 0;
+    var spg = 0;
+    var schema = 0;
+    var tor = _tbl_open(fd, hdr, tname, tnlen, &idx, &spg, &schema);
+    if (tor != PATRA_OK) {
         _tx_unlock(db, fd);
-        return PATRA_ERR_NOTFOUND;
+        return tor;
     }
-
-    var entry = _tbl_entry(hdr, idx);
-    var spg = load64(entry + TBL_SCHEMA);
-    var schema = pg_alloc();
-    _sch_load(fd, hdr, spg, schema);
     var ncols = _sch_ncols_clamped(schema);
     var rsz = row_compute_size(schema, ncols);
 
@@ -839,16 +836,14 @@ fn _exec_delete(db): i64 {
 
     var tname = load64(_spr() + PR_TNAME);
     var tnlen = load64(_spr() + PR_TNLEN);
-    var idx = tbl_find(hdr, tname, tnlen);
-    if (idx < 0) {
+    var idx = 0;
+    var spg = 0;             # out-param only; this path never rewrites the schema
+    var schema = 0;
+    var tor = _tbl_open(fd, hdr, tname, tnlen, &idx, &spg, &schema);
+    if (tor != PATRA_OK) {
         _tx_unlock(db, fd);
-        return PATRA_ERR_NOTFOUND;
+        return tor;
     }
-
-    var entry = _tbl_entry(hdr, idx);
-    var spg = load64(entry + TBL_SCHEMA);
-    var schema = pg_alloc();
-    _sch_load(fd, hdr, spg, schema);
     var ncols = _sch_ncols_clamped(schema);
     var rsz = row_compute_size(schema, ncols);
 
@@ -936,13 +931,11 @@ fn _exec_alter_rename_col(db): i64 {
 
     var tname = load64(_spr() + PR_TNAME);
     var tnlen = load64(_spr() + PR_TNLEN);
-    var idx = tbl_find(hdr, tname, tnlen);
-    if (idx < 0) { _tx_unlock(db, fd); return PATRA_ERR_NOTFOUND; }
-
-    var entry = _tbl_entry(hdr, idx);
-    var spg = load64(entry + TBL_SCHEMA);
-    var schema = pg_alloc();
-    _sch_load(fd, hdr, spg, schema);
+    var idx = 0;
+    var spg = 0;
+    var schema = 0;
+    var tor = _tbl_open(fd, hdr, tname, tnlen, &idx, &spg, &schema);
+    if (tor != PATRA_OK) { _tx_unlock(db, fd); return tor; }
     var ncols = _sch_ncols_clamped(schema);
 
     var it_old = _spr() + PR_ITEMS;
@@ -991,13 +984,12 @@ fn _exec_alter_add(db): i64 {
 
     var tname = load64(_spr() + PR_TNAME);
     var tnlen = load64(_spr() + PR_TNLEN);
-    var idx = tbl_find(hdr, tname, tnlen);
-    if (idx < 0) { _tx_unlock(db, fd); return PATRA_ERR_NOTFOUND; }
-
+    var idx = 0;
+    var spg = 0;
+    var schema = 0;
+    var tor = _tbl_open(fd, hdr, tname, tnlen, &idx, &spg, &schema);
+    if (tor != PATRA_OK) { _tx_unlock(db, fd); return tor; }
     var entry = _tbl_entry(hdr, idx);
-    var spg = load64(entry + TBL_SCHEMA);
-    var schema = pg_alloc();
-    _sch_load(fd, hdr, spg, schema);
     var ncols_old = _sch_ncols_clamped(schema);
     if (ncols_old >= MAX_COLS) {
         pg_free(schema);
@@ -1171,13 +1163,12 @@ fn _exec_alter_drop_col(db): i64 {
 
     var tname = load64(_spr() + PR_TNAME);
     var tnlen = load64(_spr() + PR_TNLEN);
-    var idx = tbl_find(hdr, tname, tnlen);
-    if (idx < 0) { _tx_unlock(db, fd); return PATRA_ERR_NOTFOUND; }
-
+    var idx = 0;
+    var spg = 0;
+    var schema = 0;
+    var tor = _tbl_open(fd, hdr, tname, tnlen, &idx, &spg, &schema);
+    if (tor != PATRA_OK) { _tx_unlock(db, fd); return tor; }
     var entry = _tbl_entry(hdr, idx);
-    var spg = load64(entry + TBL_SCHEMA);
-    var schema = pg_alloc();
-    _sch_load(fd, hdr, spg, schema);
     var ncols_old = _sch_ncols_clamped(schema);
     if (ncols_old <= 1) {
         pg_free(schema);
@@ -1346,13 +1337,11 @@ fn _exec_vacuum(db): i64 {
 
     var tname = load64(_spr() + PR_TNAME);
     var tnlen = load64(_spr() + PR_TNLEN);
-    var idx = tbl_find(hdr, tname, tnlen);
-    if (idx < 0) { _tx_unlock(db, fd); return PATRA_ERR_NOTFOUND; }
-
-    var entry = _tbl_entry(hdr, idx);
-    var spg = load64(entry + TBL_SCHEMA);
-    var schema = pg_alloc();
-    _sch_load(fd, hdr, spg, schema);
+    var idx = 0;
+    var spg = 0;             # out-param only; this path never rewrites the schema
+    var schema = 0;
+    var tor = _tbl_open(fd, hdr, tname, tnlen, &idx, &spg, &schema);
+    if (tor != PATRA_OK) { _tx_unlock(db, fd); return tor; }
     var ic = load64(schema + SCH_IDX_COL);
     var ir = load64(schema + SCH_IDX_ROOT);
     pg_free(schema);
@@ -1377,13 +1366,12 @@ fn _exec_create_index(db): i64 {
 
     var tname = load64(_spr() + PR_TNAME);
     var tnlen = load64(_spr() + PR_TNLEN);
-    var idx = tbl_find(hdr, tname, tnlen);
-    if (idx < 0) { _tx_unlock(db, fd); return PATRA_ERR_NOTFOUND; }
-
+    var idx = 0;
+    var spg = 0;
+    var schema = 0;
+    var tor = _tbl_open(fd, hdr, tname, tnlen, &idx, &spg, &schema);
+    if (tor != PATRA_OK) { _tx_unlock(db, fd); return tor; }
     var entry = _tbl_entry(hdr, idx);
-    var spg = load64(entry + TBL_SCHEMA);
-    var schema = pg_alloc();
-    _sch_load(fd, hdr, spg, schema);
     var ncols = _sch_ncols_clamped(schema);
 
     # Resolve column name
@@ -1544,28 +1532,41 @@ fn patra_rollback(db): i64 {
 
 # ── patra_exec ────────────────────
 
-# Load a table's schema page (1.14.0).
+# Find a table and load its schema page — the prologue every statement shares.
 #
-# All ten schema-load sites were a bare `page_read(fd, spg, schema);` with the
-# return discarded — and pg_alloc recycles slab pages WITHOUT zeroing, so a
-# failed read left the previous occupant's bytes in the buffer. Those buffers
-# hold schema pages, so the most likely stale content is ANOTHER TABLE'S
-# SCHEMA, and the statement went on to use it and report success.
+# Writes the table index, its schema page NUMBER and the loaded schema PAGE into
+# the three caller-owned cells, and returns a status the caller propagates.
+# On any failure the cells are left at (-1, 0, 0) and nothing is allocated, so
+# the caller's error path never has to free anything: at this point in every
+# caller the schema page is the only thing that has been allocated, and this
+# function owns it until it succeeds.
 #
-# Zeroing on failure turns that into SCH_NCOLS = 0, which every caller's column
-# loop treats as "no columns" — a no-op instead of an operation against the
-# wrong table's layout. The status is returned as well, for the callers that
-# can propagate it.
-#
-# ⚠ The full fix is to collapse these ten clones into one `_tbl_open` helper
-# that returns an error the caller propagates; that is filed rather than done
-# here, because ten hand-tailored early returns in this file at the end of a
-# large diff is a worse trade than the uniform guard below. See
-# docs/development/issues/.
-fn _sch_load(fd, hdr, spg, schema): i64 {
-    var r = page_read_checked(fd, hdr, spg, schema);
-    if (r != PATRA_OK) { memset(schema, 0, PAGE_SIZE); }
-    return r;
+# ⚠ 1.14.1 — why this exists. Ten call sites carried this prologue verbatim, and
+# all ten discarded `page_read`'s return. `pg_alloc` recycles slab pages WITHOUT
+# zeroing, so a failed read left the previous occupant's bytes in the buffer —
+# and since these buffers hold schema pages, the most likely stale content was
+# ANOTHER TABLE'S SCHEMA, which the statement then used while reporting success.
+# v1.14.0 mitigated that by zeroing on failure (`_sch_load`), which degraded it
+# to a silent no-op; this is the actual fix, and it removes the ten-way
+# duplication that let one defect exist in ten places at once.
+fn _tbl_open(fd, hdr, tname, tnlen, o_idx, o_spg, o_schema): i64 {
+    store64(o_idx, 0 - 1);
+    store64(o_spg, 0);
+    store64(o_schema, 0);
+    var idx = tbl_find(hdr, tname, tnlen);
+    if (idx < 0) { return PATRA_ERR_NOTFOUND; }
+    var entry = _tbl_entry(hdr, idx);
+    var spg = load64(entry + TBL_SCHEMA);
+    var schema = pg_alloc();
+    if (schema == 0) { return PATRA_ERR_IO; }
+    if (page_read_checked(fd, hdr, spg, schema) != PATRA_OK) {
+        pg_free(schema);
+        return PATRA_ERR_PAGE;
+    }
+    store64(o_idx, idx);
+    store64(o_spg, spg);
+    store64(o_schema, schema);
+    return PATRA_OK;
 }
 
 # ── Statement-mutex reentrancy for explicit transactions (1.14.0) ──────
@@ -2062,19 +2063,28 @@ fn _patra_query_exec(db): i64 {
 
     var tname = load64(_spr() + PR_TNAME);
     var tnlen = load64(_spr() + PR_TNLEN);
-    var idx = tbl_find(hdr, tname, tnlen);
-    if (idx < 0) {
+    # The query path returns a RESULT SET, so its failure value is 0 rather
+    # than an error code — the one place the shared prologue's status cannot be
+    # returned verbatim.
+    var idx = 0;
+    var spg = 0;             # out-param only; this path never rewrites the schema
+    var schema = 0;
+    var tor = _tbl_open(fd, hdr, tname, tnlen, &idx, &spg, &schema);
+    if (tor != PATRA_OK) {
         _tx_unlock(db, fd);
         return 0;
     }
 
     var entry = _tbl_entry(hdr, idx);
-    var ncols = load64(entry + TBL_NCOLS);
+    # 1.14.1: take the column count from the SCHEMA page, as the other nine
+    # sites do. This was the only site reading `entry + TBL_NCOLS`, so it sized
+    # the row from the table directory while reading the column entries from
+    # the schema page — two independent on-disk copies. They are written in
+    # lockstep (tbl_create and both ALTER paths update both), so they agree on
+    # any healthy file; a file where they disagree gave this path a row size
+    # that did not match the layout it then read with.
+    var ncols = _sch_ncols_clamped(schema);
     var nrows = load64(entry + TBL_NROWS);
-    var spg = load64(entry + TBL_SCHEMA);
-
-    var schema = pg_alloc();
-    _sch_load(fd, hdr, spg, schema);
     var rsz = row_compute_size(schema, ncols);
 
     # Type-check the WHERE before scanning. where_eval runs per row and has no
@@ -2862,13 +2872,12 @@ fn _patra_insert_row_impl(db, tname, tnlen, ncols, types, ivals, sptrs, slens, b
     patra_lock_ex(fd);
     _pc_refresh(fd, hdr);
 
-    var idx = tbl_find(hdr, tname, tnlen);
-    if (idx < 0) { _tx_unlock(db, fd); return PATRA_ERR_NOTFOUND; }
-
+    var idx = 0;
+    var spg = 0;
+    var schema = 0;
+    var tor = _tbl_open(fd, hdr, tname, tnlen, &idx, &spg, &schema);
+    if (tor != PATRA_OK) { _tx_unlock(db, fd); return tor; }
     var entry = _tbl_entry(hdr, idx);
-    var spg = load64(entry + TBL_SCHEMA);
-    var schema = pg_alloc();
-    _sch_load(fd, hdr, spg, schema);
 
     var scols = _sch_ncols_clamped(schema);
     if (ncols != scols) {

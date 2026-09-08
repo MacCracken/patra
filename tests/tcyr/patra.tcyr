@@ -6392,6 +6392,121 @@ fn test_pcache_evict_fails_open() {
     cleanup();
 }
 
+# -- v1.14.1: the shared table-open prologue ----
+
+fn test_tbl_open_contract() {
+    test_group("_tbl_open reports failure instead of loading garbage (1.14.1)");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (id INT, v INT)");
+    patra_exec(db, "INSERT INTO t VALUES (1, 11)");
+
+    var fd = _db_fd(db);
+    var hdr = _db_hdr(db);
+    var oi = 0;
+    var os = 0;
+    var oc = 0;
+
+    # Success: the three cells are filled and the schema is really this table's.
+    assert_eq(_tbl_open(fd, hdr, "t", 1, &oi, &os, &oc), PATRA_OK, "opens a real table");
+    assert_eq(oi >= 0, 1, "table index returned");
+    assert_eq(os >= 1, 1, "schema page number returned");
+    assert_eq(oc != 0, 1, "schema page returned");
+    assert_eq(_sch_ncols_clamped(oc), 2, "and it is the right schema");
+    pg_free(oc);
+
+    # Unknown table: NOTFOUND, and NOTHING is allocated or returned.
+    assert_eq(_tbl_open(fd, hdr, "nope", 4, &oi, &os, &oc), PATRA_ERR_NOTFOUND, "unknown table");
+    assert_eq(oi, 0 - 1, "index cell cleared");
+    assert_eq(os, 0, "page-number cell cleared");
+    assert_eq(oc, 0, "schema cell cleared — nothing to free");
+
+    # Unreadable schema page: the caller must be TOLD, not handed a buffer.
+    #
+    # Before 1.14.1 all ten prologues discarded page_read's return, and
+    # pg_alloc recycles slab pages WITHOUT zeroing — so a failed read left the
+    # previous occupant's bytes, most plausibly another table's schema, and the
+    # statement used it and reported success. v1.14.0 mitigated that by zeroing
+    # (a silent no-op); this asserts the actual contract.
+    var entry = _tbl_entry(hdr, 0);
+    var saved = load64(entry + TBL_SCHEMA);
+    store64(entry + TBL_SCHEMA, load64(hdr + HDR_PGCOUNT) + 100);
+    assert_eq(_tbl_open(fd, hdr, "t", 1, &oi, &os, &oc), PATRA_ERR_PAGE, "out-of-range schema page refused");
+    assert_eq(oc, 0, "no schema handed back on failure");
+    store64(entry + TBL_SCHEMA, 0);
+    assert_eq(_tbl_open(fd, hdr, "t", 1, &oi, &os, &oc), PATRA_ERR_PAGE, "zero schema page refused");
+    assert_eq(oc, 0, "still nothing handed back");
+    store64(entry + TBL_SCHEMA, saved);
+
+    # ⚠ The failure path must FREE the page it allocated. This is the specific
+    # hazard that made the v1.14.0 sweep defer this refactor — ten early
+    # returns, no block scope, and a page-slab leak would be invisible. The
+    # slab is a stack, so its top is an exact accounting: after a run of failed
+    # opens it must sit exactly where it started.
+    store64(entry + TBL_SCHEMA, load64(hdr + HDR_PGCOUNT) + 100);
+    var top_before = thread_local_get(TLS_SLAB_TOP);
+    var fi = 0;
+    while (fi < 64) {
+        _tbl_open(fd, hdr, "t", 1, &oi, &os, &oc);
+        fi = fi + 1;
+    }
+    assert_eq(thread_local_get(TLS_SLAB_TOP), top_before, "64 failed opens leak no slab pages");
+    store64(entry + TBL_SCHEMA, saved);
+
+    # A run of SUCCESSFUL opens the caller frees must balance too.
+    var top2 = thread_local_get(TLS_SLAB_TOP);
+    var si = 0;
+    while (si < 64) {
+        _tbl_open(fd, hdr, "t", 1, &oi, &os, &oc);
+        pg_free(oc);
+        si = si + 1;
+    }
+    assert_eq(thread_local_get(TLS_SLAB_TOP), top2, "64 successful opens balance");
+
+    # And the table still works afterwards — the probe left no damage.
+    assert_eq(_tbl_open(fd, hdr, "t", 1, &oi, &os, &oc), PATRA_OK, "recovers once restored");
+    pg_free(oc);
+
+    patra_close(db);
+    cleanup();
+}
+
+fn test_tbl_open_propagates() {
+    test_group("every statement path propagates the prologue's status (1.14.1)");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (id INT, v INT)");
+
+    # NOTFOUND now travels through the shared prologue's return rather than
+    # being re-spelled at each of the ten call sites.
+    assert_eq(patra_exec(db, "INSERT INTO nope VALUES (1, 2)"), PATRA_ERR_NOTFOUND, "insert");
+    assert_eq(patra_exec(db, "UPDATE nope SET v = 1"), PATRA_ERR_NOTFOUND, "update");
+    assert_eq(patra_exec(db, "DELETE FROM nope"), PATRA_ERR_NOTFOUND, "delete");
+    assert_eq(patra_exec(db, "ALTER TABLE nope ADD COLUMN c INT"), PATRA_ERR_NOTFOUND, "alter add");
+    assert_eq(patra_exec(db, "ALTER TABLE nope DROP COLUMN v"), PATRA_ERR_NOTFOUND, "alter drop");
+    assert_eq(patra_exec(db, "ALTER TABLE nope RENAME COLUMN a TO b"), PATRA_ERR_NOTFOUND, "alter rename col");
+    assert_eq(patra_exec(db, "VACUUM nope"), PATRA_ERR_NOTFOUND, "vacuum");
+    assert_eq(patra_exec(db, "CREATE INDEX ON nope (id)"), PATRA_ERR_NOTFOUND, "create index");
+    assert_eq(patra_query(db, "SELECT * FROM nope"), 0, "select returns a null result set");
+
+    var types = fl_alloc(2 * 8);
+    var ivals = fl_alloc(2 * 8);
+    store64(types, COL_INT); store64(types + 8, COL_INT);
+    store64(ivals, 1); store64(ivals + 8, 2);
+    assert_eq(patra_insert_row(db, "nope", 4, 2, types, ivals, 0, 0, 0, 0),
+      PATRA_ERR_NOTFOUND, "programmatic insert");
+    fl_free(types); fl_free(ivals);
+
+    # The real table is unaffected by all of that.
+    assert_eq(patra_exec(db, "INSERT INTO t VALUES (1, 11)"), PATRA_OK, "real table still works");
+    var rs = patra_query(db, "SELECT COUNT(*) FROM t");
+    assert_eq(patra_result_get_int(rs, 0, 0), 1, "and holds its row");
+    patra_result_free(rs);
+
+    patra_close(db);
+    cleanup();
+}
+
 # -- v1.13.8: a WAL is bound to its database (audit S1-8) ----
 
 fn _wpath(): i64 { return "/tmp/patra_test.patra.wal"; }
@@ -6876,6 +6991,8 @@ fn main() {
     test_pcache_isolates_databases();
     test_pcache_evict_fails_open();
     test_close_rolls_back_open_transaction();
+    test_tbl_open_contract();
+    test_tbl_open_propagates();
     test_cyclic_data_chain_terminates();
     test_hostile_header_rejected();
     test_alter_add_rowsz_guard();

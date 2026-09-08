@@ -5,6 +5,83 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.1] - 2026-09-07 — the table-open prologue exists once, and reports failure
+
+Closes [`docs/development/issues/archive/2026-09-07-schema-load-prologue-cloned-ten-times.md`](docs/development/issues/archive/2026-09-07-schema-load-prologue-cloned-ten-times.md),
+filed during the v1.14.0 P(-1) sweep and deliberately deferred out of it.
+
+Gates: **1,288 assertions** (was 1,260) · 8 / 8 fuzz · 41 benchmarks · libro
+15/15 · vidya 19/19 · fmt + lint 0-warn · vet / deny clean. Binary unchanged at
+**225,312 B** DCE-on.
+
+### Fixed — a failed schema load is reported instead of silently proceeding
+
+Ten statement paths carried the same six-line prologue — find the table, take
+its `TBL_SCHEMA` page number, `pg_alloc` a buffer, read the page — and **all ten
+discarded `page_read`'s return**. `pg_alloc` recycles slab pages **without
+zeroing**, so a failed read left the previous occupant's bytes in the buffer.
+Those buffers hold schema pages, so the most likely stale content was *another
+table's schema*, and the statement went on to use it and report `PATRA_OK`.
+
+v1.14.0 mitigated this with `_sch_load`, which zeroed the buffer on failure so
+the column loops saw `SCH_NCOLS = 0` and did nothing. That converted a
+wrong-table operation into a **silent no-op** — better, but still silent.
+
+The prologue is now one function, `_tbl_open`, which writes the table index, the
+schema page number and the loaded page into three caller-owned cells and returns
+a status the caller propagates. On any failure it leaves the cells at
+`(-1, 0, 0)` and **owns the cleanup**: the schema page is the only thing
+allocated at that point in every caller, so the ten new error paths are
+uniformly `_tx_unlock(db, fd); return tor;` with nothing to free. That
+uniformity is the point — ten hand-tailored early returns in this file is
+exactly how a leak gets introduced, which is why v1.14.0 deferred the work
+rather than bolting it onto a 23-defect diff.
+
+The one asymmetry is the query path, which returns a **result set**: its failure
+value stays `0` rather than the status.
+
+⚠ **This is roughly line-count neutral** — six lines of prologue per site became
+six lines of call-and-check. The gain is that the logic exists in one place and
+the failure is no longer discarded, not that the file got shorter.
+
+### Fixed — the query path took its column count from a different on-disk copy
+
+`_patra_query_exec` was the only site reading `entry + TBL_NCOLS`; the other nine
+read `SCH_NCOLS` off the schema page. So it **sized the row from the table
+directory while reading the column entries from the schema page** — two
+independent on-disk copies of the same number. They are written in lockstep
+(`tbl_create` and both `ALTER` paths update both), so they agree on any healthy
+file, but a file where they disagreed gave this path a row size that did not
+match the layout it then read with. All ten sites now use the schema page's own
+count, which cannot disagree with the entries beside it.
+
+### Cleanup — seven locals the extraction orphaned
+
+Moving `_tbl_entry` and the `TBL_SCHEMA` read inside `_tbl_open` left four
+`var entry = _tbl_entry(hdr, idx);` bindings with no reader (`_exec_update`,
+`_exec_delete`, `_exec_alter_rename_col`, `_exec_vacuum`) — dead calls, since
+`_tbl_entry` is pure pointer arithmetic. Removed. Three `spg` cells are dead in
+the same sense but cannot go: they are out-params `_tbl_open` writes through, and
+seven of the ten callers do still use `spg` to write the schema page back. Those
+three now say so on the line. Cyrius does not warn on unused locals and lint is
+0-warn regardless, so nothing would have caught this.
+
+### Tests
+
+`_tbl_open`'s contract is pinned directly — success fills all three cells with
+the right values, an unknown table returns `PATRA_ERR_NOTFOUND` with the cells
+cleared, and an out-of-range or zero `TBL_SCHEMA` returns `PATRA_ERR_PAGE` with
+**nothing handed back**. Propagation is pinned across all ten paths (every
+statement kind plus `patra_insert_row` against a missing table, and `SELECT`
+returning a null result set).
+
+⚠ **The leak the deferral was about is asserted, not argued.** The page slab is
+a stack, so its top is exact accounting: 64 consecutive failed opens must leave
+`TLS_SLAB_TOP` exactly where it started, and so must 64 successful opens the
+caller frees. Mutation-verified three ways — restoring v1.14.0's
+zero-and-continue, dropping the out-cell clearing, and leaking the page on the
+failure path each fail the suite.
+
 ## [1.14.0] - 2026-09-07 — P(-1) hardening sweep: 23 defects, seven of them silent wrong answers
 
 A **P(-1) scaffold-hardening pass** (CLAUDE.md § Process), run as a 12-lens
