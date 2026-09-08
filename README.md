@@ -11,7 +11,7 @@
 - **Transactions** — BEGIN/COMMIT/ROLLBACK with write-ahead logging
 - **Durability modes** — per-write fsync (default) or opt-in group-commit / batched fsync (`patra_set_sync_mode`)
 - **Prepared statements + bind params** — `?` placeholders with `patra_prepare` / `patra_bind_*`; parse-once, dispatch-many
-- **Concurrent readers** — `SELECT`s run in parallel (connection-per-thread, lock-free reads; since 1.12.0); writes stay single-writer. A shared handle is also safe across threads (since 1.11.0)
+- **Concurrent readers** — `SELECT`s run in parallel (connection-per-thread, lock-free reads; since 1.12.0); writes stay single-writer. **a handle belongs to one thread** (corrected in 1.14.0 — see the Thread-safety note under Usage)
 - **Zero dependencies** — pure Cyrius, no libsqlite3, no FFI
 - **File locking** — `flock` for concurrent process access
 - **JSON Lines mode** — append-only log with structured queries (libro integration)
@@ -82,7 +82,7 @@ from the version-pinned snapshot.
 ```toml
 [deps.patra]
 git = "https://github.com/MacCracken/patra.git"
-tag = "1.13.12"
+tag = "1.14.0"
 ```
 
 > ⚠ **If you are carrying a `[deps.sakshi]` block "required alongside patra",
@@ -138,10 +138,23 @@ handles and processes, and the OS page cache serves shared pages from RAM.
 `patra_init()` is still called once on the main thread before spawning workers
 (it installs that thread's TLS block); worker threads spawned via the cyrius
 `thread` module inherit one automatically, but a foreign (non-cyrius) thread must
-call `thread_local_init()` once before its first patra call. Sharing a single
-handle across reader threads still works but does **not** give read parallelism
-(and a shared handle would race the per-handle header/file-offset) — open one per
-thread for the speedup.
+call `thread_local_init()` once before its first patra call. > ⚠ **Corrected in 1.14.0.** The feature list above used to say "a shared
+> handle is also safe across threads (since 1.11.0)", which contradicted this
+> section two screens below it and ADR-0002. **It is not safe.** Since 1.12.0
+> the read path is lock-free by design, so concurrent `SELECT`s on ONE handle
+> race the per-handle header buffer (`DB_HDR`, rewritten by `_pc_refresh` on
+> every locked op) and the shared file-offset that `_pt_seek` + `sys_read`
+> depend on. The observable results are wrong rows, phantom values, and hangs —
+> not a slowdown. The claim was true for 1.11.x, when every statement was
+> serialized on the process mutex, and was never revised when 1.12.0 removed
+> that serialization from reads.
+>
+> **Open one handle per thread.** That is the documented model
+> (connection-per-thread), it is what the benchmarks measure, and it is the only
+> configuration the test suite exercises. Sharing a handle across threads is
+> unsupported; a future release may add `SYS_PREAD64`-based positional I/O,
+> which would remove the fd-offset half of the problem, but the header buffer
+> would still need its own fix.
 
 **Opt-in page cache** (`patra_cache_enable(on)`, process-global, **default OFF**):
 an in-process shared page cache. It is redundant with the OS page cache for

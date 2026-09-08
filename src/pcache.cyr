@@ -54,15 +54,116 @@ enum PcConst { PC_CAP = 1024; PC_PROBE_MAX = 8; }
 
 var _pc_on = 0;     # master switch: 0 = disabled (default), 1 = enabled
 var _pc_keys = 0;   # alloc(PC_CAP*8): page number per slot, 0 = empty
+var _pc_owns = 0;   # alloc(PC_CAP*8): owning database id per slot (1.14.0)
 var _pc_bufs = 0;   # alloc(PC_CAP*8): pointer to a PAGE_SIZE buffer per slot
 var _pc_gen = 0;    # generation the whole cache is coherent with
 var _pc_mtx = 0;    # mutex cell (lib/sync.cyr)
 
+# ── fd -> database identity (1.14.0) ──────────────
+#
+# ⚠ The cache was keyed by PAGE NUMBER ALONE. It is process-global and shared
+# across every open handle, so two DIFFERENT databases open in one process
+# collided on every page number they had in common — which is all of them,
+# since page numbering restarts at 1 in every file. Database A's page 3 was
+# served to database B and vice versa: cross-database disclosure on the read
+# path, and — because page_write evicts by the same bare number — a write to
+# A's page 3 evicted B's, while a read of B's page 3 could return A's bytes and
+# then be written back into B. Enabled caches on multi-database processes could
+# therefore corrupt on disk, permanently.
+#
+# The key is now (database id, page number). HDR_DBID already exists and is
+# assigned at open since v1.13.8, so it is exactly the identity needed. page.cyr
+# has the fd rather than the id, so this small registry maps one to the other;
+# an unregistered fd simply does not use the cache, which is always safe.
+# 256 handles. The entries are 16 bytes, so the whole registry is 4 KB — the
+# size of one cached page — and 64 was low enough that a connection-per-thread
+# consumer on a large machine could exhaust it. Overflow is now reported rather
+# than silent (see pc_register's caller), and _pc_evict fails open regardless,
+# so exhausting it costs cache effectiveness and never correctness.
+enum PcReg { PCR_MAX = 256; }
+var _pc_reg_fd = 0;
+var _pc_reg_id = 0;
+
+fn _pc_reg_init(): i64 {
+    if (_pc_reg_fd != 0) { return 0; }
+    var f = alloc(PCR_MAX * 8);
+    var d = alloc(PCR_MAX * 8);
+    for (var i = 0; i < PCR_MAX; i = i + 1) {
+        store64(f + i * 8, 0 - 1);
+        store64(d + i * 8, 0);
+    }
+    _pc_reg_id = d;
+    _pc_reg_fd = f;
+    return 0;
+}
+
+# Associate an open database fd with its HDR_DBID. Called from patra_open.
+fn pc_register(fd, dbid): i64 {
+    _pc_reg_init();
+    if (fd < 0) { return 0; }
+    if (dbid == 0) { return 0; }
+    # Under _pc_mtx: patra_open / patra_close run on worker threads in the
+    # connection-per-thread model, so registering and unregistering race each
+    # other and race _pc_dbid on the read path.
+    mutex_lock(_pc_mtx);
+    var done = 0;
+    # Reuse an existing entry for this fd rather than shadowing it. _pc_dbid
+    # returns the FIRST match, so a duplicate would hide the newer identity —
+    # one missed unregister away from handing a new database a closed one's id.
+    for (var i = 0; i < PCR_MAX; i = i + 1) {
+        if (done == 0) {
+            if (load64(_pc_reg_fd + i * 8) == fd) {
+                store64(_pc_reg_id + i * 8, dbid);
+                done = 1;
+            }
+        }
+    }
+    for (var i = 0; i < PCR_MAX; i = i + 1) {
+        if (done == 0) {
+            if (load64(_pc_reg_fd + i * 8) < 0) {
+                store64(_pc_reg_id + i * 8, dbid);
+                store64(_pc_reg_fd + i * 8, fd);
+                done = 1;
+            }
+        }
+    }
+    mutex_unlock(_pc_mtx);
+    return done;
+}
+
+# Drop an fd's registration. Called from patra_close — fds are recycled by the
+# kernel, so a stale entry would hand the next database the wrong identity.
+fn pc_unregister(fd): i64 {
+    if (_pc_reg_fd == 0) { return 0; }
+    if (fd < 0) { return 0; }
+    mutex_lock(_pc_mtx);
+    for (var i = 0; i < PCR_MAX; i = i + 1) {
+        if (load64(_pc_reg_fd + i * 8) == fd) {
+            store64(_pc_reg_fd + i * 8, 0 - 1);
+            store64(_pc_reg_id + i * 8, 0);
+        }
+    }
+    mutex_unlock(_pc_mtx);
+    return 0;
+}
+
+fn _pc_dbid(fd): i64 {
+    if (_pc_reg_fd == 0) { return 0; }
+    if (fd < 0) { return 0; }
+    var found = 0;
+    for (var i = 0; i < PCR_MAX; i = i + 1) {
+        if (found == 0) {
+            if (load64(_pc_reg_fd + i * 8) == fd) { found = load64(_pc_reg_id + i * 8); }
+        }
+    }
+    return found;
+}
+
 # Knuth multiplicative hash, masked to PC_CAP-1. The product may overflow i64
 # and go negative; the low 10 bits (& PC_CAP-1) are well-defined regardless of
 # sign, so the slot index is always 0..PC_CAP-1.
-fn _pc_hash(num): i64 {
-    return (num * 2654435761) & (PC_CAP - 1);
+fn _pc_hash(dbid, num): i64 {
+    return ((num * 2654435761) ^ (dbid * 1099511628211)) & (PC_CAP - 1);
 }
 
 # Called from patra_init. Creates only the (cheap) mutex cell; the 4MB buffer
@@ -89,14 +190,17 @@ fn _pc_alloc(): i64 {
     # ordering makes the function correct even standalone, which matters on the
     # agnos build where mutex_lock is a no-op.
     var keys = alloc(PC_CAP * 8);
+    var owns = alloc(PC_CAP * 8);
     var bufs = alloc(PC_CAP * 8);
     var i = 0;
     while (i < PC_CAP) {
         store64(keys + i * 8, 0);
+        store64(owns + i * 8, 0);
         store64(bufs + i * 8, alloc(PAGE_SIZE));
         i = i + 1;
     }
     _pc_bufs = bufs;
+    _pc_owns = owns;
     _pc_keys = keys;
     return 0;
 }
@@ -126,18 +230,24 @@ fn patra_cache_enabled(): i64 { return _pc_on; }
 # Look up page `num`. On hit, memcpy the cached page into `buf` and return 1;
 # on miss return 0. Scans the FULL probe window (holes from eviction mean an
 # empty slot does not terminate the search).
-fn _pc_get(num, buf): i64 {
+fn _pc_get(fd, num, buf): i64 {
     if (num == 0) { return 0; }
     if (_pc_on == 0) { return 0; }
+    # 1.14.0: an unidentified fd never reads the cache. Correct by construction
+    # — a miss only costs the read that would have happened anyway.
+    var dbid = _pc_dbid(fd);
+    if (dbid == 0) { return 0; }
     mutex_lock(_pc_mtx);
-    var h = _pc_hash(num);
+    var h = _pc_hash(dbid, num);
     var hit = 0;
     var i = 0;
     while (i < PC_PROBE_MAX) {
         var slot = (h + i) & (PC_CAP - 1);
         if (load64(_pc_keys + slot * 8) == num) {
-            memcpy(buf, load64(_pc_bufs + slot * 8), PAGE_SIZE);
-            hit = 1;
+            if (load64(_pc_owns + slot * 8) == dbid) {
+                memcpy(buf, load64(_pc_bufs + slot * 8), PAGE_SIZE);
+                hit = 1;
+            }
         }
         i = i + 1;
     }
@@ -149,18 +259,22 @@ fn _pc_get(num, buf): i64 {
 # existing slot for `num` is overwritten in place, so at most one slot per
 # page); else the first empty slot in the window; else (window full of other
 # keys) evicts the probe-start slot. memcpy is done under the lock.
-fn _pc_put(num, buf): i64 {
+fn _pc_put(fd, num, buf): i64 {
     if (num == 0) { return 0; }
     if (_pc_on == 0) { return 0; }
+    var dbid = _pc_dbid(fd);
+    if (dbid == 0) { return 0; }
     mutex_lock(_pc_mtx);
-    var h = _pc_hash(num);
+    var h = _pc_hash(dbid, num);
     var target = 0 - 1;
     var empty = 0 - 1;
     var i = 0;
     while (i < PC_PROBE_MAX) {
         var slot = (h + i) & (PC_CAP - 1);
         var k = load64(_pc_keys + slot * 8);
-        if (k == num) { target = slot; }
+        if (k == num) {
+            if (load64(_pc_owns + slot * 8) == dbid) { target = slot; }
+        }
         if (k == 0) {
             if (empty < 0) { empty = slot; }
         }
@@ -169,6 +283,7 @@ fn _pc_put(num, buf): i64 {
     if (target < 0) { target = empty; }
     if (target < 0) { target = h; }
     memcpy(load64(_pc_bufs + target * 8), buf, PAGE_SIZE);
+    store64(_pc_owns + target * 8, dbid);
     store64(_pc_keys + target * 8, num);
     mutex_unlock(_pc_mtx);
     return 0;
@@ -176,20 +291,53 @@ fn _pc_put(num, buf): i64 {
 
 # Drop page `num` from the cache (zeroes every matching key in the window).
 # Called by the writer on page_write / page_free (invalidate-on-write).
-fn _pc_evict(num): i64 {
+fn _pc_evict(fd, num): i64 {
     if (num == 0) { return 0; }
     if (_pc_on == 0) { return 0; }
+    var dbid = _pc_dbid(fd);
+
+    # ⚠ EVICT FAILS **OPEN**. This is the asymmetry that matters: _pc_get and
+    # _pc_put may safely do nothing for an unidentified fd — the cost is a read
+    # that would have happened anyway — but _pc_evict is the invalidate-on-write
+    # hook, and skipping it is silent on-disk corruption.
+    #
+    # The first cut of this function returned early on `dbid == 0`, and that was
+    # a defect introduced by the 1.14.0 re-keying itself: an unregistered handle
+    # would mutate pages while every REGISTERED handle on the same database kept
+    # serving the pre-write bytes from the shared cache. The generation gate does
+    # not save it — _pc_set_gen is process-global, so the unregistered writer's
+    # own commit relabels the whole cache with the new generation and the reader's
+    # _pc_check finds nothing to flush. A registered reader then read-modify-
+    # writes the stale 4 KB page back, destroying the committed change for good.
+    #
+    # An fd can be unregistered for two reasons, and neither is exotic: the
+    # registry is full, or HDR_DBID was still 0 when patra_open registered —
+    # which happens on a CONTENDED first open, because the id is assigned inside
+    # the LOCK_EX|LOCK_NB block that a contended open skips.
+    #
+    # So: no identity means evict every slot holding this page number, whoever
+    # owns it. Over-eviction only costs a re-read.
     mutex_lock(_pc_mtx);
-    var h = _pc_hash(num);
+    var h = _pc_hash(dbid, num);
     var i = 0;
     while (i < PC_PROBE_MAX) {
         var slot = (h + i) & (PC_CAP - 1);
         if (load64(_pc_keys + slot * 8) == num) {
-            store64(_pc_keys + slot * 8, 0);
+            if (dbid == 0) {
+                store64(_pc_keys + slot * 8, 0);
+                store64(_pc_owns + slot * 8, 0);
+            } elif (load64(_pc_owns + slot * 8) == dbid) {
+                store64(_pc_keys + slot * 8, 0);
+                store64(_pc_owns + slot * 8, 0);
+            }
         }
         i = i + 1;
     }
     mutex_unlock(_pc_mtx);
+    # An unidentified writer cannot know which slot hashes where under another
+    # database's id, so the probe window above is not sufficient for it: flush
+    # the whole cache instead. Rare, conservative, and correct.
+    if (dbid == 0) { _pc_flush(); }
     return 0;
 }
 
@@ -213,6 +361,11 @@ fn _pc_flush(): i64 {
     if (_pc_on == 0) { return 0; }
     mutex_lock(_pc_mtx);
     memset(_pc_keys, 0, PC_CAP * 8);
+    # 1.14.0: clear the owner table with the keys. A zeroed key already makes a
+    # slot unmatchable, so leaving stale owners is not a correctness bug — but
+    # a slot that says "empty" while still naming a database is exactly the
+    # kind of half-cleared state that becomes one later.
+    memset(_pc_owns, 0, PC_CAP * 8);
     mutex_unlock(_pc_mtx);
     return 0;
 }

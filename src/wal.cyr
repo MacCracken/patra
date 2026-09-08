@@ -22,15 +22,130 @@
 # old-version WAL files are refused outright and left in place so an
 # operator can inspect them.
 
-var _wal_fd = 0 - 1;
-var _wal_db_fd = 0 - 1;
-var _wal_pages = 0;
-var _wal_nlog = 0;
-var _wal_overflow = 0;
-var _wal_cap = 0;
-var _wal_salt1 = 0;
-var _wal_salt2 = 0;
+# ── Per-database WAL state (1.14.0) ───────────────
+#
+# ⚠ This was NINE PROCESS-GLOBALS until 1.14.0, while a transaction is a
+# property of an open DATABASE. Two databases open in one process therefore
+# shared one WAL: the second `patra_begin` overwrote `_wal_fd` and `_wal_db_fd`,
+# so the first transaction's before-images were orphaned and every later
+# `page_write` — from EITHER database — logged into the second's WAL against
+# the second's fd. The consequences were silent and severe:
+#
+#   * `patra_rollback(A)` restored B's before-images into B, reported PATRA_OK,
+#     and left A's changes in place.
+#   * `patra_commit` unlinked a WAL that was not its own.
+#   * `patra_close(A)` mid-transaction left the globals pointing at a closed fd
+#     for the next database to inherit.
+#
+# The state is now a small table keyed by the DATABASE fd. That key is the one
+# that makes this a drop-in: `page_write(fd, ...)` already carries it, so the
+# ~25 call sites that ignore WAL logging entirely did not have to change.
+#
+# Cross-handle safety on the SAME file still comes from flock — patra_begin
+# takes LOCK_EX, so two handles cannot hold transactions on one file at once.
+# What this fixes is two handles on DIFFERENT files, which flock never
+# arbitrated because they are different locks.
+enum WalSlot {
+    WS_DBFD = 0;
+    WS_WALFD = 8;
+    WS_PAGES = 16;
+    WS_NLOG = 24;
+    WS_CAP = 32;
+    WS_OVERFLOW = 40;
+    # Kept contiguous and in this order: _wal_hdr_verify writes salt1, salt2
+    # and dbid as three consecutive words into whatever buffer it is handed.
+    WS_SALT1 = 48;
+    WS_SALT2 = 56;
+    WS_DBID = 64;
+    WS_SZ = 72;
+    # Concurrent transactions on distinct databases in one process. Eight is
+    # far past any consumer's shape; exhausting it is reported, never silently
+    # ignored, because silently proceeding is precisely the old defect.
+    WAL_MAX_TX = 8;
+}
+
+var _wal_slots = 0;
 var _wal_tx_counter = 0;
+
+# Allocate the slot table. Called from patra_init, and defensively from
+# wal_start for a consumer that skipped it. Builds into a local and publishes
+# _wal_slots LAST — the same publish-order rule v1.13.11 had to learn in
+# pcache.cyr, where a guard tested the very global it assigned first.
+fn wal_slots_init(): i64 {
+    if (_wal_slots != 0) { return 0; }
+    var t = _pt_alloc(WAL_MAX_TX * WS_SZ);
+    if (t == 0) { return PATRA_ERR_IO; }
+    memset(t, 0, WAL_MAX_TX * WS_SZ);
+    for (var i = 0; i < WAL_MAX_TX; i = i + 1) {
+        store64(t + i * WS_SZ + WS_DBFD, 0 - 1);
+        store64(t + i * WS_SZ + WS_WALFD, 0 - 1);
+    }
+    _wal_slots = t;
+    return 0;
+}
+
+# The active WAL slot for this database fd, or 0 if it has no transaction.
+fn _wal_find(db_fd): i64 {
+    if (_wal_slots == 0) { return 0; }
+    if (db_fd < 0) { return 0; }
+    var found = 0;
+    for (var i = 0; i < WAL_MAX_TX; i = i + 1) {
+        if (found == 0) {
+            var sl = _wal_slots + i * WS_SZ;
+            if (load64(sl + WS_DBFD) == db_fd) { found = sl; }
+        }
+    }
+    return found;
+}
+
+# Claim a free slot for this database fd, or 0 if the table is full.
+fn _wal_claim(db_fd): i64 {
+    if (_wal_slots == 0) { return 0; }
+    var found = 0;
+    for (var i = 0; i < WAL_MAX_TX; i = i + 1) {
+        if (found == 0) {
+            var sl = _wal_slots + i * WS_SZ;
+            if (load64(sl + WS_DBFD) < 0) { found = sl; }
+        }
+    }
+    if (found != 0) {
+        store64(found + WS_DBFD, db_fd);
+        store64(found + WS_WALFD, 0 - 1);
+        store64(found + WS_NLOG, 0);
+        store64(found + WS_OVERFLOW, 0);
+    }
+    return found;
+}
+
+# Drop any slot held for this database fd, whatever state it is in.
+#
+# Belt-and-braces for fd RECYCLING (1.14.0). The slot table is keyed by the
+# database fd, and the kernel reuses fd numbers freely: if a slot ever outlived
+# its handle, the next database handed that same fd number would inherit it and
+# log into a dead transaction's WAL. By construction a slot exists exactly while
+# DB_TX is set — wal_start releases it on every failure path, and commit and
+# rollback release it on success — and patra_close now rolls back before closing.
+# This call makes that invariant unconditional rather than inferred, at the cost
+# of one scan of eight entries per close.
+fn wal_forget(db_fd): i64 {
+    var slot = _wal_find(db_fd);
+    if (slot == 0) { return 0; }
+    var wfd = load64(slot + WS_WALFD);
+    if (wfd >= 0) { sys_close(wfd); }
+    _wal_release(slot);
+    return 0;
+}
+
+# Release a slot, keeping its grown dedup list for reuse by the next
+# transaction on the same fd (it is freed with the handle in patra_close).
+fn _wal_release(slot): i64 {
+    if (slot == 0) { return 0; }
+    store64(slot + WS_DBFD, 0 - 1);
+    store64(slot + WS_WALFD, 0 - 1);
+    store64(slot + WS_NLOG, 0);
+    store64(slot + WS_OVERFLOW, 0);
+    return 0;
+}
 
 enum WalConst {
     # Initial capacity of the per-transaction dedup list. NOT a ceiling —
@@ -90,16 +205,17 @@ fn _pt_rand64(): i64 {
     return v;
 }
 
-fn _wal_gen_salts(): i64 {
+fn _wal_gen_salts(slot): i64 {
     var buf = _pt_alloc(16);
+    if (buf == 0) { return PATRA_ERR_IO; }
     #ifdef CYRIUS_TARGET_WIN
     var nr = sys_getrandom(buf, 16, 0);
     #else
     var nr = syscall(SYS_GETRANDOM, buf, 16, 0);
     #endif
     if (nr == 16) {
-        _wal_salt1 = load64(buf);
-        _wal_salt2 = load64(buf + 8);
+        store64(slot + WS_SALT1, load64(buf));
+        store64(slot + WS_SALT2, load64(buf + 8));
     } else {
         #ifdef CYRIUS_TARGET_AGNOS
         # agnos: time_unix #46 (unix seconds in rax). Linux time() #201 is
@@ -109,8 +225,8 @@ fn _wal_gen_salts(): i64 {
         var t = syscall(201, 0);
         #endif
         _wal_tx_counter = _wal_tx_counter + 1;
-        _wal_salt1 = t * 2654435761 + _wal_tx_counter;
-        _wal_salt2 = t + _wal_tx_counter * 1099511628211;
+        store64(slot + WS_SALT1, t * 2654435761 + _wal_tx_counter);
+        store64(slot + WS_SALT2, t + _wal_tx_counter * 1099511628211);
     }
     _pt_free(buf);
     return 0;
@@ -143,42 +259,83 @@ fn _wal_hash(pg, page_data, salt1, salt2): i64 {
 
 # Begin WAL logging for a transaction
 fn wal_start(db_fd, wal_path, dbid): i64 {
-    _wal_fd = file_open(wal_path, 578, 420);
-    # O_RDWR | O_CREAT | O_TRUNC = 2 + 64 + 512 = 578
+    var wfd = file_open(wal_path, 578 + O_NOFOLLOW, 420);
+    # O_RDWR | O_CREAT | O_TRUNC | O_NOFOLLOW = 2 + 64 + 512 + 131072.
     # file_open (io): portable — bridges agnos's namelen + AO_* flag ABI.
-    if (_wal_fd < 0) { _wal_fd = 0 - 1; return PATRA_ERR_IO; }
-    _wal_db_fd = db_fd;
-    if (_wal_pages == 0) {
-        _wal_pages = _pt_alloc(WAL_INIT_PAGES * 8);
-        if (_wal_pages == 0) { sys_close(_wal_fd); _wal_fd = 0 - 1; return PATRA_ERR_IO; }
-        _wal_cap = WAL_INIT_PAGES;
+    #
+    # O_NOFOLLOW added in 1.14.0. The .patra create/open paths (file.cyr) and
+    # the .jsonl append path took it at 1.5.2 for audit 2026-04-21 §2.8; the
+    # WAL was missed, and it is the worst of the three to miss because it is
+    # the only one that opens O_CREAT|O_TRUNC. `<db>.wal` is a fully
+    # predictable path, so an attacker who can create a name in the database's
+    # directory plants a symlink there and patra truncates and writes WAL
+    # bytes through it, with the process's privileges. Reproduced before the
+    # fix: a 202-byte victim file became 12,368 bytes of WAL beginning `PTWA`,
+    # and the commit path's unlink then removed the symlink rather than the
+    # victim, leaving the damage in place and the evidence gone.
+    if (wfd < 0) { return PATRA_ERR_IO; }
+
+    # 1.14.0: claim a slot keyed by this database's fd. A second transaction on
+    # the SAME fd is a caller error (patra_begin already returns early when
+    # DB_TX is set), and a full table is reported rather than silently sharing
+    # another database's WAL, which is the defect this table replaced.
+    wal_slots_init();
+    var slot = _wal_find(db_fd);
+    if (slot == 0) { slot = _wal_claim(db_fd); }
+    if (slot == 0) { sys_close(wfd); return PATRA_ERR_FULL; }
+    store64(slot + WS_WALFD, wfd);
+
+    if (load64(slot + WS_PAGES) == 0) {
+        var pl = _pt_alloc(WAL_INIT_PAGES * 8);
+        if (pl == 0) { sys_close(wfd); _wal_release(slot); return PATRA_ERR_IO; }
+        store64(slot + WS_PAGES, pl);
+        store64(slot + WS_CAP, WAL_INIT_PAGES);
     }
-    _wal_nlog = 0;
-    _wal_overflow = 0;
+    store64(slot + WS_NLOG, 0);
+    store64(slot + WS_OVERFLOW, 0);
 
-    _wal_gen_salts();
+    if (_wal_gen_salts(slot) != 0) {
+        sys_close(wfd); _wal_release(slot); return PATRA_ERR_IO;
+    }
 
-    # Write WAL header: magic + version + salt1 + salt2
+    # Write WAL header: magic + version + salt1 + salt2 + owning dbid.
+    #
+    # 1.14.0: the allocation and the write are both checked. A WAL whose header
+    # never landed fails _wal_hdr_verify on the way back in, so recovery and
+    # rollback refuse to replay it — meaning an unreported failure here is a
+    # transaction that believes it is protected and is not. Fail the start
+    # instead; patra_begin propagates it.
     var hdr = _pt_alloc(WAL_HDR_SZ);
+    if (hdr == 0) { sys_close(wfd); _wal_release(slot); return PATRA_ERR_IO; }
     memset(hdr, 0, WAL_HDR_SZ);
     store32(hdr, WAL_MAGIC);
     store32(hdr + 4, WAL_VER);
-    store64(hdr + 8, _wal_salt1);
-    store64(hdr + 16, _wal_salt2);
+    store64(hdr + 8, load64(slot + WS_SALT1));
+    store64(hdr + 16, load64(slot + WS_SALT2));
     store64(hdr + 24, dbid);
-    sys_write(_wal_fd, hdr, WAL_HDR_SZ);
+    var hw = sys_write(wfd, hdr, WAL_HDR_SZ);
     _pt_free(hdr);
+    if (hw != WAL_HDR_SZ) { sys_close(wfd); _wal_release(slot); return PATRA_ERR_IO; }
+    # 1.14.0: make the WAL's directory ENTRY durable, not just its contents.
+    # Without this the log can be missing after exactly the crash it exists for.
+    _pt_sync_dir(wal_path);
     return PATRA_OK;
 }
 
 # Returns 1 if WAL logging is active
-fn wal_is_active(): i64 {
-    if (_wal_fd >= 0) { return 1; }
+fn wal_is_active(db_fd): i64 {
+    var slot = _wal_find(db_fd);
+    if (slot == 0) { return 0; }
+    if (load64(slot + WS_WALFD) >= 0) { return 1; }
     return 0;
 }
 
-# Returns 1 if WAL overflowed (more than 64 pages in transaction)
-fn wal_overflowed(): i64 { return _wal_overflow; }
+# Returns 1 if this database's WAL overflowed during the open transaction.
+fn wal_overflowed(db_fd): i64 {
+    var slot = _wal_find(db_fd);
+    if (slot == 0) { return 0; }
+    return load64(slot + WS_OVERFLOW);
+}
 
 # Log before-image of a page (called from page_write).
 #
@@ -189,14 +346,22 @@ fn wal_overflowed(): i64 { return _wal_overflow; }
 #
 # Bookkeeping (_wal_pages / _wal_nlog) is updated only AFTER the record is
 # durable, so a failed attempt never marks a page as logged.
-fn wal_log_page(page_num): i64 {
-    if (_wal_fd < 0) { return PATRA_OK; }
+fn wal_log_page(db_fd, page_num): i64 {
+    # No slot => no open transaction on this database. Auto-commit writes are
+    # deliberately un-WAL'd (single statement, header fdatasync), so this is
+    # the normal path, not an error.
+    var slot = _wal_find(db_fd);
+    if (slot == 0) { return PATRA_OK; }
+    var wfd = load64(slot + WS_WALFD);
+    if (wfd < 0) { return PATRA_OK; }
     # Already logged this transaction — the first before-image is the one to keep.
     # Linear scan: O(n) per page, O(n^2) per transaction. Fine at realistic
     # transaction sizes; if a consumer ever runs very large transactions this
     # wants a hash set.
-    for (var i = 0; i < _wal_nlog; i = i + 1) {
-        if (load64(_wal_pages + i * 8) == page_num) { return PATRA_OK; }
+    var nlog = load64(slot + WS_NLOG);
+    var pages = load64(slot + WS_PAGES);
+    for (var i = 0; i < nlog; i = i + 1) {
+        if (load64(pages + i * 8) == page_num) { return PATRA_OK; }
     }
     # Grow the dedup list rather than capping the transaction. The old fixed
     # 64-page cap set a flag, returned 0, and let page_write modify the page
@@ -206,30 +371,32 @@ fn wal_log_page(page_num): i64 {
     # page_write's return, and a failed page_alloc write leaves a garbage page
     # whose DP_NEXT makes tbl_insert's tail-walk spin. So we simply do not run
     # out. _wal_overflow now only trips if the growth itself fails.
-    if (_wal_nlog >= _wal_cap) {
-        var ncap = _wal_cap * 2;
+    if (nlog >= load64(slot + WS_CAP)) {
+        var ncap = load64(slot + WS_CAP) * 2;
         var npages = _pt_alloc(ncap * 8);
-        if (npages == 0) { _wal_overflow = 1; return PATRA_ERR_FULL; }
-        memcpy(npages, _wal_pages, _wal_nlog * 8);
-        _pt_free(_wal_pages);
-        _wal_pages = npages;
-        _wal_cap = ncap;
+        if (npages == 0) { store64(slot + WS_OVERFLOW, 1); return PATRA_ERR_FULL; }
+        memcpy(npages, pages, nlog * 8);
+        _pt_free(pages);
+        pages = npages;
+        store64(slot + WS_PAGES, npages);
+        store64(slot + WS_CAP, ncap);
     }
 
     var buf = _pt_alloc(WAL_REC_SZ);
     memset(buf, 0, WAL_REC_SZ);
     store64(buf, page_num);
-    if (_pt_seek(_wal_db_fd, _wal_rec_offset(page_num)) < 0) {
+    if (_pt_seek(db_fd, _wal_rec_offset(page_num)) < 0) {
         _pt_free(buf);
         return PATRA_ERR_IO;
     }
-    var nr = sys_read(_wal_db_fd, buf + 8, PAGE_SIZE);
+    var nr = sys_read(db_fd, buf + 8, PAGE_SIZE);
     # A short/failed read means the page is past EOF (freshly allocated); the
     # zero-filled buffer is the correct before-image for a page that did not
     # exist, and rollback restoring zeros is right.
     if (nr < 0) { nr = 0; }
-    store64(buf + 8 + PAGE_SIZE, _wal_hash(page_num, buf + 8, _wal_salt1, _wal_salt2));
-    if (sys_write(_wal_fd, buf, WAL_REC_SZ) != WAL_REC_SZ) {
+    store64(buf + 8 + PAGE_SIZE,
+      _wal_hash(page_num, buf + 8, load64(slot + WS_SALT1), load64(slot + WS_SALT2)));
+    if (sys_write(wfd, buf, WAL_REC_SZ) != WAL_REC_SZ) {
         _pt_free(buf);
         return PATRA_ERR_IO;
     }
@@ -238,14 +405,14 @@ fn wal_log_page(page_num): i64 {
     # the modified pages to stable storage ahead of the log protecting them.
     # Bounded cost: at most one sync per distinct page per transaction, and
     # only when a transaction is open (_wal_fd < 0 outside one).
-    if (syscall(SYS_FDATASYNC, _wal_fd) < 0) {
+    if (syscall(SYS_FDATASYNC, wfd) < 0) {
         _pt_free(buf);
         return PATRA_ERR_IO;
     }
     _pt_free(buf);
 
-    store64(_wal_pages + _wal_nlog * 8, page_num);
-    _wal_nlog = _wal_nlog + 1;
+    store64(pages + nlog * 8, page_num);
+    store64(slot + WS_NLOG, nlog + 1);
     return PATRA_OK;
 }
 
@@ -255,24 +422,27 @@ fn wal_log_page(page_num): i64 {
 # WAL-logged, so wal_rollback restored page contents while every header
 # mutation survived. patra_rollback then re-read that mutated header from
 # disk. (audit 2026-08-18 S1-2)
-fn wal_log_hdr(): i64 { return wal_log_page(WAL_HDR_PAGE); }
+fn wal_log_hdr(db_fd): i64 { return wal_log_page(db_fd, WAL_HDR_PAGE); }
 
 # Commit transaction: sync WAL, flush in-place data pages, then delete WAL.
 # Audit 2026-04-21 §2.9: pre-1.5.2 the WAL was unlinked before the data-page
 # writes were durable. A crash in that window lost committed data. Now we
 # fdatasync the DB fd before unlink, guaranteeing that by the time the WAL
 # disappears, the committed pages have reached disk.
-fn wal_commit(wal_path): i64 {
-    if (_wal_fd >= 0) {
-        syscall(SYS_FDATASYNC, _wal_fd);
-        sys_close(_wal_fd);
+fn wal_commit(db_fd, wal_path): i64 {
+    var slot = _wal_find(db_fd);
+    if (slot == 0) { return 0; }
+    var wfd = load64(slot + WS_WALFD);
+    if (wfd >= 0) {
+        syscall(SYS_FDATASYNC, wfd);
+        sys_close(wfd);
     }
-    if (_wal_db_fd >= 0) {
-        syscall(SYS_FDATASYNC, _wal_db_fd);
+    if (db_fd >= 0) {
+        syscall(SYS_FDATASYNC, db_fd);
     }
-    _wal_fd = 0 - 1;
-    _wal_nlog = 0;
+    _wal_release(slot);
     xunlink(wal_path);
+    _pt_sync_dir(wal_path);
     return 0;
 }
 
@@ -282,9 +452,12 @@ fn wal_commit(wal_path): i64 {
 # a negative PATRA_ERR_* on bad magic / unsupported version / short read.
 # Leaves the fd positioned at the first record, which differs by version: a
 # v2/v3 header is 24 bytes, v4 is 32.
-var _wal_hdr_dbid = 0;
 
-fn _wal_hdr_verify(fd): i64 {
+# 1.14.0: writes salt1, salt2 and the owning dbid as three CONSECUTIVE words
+# into `out` instead of into module globals, so two databases verifying their
+# own WALs concurrently cannot clobber each other's salts. WS_SALT1 / WS_SALT2 /
+# WS_DBID are laid out contiguously for exactly this call.
+fn _wal_hdr_verify(fd, out): i64 {
     if (syscall(SYS_LSEEK, fd, 0, 0) < 0) { return 0 - PATRA_ERR_IO; }
     var hdr = _pt_alloc(WAL_HDR_SZ);
     var nr = sys_read(fd, hdr, WAL_HDR_SZ_V3);
@@ -293,13 +466,13 @@ fn _wal_hdr_verify(fd): i64 {
     var wv = load32(hdr + 4);
     if (wv < WAL_VER_MIN) { _pt_free(hdr); return 0 - PATRA_ERR_MAGIC; }
     if (wv > WAL_VER) { _pt_free(hdr); return 0 - PATRA_ERR_MAGIC; }
-    _wal_salt1 = load64(hdr + 8);
-    _wal_salt2 = load64(hdr + 16);
-    _wal_hdr_dbid = 0;
+    store64(out, load64(hdr + 8));
+    store64(out + 8, load64(hdr + 16));
+    store64(out + 16, 0);
     if (wv >= 4) {
         var nr2 = sys_read(fd, hdr + 24, 8);
         if (nr2 != 8) { _pt_free(hdr); return 0 - PATRA_ERR_MAGIC; }
-        _wal_hdr_dbid = load64(hdr + 24);
+        store64(out + 16, load64(hdr + 24));
     }
     _pt_free(hdr);
     return wv;
@@ -308,39 +481,56 @@ fn _wal_hdr_verify(fd): i64 {
 # Rollback: restore before-images from WAL, delete it. Stops replay on a
 # checksum mismatch — earlier records still apply, the record with the bad
 # hash and everything after it is skipped.
-fn wal_rollback(wal_path): i64 {
-    if (_wal_fd < 0) { return 0; }
-    if (_wal_hdr_verify(_wal_fd) < 0) {
-        sys_close(_wal_fd);
-        _wal_fd = 0 - 1;
-        _wal_nlog = 0;
+fn wal_rollback(db_fd, wal_path): i64 {
+    var slot = _wal_find(db_fd);
+    if (slot == 0) { return 0; }
+    var wfd = load64(slot + WS_WALFD);
+    if (wfd < 0) { return 0; }
+    if (_wal_hdr_verify(wfd, slot + WS_SALT1) < 0) {
+        sys_close(wfd);
+        _wal_release(slot);
         xunlink(wal_path);
+        _pt_sync_dir(wal_path);
         return PATRA_ERR_MAGIC;
     }
     var buf = _pt_alloc(WAL_REC_SZ);
     var done = 0;
+    # 1.14.0: a restore write that fails or comes up short means the database
+    # is left PART-ROLLED-BACK. Both the seek and the write were unchecked, and
+    # the unlink below then destroyed the only copy of the before-images — so
+    # an ENOSPC or a short write during rollback was permanent corruption
+    # reported as success. Track it, keep the WAL, and tell the caller.
+    var failed = 0;
     while (done == 0) {
-        var nr = sys_read(_wal_fd, buf, WAL_REC_SZ);
+        var nr = sys_read(wfd, buf, WAL_REC_SZ);
         if (nr != WAL_REC_SZ) { done = 1; continue; }
         var pg = load64(buf);
         var want = load64(buf + 8 + PAGE_SIZE);
-        var got = _wal_hash(pg, buf + 8, _wal_salt1, _wal_salt2);
+        var got = _wal_hash(pg, buf + 8, load64(slot + WS_SALT1), load64(slot + WS_SALT2));
         if (want != got) { done = 1; continue; }
-        if (_pt_seek(_wal_db_fd, _wal_rec_offset(pg)) < 0) { done = 1; continue; }
-        sys_write(_wal_db_fd, buf + 8, PAGE_SIZE);
+        if (_pt_seek(db_fd, _wal_rec_offset(pg)) < 0) { failed = 1; done = 1; continue; }
+        if (sys_write(db_fd, buf + 8, PAGE_SIZE) != PAGE_SIZE) { failed = 1; done = 1; continue; }
     }
     _pt_free(buf);
-    syscall(SYS_FDATASYNC, _wal_db_fd);
-    sys_close(_wal_fd);
-    _wal_fd = 0 - 1;
-    _wal_nlog = 0;
+    syscall(SYS_FDATASYNC, db_fd);
+    sys_close(wfd);
+    var overflowed = load64(slot + WS_OVERFLOW);
+    _wal_release(slot);
+    # KEEP the WAL when the restore did not complete: it is the only record of
+    # the pages still to undo, and the next patra_open re-runs recovery from
+    # it. Replaying a before-image twice is idempotent, so retrying is safe.
+    if (failed != 0) {
+        _pt_err("patra: WAL rollback incomplete — WAL kept for recovery");
+        return PATRA_ERR_IO;
+    }
     xunlink(wal_path);
+    _pt_sync_dir(wal_path);
     # Backstop: if any before-image went unlogged this transaction, the restore
     # above is INCOMPLETE and the database is left part-rolled-back. Growth
     # makes this unreachable short of an allocation failure, but reporting
     # success after a partial restore is exactly the defect this replaced —
     # patra_commit already reported it, patra_rollback did not.
-    if (_wal_overflow != 0) { return PATRA_ERR_FULL; }
+    if (overflowed != 0) { return PATRA_ERR_FULL; }
     return 0;
 }
 
@@ -366,19 +556,31 @@ fn wal_rollback(wal_path): i64 {
 # undo for a database that genuinely crashed under an older binary, leaving its
 # half-written pages in place, which is its own corruption.
 fn wal_recover(db_fd, wal_path, dbid, pgcount): i64 {
-    var wfd = file_open(wal_path, 0, 0);
+    # O_RDONLY | O_NOFOLLOW (1.14.0). Read-only, so it cannot destroy the
+    # target the way wal_start could — but recovery replays these bytes INTO
+    # the database and then unlinks the path, so following a symlink here
+    # feeds attacker-chosen pages to the replay and deletes the link. The
+    # v4 dbid binding is the real defence against a foreign WAL; this closes
+    # the path-level half.
+    var wfd = file_open(wal_path, O_NOFOLLOW, 0);
     if (wfd < 0) { return 0; }
-    var wv = _wal_hdr_verify(wfd);
+    # 1.14.0: recovery has no transaction slot, so it verifies into its own
+    # 3-word scratch (salt1, salt2, dbid) rather than into module globals.
+    var vh = _pt_alloc(24);
+    if (vh == 0) { sys_close(wfd); return 0; }
+    var wv = _wal_hdr_verify(wfd, vh);
     if (wv < 0) {
         # Bad magic / stale format: refuse to replay. Leave the file on disk
         # so an operator can inspect it; we will not silently corrupt the DB.
+        _pt_free(vh);
         sys_close(wfd);
         return 1;
     }
     if (wv >= 4) {
-        if (dbid == 0) { sys_close(wfd); return 1; }
-        if (_wal_hdr_dbid != dbid) {
+        if (dbid == 0) { _pt_free(vh); sys_close(wfd); return 1; }
+        if (load64(vh + 16) != dbid) {
             # This WAL belongs to a different database. Leave it for inspection.
+            _pt_free(vh);
             sys_close(wfd);
             return 1;
         }
@@ -389,12 +591,13 @@ fn wal_recover(db_fd, wal_path, dbid, pgcount): i64 {
 
     var buf = _pt_alloc(WAL_REC_SZ);
     var done = 0;
+    var failed = 0;
     while (done == 0) {
         var nr = sys_read(wfd, buf, WAL_REC_SZ);
         if (nr != WAL_REC_SZ) { done = 1; continue; }
         var pg = load64(buf);
         var want = load64(buf + 8 + PAGE_SIZE);
-        var got = _wal_hash(pg, buf + 8, _wal_salt1, _wal_salt2);
+        var got = _wal_hash(pg, buf + 8, load64(vh), load64(vh + 8));
         if (want != got) { done = 1; continue; }
         if (legacy == 1) {
             # Unbindable: require the record to name a page this database
@@ -404,12 +607,23 @@ fn wal_recover(db_fd, wal_path, dbid, pgcount): i64 {
             elif (pg >= 1) { if (pg < pgcount) { ok = 1; } }
             if (ok == 0) { done = 1; continue; }
         }
-        if (_pt_seek(db_fd, _wal_rec_offset(pg)) < 0) { done = 1; continue; }
-        sys_write(db_fd, buf + 8, PAGE_SIZE);
+        if (_pt_seek(db_fd, _wal_rec_offset(pg)) < 0) { failed = 1; done = 1; continue; }
+        if (sys_write(db_fd, buf + 8, PAGE_SIZE) != PAGE_SIZE) { failed = 1; done = 1; continue; }
     }
     _pt_free(buf);
+    _pt_free(vh);
     syscall(SYS_FDATASYNC, db_fd);
     sys_close(wfd);
+    # Same rule as wal_rollback (1.14.0): an incomplete replay must not unlink
+    # the WAL, or the pages it still had to undo are unrecoverable. This return
+    # is currently discarded by patra_open — deliberately, since there is
+    # nothing useful it could do differently — so the retained WAL, plus the
+    # logged error, is the actual protection: the next open recovers again.
+    if (failed != 0) {
+        _pt_err("patra: WAL recovery incomplete — WAL kept for retry");
+        return 0 - 1;
+    }
     xunlink(wal_path);
+    _pt_sync_dir(wal_path);
     return 1;
 }

@@ -1,6 +1,6 @@
 # Patra Development Roadmap
 
-> **Last refreshed**: 2026-09-07 (v1.13.12)
+> **Last refreshed**: 2026-09-07 (v1.14.0)
 >
 > Thin **backlog index**, **forward-looking only**. Nothing shipped belongs here —
 > per-release detail lives in [`../../CHANGELOG.md`](../../CHANGELOG.md), the
@@ -8,15 +8,18 @@
 > in [`state.md`](state.md). Open consumer requests live one-file-each in
 > [`requests/`](requests/); upstream cyrius bugs in [`issues/`](issues/).
 
-> **Current**: **v1.13.12**, cyrius pin **6.6.0**, zero `[deps.*]` git blocks.
-> Gates green: **1064 tests**, **8/8 fuzz**, 40 benchmarks (no regression),
-> lint 0-warn, fmt clean, libro 15/15, vidya 19/19, `dist/` in sync (12 sidecar
-> leaves). Binary **212,744 B** DCE-on / 302,856 B DCE-off — those stopped being
-> equal at v1.13.12, when cyrius 6.5.72's genuine dead-code elimination reached
-> patra's pin (−29.75 %) and superseded ADR-0001.
+> **Current**: **v1.14.0**, cyrius pin **6.6.0**, zero `[deps.*]` git blocks.
+> Gates green: **1260 tests**, **8/8 fuzz**, 41 benchmarks, lint 0-warn, fmt
+> clean, vet/deny clean, libro 15/15, vidya 19/19, `dist/` in sync (12 sidecar
+> leaves). Binary **225,312 B** DCE-on / 319,520 B DCE-off.
 >
-> **The upstream-issue queue is empty** as of v1.13.12 — the one open filing was
-> fixed in cyrius 6.5.28 and archived.
+> **v1.14.0 was a P(-1) hardening sweep**: 23 defects, seven of them silent
+> wrong answers reachable from plain SQL, every one of them living in a tree
+> whose gates all passed. All fixes mutation-verified (15 mutations). See
+> [`../../CHANGELOG.md`](../../CHANGELOG.md) and
+> [`../adr/0004-per-database-wal-and-cache-identity.md`](../adr/0004-per-database-wal-and-cache-identity.md).
+>
+> **The upstream-issue queue is empty**; one patra-owned issue is open (below).
 >
 > The **1.13.x repair arc is complete**. It is recorded in
 > [`completed-phases.md`](completed-phases.md) and
@@ -47,6 +50,43 @@ below. Two cross-build warnings are open but **unfiled**, pending a decision.
   `INFO` line the moment it opened a database. Removed; the call suppressed
   nothing of patra's own (its whole sakshi surface is one `sakshi_error`, which
   passes at WARN anyway). Regression-guarded and mutation-verified.
+
+### Open — patra's own
+
+- **[`issues/2026-09-07-schema-load-prologue-cloned-ten-times.md`](issues/2026-09-07-schema-load-prologue-cloned-ten-times.md)**
+  — the schema-load prologue is cloned ten times and each copy discards
+  `page_read`'s return. v1.14.0 mitigated the correctness half (`_sch_load`
+  zeroes on failure, so a failed read is a no-op rather than an operation
+  against another table's schema); the extraction into one `_tbl_open` that
+  propagates the status is deferred, because ten non-uniform cleanup paths in
+  `lib.cyr` is not work to bolt onto the end of a 23-defect diff. *Medium.*
+
+### Deliberately not fixed at v1.14.0 — wrong answers, not corruption
+
+Each is verified with a repro. They were left alone to keep the 1.14.0 release
+free of gratuitous consumer breakage; every one of them is a **semantic** change
+that would turn a currently-silent wrong answer into an error.
+
+- **`LIMIT 0` returns every row instead of none.** `PR_LIMIT` cannot distinguish
+  "no LIMIT" from "LIMIT 0" (`src/sql.cyr` stores the literal, `src/lib.cyr`
+  tests `lim > 0`). Fix: store `limit + 1`, or add a presence flag.
+- **`SUM` / `MIN` / `MAX` over a non-INT column reinterpret the raw bytes.** For
+  `TEXT` / `BYTES` that value is an internal chain **page number**, returned to
+  the caller as an integer. Fix: reject anything but `COL_INT` where `aci` is
+  resolved.
+- **`ORDER BY` on a `TEXT` / `BYTES` column sorts by the chain reference**, not
+  the payload — matching `WHERE`'s documented "chain columns never match" would
+  mean refusing it.
+- **Identifiers over 31 bytes truncate silently.** A long table name creates a
+  table no statement can reach, and repeated `CREATE` exhausts the 63-entry
+  directory. Fix: reject at `tbl_create` rather than clamp.
+- **`ORDER BY` on a column that does not exist returns rows unsorted** rather
+  than erroring. v1.14.0 fixed the out-of-bounds read this used to perform; the
+  permissive behaviour is unchanged, and disagrees with the projection path,
+  which errors for the same input.
+
+*Trigger*: a consumer that hits one, or an explicit decision to take the
+breakage at a minor bump.
 
 ### To file upstream (cyrius)
 

@@ -29,15 +29,15 @@ Everything below was **measured**, not copied forward:
 
 | Fact | Value | How |
 |---|---|---|
-| Version | **1.13.12** | `cat VERSION` |
+| Version | **1.14.0** | `cat VERSION` |
 | Cyrius pin | **6.6.0** | `cyrius.cyml [package].cyrius` |
-| Unit tests | **1064 / 1064** | `cyrius test tests/tcyr/patra.tcyr` |
+| Unit tests | **1260 / 1260** | `cyrius test tests/tcyr/patra.tcyr` |
 | Fuzz harnesses | **8 / 8** | `cyrius fuzz fuzz/` |
-| Benchmarks | **40** | `cyrius bench tests/bcyr/patra.bcyr` |
-| Demo binary | **212,744 B** DCE-on · **302,856 B** DCE-off | `CYRIUS_DCE=1 cyrius build programs/demo.cyr` vs. the same build without the flag — **these stopped being equal at v1.13.12** (cyrius 6.5.72; supersedes ADR-0001) |
-| `dist/patra.cyr` | **6,965 lines** per `cyrius distlib`'s own report · **7,005** per `wc -l` | both run; the 40-line gap is the tool's count, not a stale figure — quote whichever the context needs and say which |
+| Benchmarks | **41** | `cyrius bench tests/bcyr/patra.bcyr` |
+| Demo binary | **225,312 B** DCE-on · **319,520 B** DCE-off | `CYRIUS_DCE=1 cyrius build programs/demo.cyr` vs. the same build without the flag — **these stopped being equal at v1.13.12** (cyrius 6.5.72; supersedes ADR-0001) |
+| `dist/patra.cyr` | **8,059 lines** per `cyrius distlib`'s own report · **8,099** per `wc -l` | both run; the 40-line gap is the tool's count, not a stale figure — quote whichever the context needs and say which |
 | `dist/patra.deps` | **12 leaves** (matches `[deps].stdlib`) | `cyrius distlib` |
-| `src/` | **12 modules, 6,977 lines** | `wc -l src/*.cyr` |
+| `src/` | **12 modules, 7,970 lines** | `wc -l src/*.cyr` |
 | Integration | libro **15/15**, vidya **19/19** | `programs/test_*.cyr` |
 | WAL format | **v4** (v2/v3 accepted best-effort on recovery) | `src/wal.cyr` |
 

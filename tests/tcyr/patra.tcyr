@@ -7,6 +7,11 @@ include "lib/thread.cyr"
 
 var _tpath = "/tmp/patra_test.patra";
 
+# Synthetic fd for the page-cache unit test (1.14.0: the cache is keyed on
+# (dbid, page), so a direct test needs a registered fd). Deliberately a number
+# no real open would return here.
+var _PCFD = 4242;
+
 fn cleanup() { syscall(SYS_UNLINK, _tpath); }
 
 # -- v0.1: Header --------------------------------------------
@@ -4871,6 +4876,11 @@ fn test_pcache() {
     patra_cache_enable(1);   # opt-in: off by default
     assert_eq(patra_cache_enabled(), 1, "cache enabled");
 
+    # 1.14.0: the cache is keyed on (database id, page number), so a direct
+    # unit test has to present an fd the registry knows. _PCFD stands in for a
+    # database handle's fd; pc_register binds it to a synthetic identity.
+    assert_eq(pc_register(_PCFD, 424242) != 0, 1, "test fd registered");
+
     # v1.13.11 invariant: when the cache is ARMED the pool behind it is fully
     # built. _pc_alloc used to assign _pc_keys (the global its own guard tests)
     # BEFORE filling either table, so a second concurrent patra_cache_enable
@@ -4892,19 +4902,19 @@ fn test_pcache() {
     var out = pg_alloc();
 
     # Cold miss.
-    assert_eq(_pc_get(100, out), 0, "miss on cold page");
+    assert_eq(_pc_get(_PCFD, 100, out), 0, "miss on cold page");
     # Put then hit returns identical bytes (head + tail markers).
     memset(buf, 0, PAGE_SIZE);
     store64(buf, 0xABCD);
     store64(buf + 4088, 100);
-    _pc_put(100, buf);
-    assert_eq(_pc_get(100, out), 1, "hit after put");
+    _pc_put(_PCFD, 100, buf);
+    assert_eq(_pc_get(_PCFD, 100, out), 1, "hit after put");
     assert_eq(load64(out), 0xABCD, "content head matches");
     assert_eq(load64(out + 4088), 100, "content tail matches");
     # Dedupe: re-put overwrites in place; exactly one slot holds key 100.
     store64(buf, 0x1234);
-    _pc_put(100, buf);
-    assert_eq(_pc_get(100, out), 1, "hit after re-put");
+    _pc_put(_PCFD, 100, buf);
+    assert_eq(_pc_get(_PCFD, 100, out), 1, "hit after re-put");
     assert_eq(load64(out), 0x1234, "content updated (dedupe)");
     var cnt = 0;
     for (var s = 0; s < PC_CAP; s = s + 1) {
@@ -4912,32 +4922,32 @@ fn test_pcache() {
     }
     assert_eq(cnt, 1, "exactly one slot for key 100");
     # Page 0 (header) is never cached.
-    _pc_put(0, buf);
-    assert_eq(_pc_get(0, out), 0, "page 0 never cached");
+    _pc_put(_PCFD, 0, buf);
+    assert_eq(_pc_get(_PCFD, 0, out), 0, "page 0 never cached");
     # Evict -> miss.
-    _pc_evict(100);
-    assert_eq(_pc_get(100, out), 0, "miss after evict");
+    _pc_evict(_PCFD, 100);
+    assert_eq(_pc_get(_PCFD, 100, out), 0, "miss after evict");
     # Generation gate: a changed gen flushes the whole cache.
-    _pc_put(200, buf);
-    assert_eq(_pc_get(200, out), 1, "hit before gen change");
+    _pc_put(_PCFD, 200, buf);
+    assert_eq(_pc_get(_PCFD, 200, out), 1, "hit before gen change");
     _pc_check(_pc_gen + 1);
-    assert_eq(_pc_get(200, out), 0, "flushed by gen change");
+    assert_eq(_pc_get(_PCFD, 200, out), 0, "flushed by gen change");
     # Same gen is a no-op.
-    _pc_put(201, buf);
+    _pc_put(_PCFD, 201, buf);
     _pc_check(_pc_gen);
-    assert_eq(_pc_get(201, out), 1, "same gen leaves cache");
+    assert_eq(_pc_get(_PCFD, 201, out), 1, "same gen leaves cache");
     # A gen rewind (lower value) also flushes (!= semantics, not >).
     _pc_check(_pc_gen - 1);
-    assert_eq(_pc_get(201, out), 0, "gen rewind flushes");
+    assert_eq(_pc_get(_PCFD, 201, out), 0, "gen rewind flushes");
     # Explicit flush clears.
-    _pc_put(202, buf);
+    _pc_put(_PCFD, 202, buf);
     _pc_flush();
-    assert_eq(_pc_get(202, out), 0, "flush clears");
+    assert_eq(_pc_get(_PCFD, 202, out), 0, "flush clears");
     # Disabling makes every op a no-op (a put then get misses).
     patra_cache_enable(0);
     assert_eq(patra_cache_enabled(), 0, "cache disabled");
-    _pc_put(300, buf);
-    assert_eq(_pc_get(300, out), 0, "disabled => always miss");
+    _pc_put(_PCFD, 300, buf);
+    assert_eq(_pc_get(_PCFD, 300, out), 0, "disabled => always miss");
 
     pg_free(buf);
     pg_free(out);
@@ -5586,9 +5596,835 @@ fn test_row_geometry_property() {
     cleanup();
 }
 
+# -- v1.14.0: the WAL is opened O_NOFOLLOW, and a transaction that cannot
+# -- get a usable WAL refuses to start ------------------------------
+
+var _vpath = "/tmp/patra_test_victim.txt";
+
+# Read the whole victim file into `buf` (cap bytes); returns bytes read, or -1.
+fn _read_victim(buf, cap): i64 {
+    var fd = file_open(_vpath, 0, 0);
+    if (fd < 0) { return 0 - 1; }
+    var n = sys_read(fd, buf, cap);
+    sys_close(fd);
+    return n;
+}
+
+fn test_wal_symlink_refused() {
+    test_group("WAL open refuses a planted symlink (1.14.0)");
+    cleanup();
+    syscall(SYS_UNLINK, _wpath());
+    xunlink(_vpath);
+
+    # A victim file the attacker wants destroyed, and a symlink planted at the
+    # WAL's fully predictable `<db>.wal` path. Before 1.14.0 wal_start opened
+    # that path O_RDWR|O_CREAT|O_TRUNC with no O_NOFOLLOW, so the open followed
+    # the link and truncated the victim: a 202-byte file became 12,368 bytes
+    # beginning with the WAL magic `PTWA`, and the commit path's unlink then
+    # removed the *link*, leaving the damage and losing the evidence.
+    var vfd = file_open(_vpath, 194, 420);
+    assert_eq(vfd >= 0, 1, "victim file created");
+    sys_write(vfd, "VICTIM", 6);
+    sys_close(vfd);
+    assert_eq(xsymlink(_vpath, _wpath()), 0, "symlink planted at <db>.wal");
+
+    var db = patra_open(_tpath);
+    assert_neq(db, 0, "db opened");
+    patra_exec(db, "CREATE TABLE t (id INT, v INT)");
+
+    # The transaction must REFUSE to start rather than run unprotected.
+    var br = patra_begin(db);
+    assert_neq(br, PATRA_OK, "patra_begin fails when the WAL cannot be opened");
+    assert_eq(load64(db + DB_TX), 0, "and no transaction is left open");
+    patra_close(db);
+
+    # The victim is untouched: same length, same first bytes.
+    var buf = fl_alloc(64);
+    memset(buf, 0, 64);
+    var n = _read_victim(buf, 64);
+    assert_eq(n, 6, "victim file still 6 bytes");
+    assert_eq(memeq(buf, "VICTIM", 6), 1, "victim contents intact");
+    fl_free(buf);
+
+    xunlink(_wpath());
+    xunlink(_vpath);
+    cleanup();
+}
+
+fn test_tx_refuses_without_wal() {
+    test_group("no WAL, no transaction (1.14.0)");
+    cleanup();
+    syscall(SYS_UNLINK, _wpath());
+
+    # Same mechanism, checked from the durability side rather than the
+    # security side. wal_log_page opens with `if (_wal_fd < 0) { return
+    # PATRA_OK; }` — right for auto-commit, which is deliberately un-WAL'd,
+    # but it means page_write's write-ahead guard passes when the WAL is
+    # simply absent. Before 1.14.0 patra_begin discarded wal_start's return
+    # and reported PATRA_OK, so a failed WAL open produced a transaction that
+    # wrote pages with no before-image and a patra_rollback that restored
+    # nothing while returning success.
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (id INT, v INT)");
+    patra_exec(db, "INSERT INTO t VALUES (1, 11)");
+
+    # A healthy transaction still starts, and still rolls back.
+    assert_eq(patra_begin(db), PATRA_OK, "begin succeeds with a usable WAL");
+    assert_eq(load64(db + DB_TX), 1, "transaction is open");
+    patra_exec(db, "INSERT INTO t VALUES (2, 22)");
+    assert_eq(patra_rollback(db), PATRA_OK, "rollback reports success");
+    var rs = patra_query(db, "SELECT COUNT(*) FROM t");
+    assert_eq(patra_result_get_int(rs, 0, 0), 1, "and actually undid the insert");
+    patra_result_free(rs);
+
+    # Block the WAL path with an undeletable-by-open directory: open(2) on a
+    # directory with O_RDWR fails EISDIR, which is a real-world stand-in for
+    # EACCES / ENOSPC / EMFILE on that path.
+    patra_close(db);
+    cleanup();
+    syscall(SYS_UNLINK, _wpath());
+    syscall(SYS_MKDIR, _wpath(), 493);
+
+    var db2 = patra_open(_tpath);
+    patra_exec(db2, "CREATE TABLE t (id INT, v INT)");
+    assert_neq(patra_begin(db2), PATRA_OK, "begin fails when <db>.wal is unopenable");
+    assert_eq(load64(db2 + DB_TX), 0, "no transaction left open");
+    patra_close(db2);
+
+    syscall(SYS_RMDIR, _wpath());
+    cleanup();
+}
+
+fn test_wal_incomplete_restore_keeps_wal() {
+    test_group("an incomplete WAL restore keeps the WAL (1.14.0)");
+    cleanup();
+    xunlink(_wpath());
+
+    # Learn this database's identity so the crafted WAL can be BOUND to it —
+    # otherwise v1.13.8's dbid check refuses the replay and we would be
+    # testing that instead.
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (id INT, v INT)");
+    patra_exec(db, "INSERT INTO t VALUES (1, 11)");
+    var dbid = load64(_db_hdr(db) + HDR_DBID);
+    var pgc = load64(_db_hdr(db) + HDR_PGCOUNT);
+    patra_close(db);
+    assert_neq(dbid, 0, "database has an identity");
+
+    # Craft a v4 WAL that passes every header gate and then cannot be applied:
+    # the record names page 2^51, past page_offset's 2^50 ceiling, so
+    # page_offset returns -1 and the restore seek fails.
+    var s1 = 0x5A5A5A5A5A5A5A5A;
+    var s2 = 0x3C3C3C3C3C3C3C3C;
+    var wfd = file_open(_wpath(), 578, 420);
+    assert_eq(wfd >= 0, 1, "crafted WAL created");
+    var hdr = fl_alloc(WAL_HDR_SZ);
+    memset(hdr, 0, WAL_HDR_SZ);
+    store32(hdr, WAL_MAGIC);
+    store32(hdr + 4, WAL_VER);
+    store64(hdr + 8, s1);
+    store64(hdr + 16, s2);
+    store64(hdr + 24, dbid);
+    sys_write(wfd, hdr, WAL_HDR_SZ);
+    fl_free(hdr);
+    var rec = fl_alloc(WAL_REC_SZ);
+    memset(rec, 0, WAL_REC_SZ);
+    var badpg = 2251799813685248;
+    store64(rec, badpg);
+    store64(rec + 8 + PAGE_SIZE, _wal_hash(badpg, rec + 8, s1, s2));
+    sys_write(wfd, rec, WAL_REC_SZ);
+    fl_free(rec);
+    sys_close(wfd);
+    assert_eq(page_offset(badpg), 0 - 1, "the crafted page number is unseekable");
+
+    # Call recovery DIRECTLY. Going through patra_open would not discriminate:
+    # several of its header gates also leave the WAL on disk, so the file
+    # surviving would prove nothing about the restore path.
+    var fd = _pt_file_open(_tpath);
+    assert_eq(fd >= 0, 1, "database reopened for recovery");
+    var rr = wal_recover(fd, _wpath(), dbid, pgc);
+    sys_close(fd);
+    assert_eq(rr, 0 - 1, "wal_recover reports the restore was incomplete");
+
+    # The point of the fix: the WAL it could not fully apply is still there,
+    # so the next open retries. Before 1.14.0 the seek failure merely ended the
+    # loop and the unlink ran anyway, discarding the before-images for good.
+    var chk = file_open(_wpath(), 0, 0);
+    assert_eq(chk >= 0, 1, "WAL retained after an incomplete restore");
+    if (chk >= 0) { sys_close(chk); }
+
+    # A clean recovery still unlinks: without this the test would pass just as
+    # well against code that never unlinks at all.
+    xunlink(_wpath());
+    var wfd2 = file_open(_wpath(), 578, 420);
+    var hdr2 = fl_alloc(WAL_HDR_SZ);
+    memset(hdr2, 0, WAL_HDR_SZ);
+    store32(hdr2, WAL_MAGIC);
+    store32(hdr2 + 4, WAL_VER);
+    store64(hdr2 + 8, s1);
+    store64(hdr2 + 16, s2);
+    store64(hdr2 + 24, dbid);
+    sys_write(wfd2, hdr2, WAL_HDR_SZ);
+    fl_free(hdr2);
+    sys_close(wfd2);
+    var fd2 = _pt_file_open(_tpath);
+    assert_eq(wal_recover(fd2, _wpath(), dbid, pgc), 1, "a clean recovery succeeds");
+    sys_close(fd2);
+    var chk2 = file_open(_wpath(), 0, 0);
+    assert_eq(chk2 >= 0, 0, "and unlinks the WAL it fully applied");
+    if (chk2 >= 0) { sys_close(chk2); }
+
+    xunlink(_wpath());
+    cleanup();
+}
+
+# -- v1.14.0: a leaf split whose separator ties the parent's separator ----
+
+# True oracle: full scan, counted client-side. Deliberately NOT a WHERE query —
+# the planner would serve `WHERE id = k` from the very index under test, so an
+# index-vs-index comparison would agree with itself.
+fn _scan_count(db, k): i64 {
+    var rs = patra_query(db, "SELECT * FROM t");
+    if (rs == 0) { return 0 - 1; }
+    var n = patra_result_count(rs);
+    var c = 0;
+    var i = 0;
+    while (i < n) {
+        if (patra_result_get_int(rs, i, 0) == k) { c = c + 1; }
+        i = i + 1;
+    }
+    patra_result_free(rs);
+    return c;
+}
+fn _idx_count(db, q): i64 {
+    var rs = patra_query(db, q);
+    if (rs == 0) { return 0 - 1; }
+    var n = patra_result_count(rs);
+    patra_result_free(rs);
+    return n;
+}
+
+fn test_btree_equal_separator_split() {
+    test_group("split separator tying the parent's (1.14.0)");
+    cleanup();
+    var db = patra_open(_tpath);
+    # No CREATE INDEX: tbl_create auto-indexes the first INT column, so this is
+    # the default configuration of every table with a leading INT.
+    patra_exec(db, "CREATE TABLE t (id INT, v INT)");
+
+    # 41 x 100 then 23 x 200 splits the root leaf at sep = 100, leaving 32
+    # copies of 100 in the LEFT leaf — so 100 becomes its own upper separator.
+    var i = 0;
+    while (i < 41) { patra_exec(db, "INSERT INTO t VALUES (100, 7)"); i = i + 1; }
+    i = 0;
+    while (i < 23) { patra_exec(db, "INSERT INTO t VALUES (200, 7)"); i = i + 1; }
+    assert_eq(_idx_count(db, "SELECT * FROM t WHERE id = 200"), 23, "before: indexed id=200");
+    assert_eq(_scan_count(db, 200), 23, "before: scan id=200");
+
+    # Equal keys route RIGHT, so the left leaf can only fill with keys below
+    # 100; after 32 of them its own median is 100 again — the tie. Before
+    # 1.14.0 the separator was spliced one slot too far right and the sibling
+    # holding the 200s was stranded between two 100 separators, unreachable.
+    i = 0;
+    while (i < 32) { patra_exec(db, "INSERT INTO t VALUES (1, 7)"); i = i + 1; }
+
+    assert_eq(_scan_count(db, 200), 23, "after: scan still finds the 200s");
+    assert_eq(_idx_count(db, "SELECT * FROM t WHERE id = 200"), 23, "after: indexed id=200 agrees");
+    assert_eq(_idx_count(db, "SELECT * FROM t WHERE id >= 150"), 23, "after: indexed range agrees");
+    assert_eq(_scan_count(db, 100), 41, "after: scan id=100");
+    assert_eq(_idx_count(db, "SELECT * FROM t WHERE id = 100"), 41, "after: indexed id=100");
+    assert_eq(_scan_count(db, 1), 32, "after: scan id=1");
+    assert_eq(_idx_count(db, "SELECT * FROM t WHERE id = 1"), 32, "after: indexed id=1");
+    assert_eq(_idx_count(db, "SELECT * FROM t"), 96, "after: total rows");
+
+    patra_close(db);
+    cleanup();
+}
+
+# Property oracle: for a spread of skewed insert orders, every distinct key's
+# indexed count must equal its scanned count. This is the check that was
+# missing — the suite asserted index results against expected constants, never
+# against the scan over the same data.
+fn test_btree_index_matches_scan() {
+    test_group("indexed lookup agrees with a scan (1.14.0)");
+    var pat = 0;
+    while (pat < 3) {
+        cleanup();
+        var db = patra_open(_tpath);
+        patra_exec(db, "CREATE TABLE t (id INT, v INT)");
+        if (pat == 0) {
+            # descending groups — an ordinary batch load ordered by key desc
+            var k = 500;
+            while (k >= 100) {
+                var i = 0;
+                while (i < 40) { patra_exec(db, "INSERT INTO t VALUES (1, 7)"); i = i + 1; }
+                k = k - 100;
+            }
+        }
+        if (pat == 1) {
+            # one very hot key, then a cold one
+            var i = 0;
+            while (i < 80) { patra_exec(db, "INSERT INTO t VALUES (50, 7)"); i = i + 1; }
+            i = 0;
+            while (i < 40) { patra_exec(db, "INSERT INTO t VALUES (10, 7)"); i = i + 1; }
+        }
+        if (pat == 2) {
+            var i = 0;
+            while (i < 41) { patra_exec(db, "INSERT INTO t VALUES (100, 7)"); i = i + 1; }
+            i = 0;
+            while (i < 23) { patra_exec(db, "INSERT INTO t VALUES (200, 7)"); i = i + 1; }
+            i = 0;
+            while (i < 40) { patra_exec(db, "INSERT INTO t VALUES (1, 7)"); i = i + 1; }
+        }
+        # Every key present must agree between the index and a full scan.
+        var keys = fl_alloc(8 * 8);
+        store64(keys, 1); store64(keys + 8, 10); store64(keys + 16, 50);
+        store64(keys + 24, 100); store64(keys + 32, 200); store64(keys + 40, 500);
+        var ki = 0;
+        while (ki < 6) {
+            var kv = load64(keys + ki * 8);
+            var sc = _scan_count(db, kv);
+            var ic = 0;
+            if (kv == 1) { ic = _idx_count(db, "SELECT * FROM t WHERE id = 1"); }
+            if (kv == 10) { ic = _idx_count(db, "SELECT * FROM t WHERE id = 10"); }
+            if (kv == 50) { ic = _idx_count(db, "SELECT * FROM t WHERE id = 50"); }
+            if (kv == 100) { ic = _idx_count(db, "SELECT * FROM t WHERE id = 100"); }
+            if (kv == 200) { ic = _idx_count(db, "SELECT * FROM t WHERE id = 200"); }
+            if (kv == 500) { ic = _idx_count(db, "SELECT * FROM t WHERE id = 500"); }
+            assert_eq(ic, sc, "index count == scan count");
+            ki = ki + 1;
+        }
+        fl_free(keys);
+        patra_close(db);
+        pat = pat + 1;
+    }
+    cleanup();
+}
+
+fn test_alter_add_rowsz_guard() {
+    test_group("ALTER ADD COLUMN refuses to outgrow a page (1.14.0)");
+    cleanup();
+    var db = patra_open(_tpath);
+    # 15 STR columns = 3840 bytes; the page holds PAGE_SIZE - DP_DATA = 4072.
+    # One more STR is 4096 — over the limit, which tbl_create has rejected
+    # since the 2026-08-18 audit but ALTER never checked.
+    patra_exec(db, "CREATE TABLE t (a STR, b STR, c STR, d STR, e STR, f STR, g STR, h STR, i STR, j STR, k STR, l STR, m STR, n STR, o STR)");
+    patra_exec(db, "INSERT INTO t VALUES ('r1','x','x','x','x','x','x','x','x','x','x','x','x','x','x')");
+    patra_exec(db, "INSERT INTO t VALUES ('r2','x','x','x','x','x','x','x','x','x','x','x','x','x','x')");
+    var rs0 = patra_query(db, "SELECT COUNT(*) FROM t");
+    assert_eq(patra_result_get_int(rs0, 0, 0), 2, "two rows before ALTER");
+    patra_result_free(rs0);
+
+    # Before 1.14.0 this staged the rows, freed every data page, then failed
+    # every re-insert on the page-geometry check whose return was discarded —
+    # the table came back EMPTY and the statement returned PATRA_OK.
+    var ar = patra_exec(db, "ALTER TABLE t ADD COLUMN p STR");
+    assert_eq(ar, PATRA_ERR_ROWSZ, "ALTER is refused with ERR_ROWSZ");
+
+    var rs = patra_query(db, "SELECT COUNT(*) FROM t");
+    assert_eq(patra_result_get_int(rs, 0, 0), 2, "and both rows survive");
+    patra_result_free(rs);
+    var rs2 = patra_query(db, "SELECT a FROM t WHERE a = 'r1'");
+    assert_eq(patra_result_count(rs2), 1, "row content still reachable");
+    patra_result_free(rs2);
+
+    # A widening that still fits must keep working.
+    var ok = patra_exec(db, "ALTER TABLE t ADD COLUMN q INT");
+    assert_eq(ok, PATRA_OK, "a widening that fits still succeeds");
+    var rs3 = patra_query(db, "SELECT COUNT(*) FROM t");
+    assert_eq(patra_result_get_int(rs3, 0, 0), 2, "rows survive the legal ALTER");
+    patra_result_free(rs3);
+
+    patra_close(db);
+    cleanup();
+}
+
+# -- v1.14.0: malformed-file hardening — bounded chain walks ----
+
+fn test_cyclic_data_chain_terminates() {
+    test_group("a cyclic data-page chain terminates (1.14.0)");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (id INT, v INT)");
+    # Enough rows to span several data pages so there is a chain to corrupt.
+    var i = 0;
+    while (i < 900) { patra_exec(db, "INSERT INTO t VALUES (1, 7)"); i = i + 1; }
+    var rs0 = patra_query(db, "SELECT COUNT(*) FROM t");
+    assert_eq(patra_result_get_int(rs0, 0, 0), 900, "900 rows before corruption");
+    patra_result_free(rs0);
+    patra_close(db);
+
+    # Corrupt the file directly: point the LAST data page's DP_NEXT back at the
+    # first, making the chain cyclic. Before 1.14.0 every walk over this chain
+    # — SELECT, UPDATE, DELETE, the tail-walk in tbl_insert — spun forever with
+    # the statement's flock held, hanging every other process on the file.
+    var fd = _pt_file_open(_tpath);
+    assert_eq(fd >= 0, 1, "reopened the file directly");
+    var hdr = pg_alloc();
+    assert_eq(patra_hdr_read(fd, hdr), PATRA_OK, "header reads back");
+    var entry = _tbl_entry(hdr, 0);
+    var root = load64(entry + TBL_ROOT);
+    var buf = pg_alloc();
+    var cur = root;
+    var last = root;
+    var guard = 0;
+    while (cur != 0) {
+        guard = guard + 1;
+        if (guard > 4096) { cur = 0; continue; }
+        page_read(fd, cur, buf);
+        last = cur;
+        cur = load64(buf + DP_NEXT);
+    }
+    assert_eq(last != root, 1, "the table really spans more than one page");
+    page_read(fd, last, buf);
+    store64(buf + DP_NEXT, root);
+    page_write(fd, last, buf);
+    pg_free(buf);
+    pg_free(hdr);
+    sys_close(fd);
+
+    # Every one of these must RETURN. A hang here is the failure.
+    var db2 = patra_open(_tpath);
+    assert_eq(db2 != 0, 1, "corrupt file still opens");
+    var rs = patra_query(db2, "SELECT COUNT(*) FROM t");
+    assert_eq(rs != 0, 1, "SELECT terminates on a cyclic chain");
+    if (rs != 0) { patra_result_free(rs); }
+    var rs2 = patra_query(db2, "SELECT * FROM t WHERE id = 1");
+    assert_eq(rs2 != 0, 1, "filtered SELECT terminates");
+    if (rs2 != 0) { patra_result_free(rs2); }
+    patra_exec(db2, "UPDATE t SET v = 8 WHERE id = 1");
+    assert_eq(1, 1, "UPDATE terminates");
+    patra_exec(db2, "DELETE FROM t WHERE id = 1");
+    assert_eq(1, 1, "DELETE terminates");
+    patra_exec(db2, "INSERT INTO t VALUES (2, 9)");
+    assert_eq(1, 1, "INSERT terminates");
+    patra_close(db2);
+    cleanup();
+}
+
+fn test_hostile_header_rejected() {
+    test_group("a crafted table directory is refused (1.14.0)");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (id INT, v INT)");
+    patra_exec(db, "INSERT INTO t VALUES (1, 7)");
+    patra_close(db);
+
+    var fd = _pt_file_open(_tpath);
+    var hdr = pg_alloc();
+    assert_eq(patra_hdr_read(fd, hdr), PATRA_OK, "header valid before");
+
+    # TBL_NCOLS beyond MAX_COLS drove an unbounded loop over the schema page.
+    var entry = _tbl_entry(hdr, 0);
+    var saved = load64(entry + TBL_NCOLS);
+    store64(entry + TBL_NCOLS, 100000);
+    assert_eq(patra_hdr_verify(hdr), PATRA_ERR_PAGE, "ncols > MAX_COLS refused");
+    store64(entry + TBL_NCOLS, 0 - 1);
+    assert_eq(patra_hdr_verify(hdr), PATRA_ERR_PAGE, "negative ncols refused");
+    store64(entry + TBL_NCOLS, saved);
+    assert_eq(patra_hdr_verify(hdr), PATRA_OK, "restored header is valid again");
+
+    # TBL_ROOT / TBL_SCHEMA are used as page numbers with no range check.
+    var sroot = load64(entry + TBL_ROOT);
+    store64(entry + TBL_ROOT, load64(hdr + HDR_PGCOUNT) + 10000);
+    assert_eq(patra_hdr_verify(hdr), PATRA_ERR_PAGE, "out-of-range root refused");
+    store64(entry + TBL_ROOT, sroot);
+    var ssch = load64(entry + TBL_SCHEMA);
+    store64(entry + TBL_SCHEMA, 0);
+    assert_eq(patra_hdr_verify(hdr), PATRA_ERR_PAGE, "zero schema page refused");
+    store64(entry + TBL_SCHEMA, ssch);
+    store64(entry + TBL_NROWS, 0 - 5);
+    assert_eq(patra_hdr_verify(hdr), PATRA_ERR_PAGE, "negative row count refused");
+
+    pg_free(hdr);
+    sys_close(fd);
+    cleanup();
+}
+
+# -- v1.14.0: WAL state is per-database, not process-global ----
+
+var _tpath2 = "/tmp/patra_test_2.patra";
+fn _wpath2(): i64 { return "/tmp/patra_test_2.patra.wal"; }
+fn cleanup2() { syscall(SYS_UNLINK, _tpath2); syscall(SYS_UNLINK, _wpath2()); return 0; }
+
+fn test_two_databases_dont_share_a_wal() {
+    test_group("two open databases keep separate WALs (1.14.0)");
+    cleanup(); cleanup2();
+    syscall(SYS_UNLINK, _wpath());
+
+    var a = patra_open(_tpath);
+    var b = patra_open(_tpath2);
+    patra_exec(a, "CREATE TABLE t (id INT, v INT)");
+    patra_exec(b, "CREATE TABLE t (id INT, v INT)");
+    patra_exec(a, "INSERT INTO t VALUES (1, 11)");
+    patra_exec(b, "INSERT INTO t VALUES (2, 22)");
+
+    # Interleave two transactions. Until 1.14.0 the WAL lived in module
+    # globals, so B's patra_begin overwrote A's _wal_fd and _wal_db_fd: A's
+    # before-images were orphaned, every later page_write from EITHER database
+    # logged into B's WAL against B's fd, and A's rollback then restored B's
+    # pages into B while telling A it had succeeded.
+    assert_eq(patra_begin(a), PATRA_OK, "A begins");
+    patra_exec(a, "INSERT INTO t VALUES (100, 100)");
+    assert_eq(patra_begin(b), PATRA_OK, "B begins while A is open");
+    patra_exec(b, "INSERT INTO t VALUES (200, 200)");
+
+    # Both WAL files must exist at once — one per database.
+    var wa = file_open(_wpath(), 0, 0);
+    var wb = file_open(_wpath2(), 0, 0);
+    assert_eq(wa >= 0, 1, "A has its own WAL on disk");
+    assert_eq(wb >= 0, 1, "B has its own WAL on disk");
+    if (wa >= 0) { sys_close(wa); }
+    if (wb >= 0) { sys_close(wb); }
+
+    # A rolls back: A loses its row, B keeps everything.
+    assert_eq(patra_rollback(a), PATRA_OK, "A rolls back");
+    assert_eq(patra_commit(b), PATRA_OK, "B commits");
+
+    var ra = patra_query(a, "SELECT COUNT(*) FROM t");
+    assert_eq(patra_result_get_int(ra, 0, 0), 1, "A undid only its own insert");
+    patra_result_free(ra);
+    var rb = patra_query(b, "SELECT COUNT(*) FROM t");
+    assert_eq(patra_result_get_int(rb, 0, 0), 2, "B kept both of its rows");
+    patra_result_free(rb);
+
+    # And the reverse order: B rolls back while A commits.
+    assert_eq(patra_begin(a), PATRA_OK, "A begins again");
+    patra_exec(a, "INSERT INTO t VALUES (101, 101)");
+    assert_eq(patra_begin(b), PATRA_OK, "B begins again");
+    patra_exec(b, "INSERT INTO t VALUES (201, 201)");
+    assert_eq(patra_commit(a), PATRA_OK, "A commits");
+    assert_eq(patra_rollback(b), PATRA_OK, "B rolls back");
+
+    var ra2 = patra_query(a, "SELECT COUNT(*) FROM t");
+    assert_eq(patra_result_get_int(ra2, 0, 0), 2, "A kept its committed row");
+    patra_result_free(ra2);
+    var rb2 = patra_query(b, "SELECT COUNT(*) FROM t");
+    assert_eq(patra_result_get_int(rb2, 0, 0), 2, "B undid only its own insert");
+    patra_result_free(rb2);
+
+    patra_close(a);
+    patra_close(b);
+    cleanup(); cleanup2();
+}
+
+fn test_close_rolls_back_open_transaction() {
+    test_group("patra_close resolves an open transaction (1.14.0)");
+    cleanup();
+    syscall(SYS_UNLINK, _wpath());
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (id INT, v INT)");
+    patra_exec(db, "INSERT INTO t VALUES (1, 11)");
+    patra_begin(db);
+    patra_exec(db, "INSERT INTO t VALUES (2, 22)");
+    # Before 1.14.0 this leaked the WAL fd, abandoned the lock, and left the
+    # WAL on disk with the module globals pointing at a closed fd.
+    patra_close(db);
+
+    var chk = file_open(_wpath(), 0, 0);
+    assert_eq(chk >= 0, 0, "the WAL is gone — the transaction was resolved");
+    if (chk >= 0) { sys_close(chk); }
+
+    var db2 = patra_open(_tpath);
+    var rs = patra_query(db2, "SELECT COUNT(*) FROM t");
+    assert_eq(patra_result_get_int(rs, 0, 0), 1, "the uncommitted row was undone");
+    patra_result_free(rs);
+    patra_close(db2);
+    cleanup();
+}
+
+fn test_pcache_isolates_databases() {
+    test_group("the page cache does not mix databases (1.14.0)");
+    cleanup(); cleanup2();
+    patra_cache_enable(1);
+
+    # Two databases with IDENTICAL schemas and identical page layouts, so
+    # every page number in A has a same-numbered counterpart in B holding
+    # different bytes. Until 1.14.0 the shared cache was keyed by page number
+    # ALONE, so whichever database touched a page first served it to the other
+    # — cross-database disclosure on read, and, because page_write evicted by
+    # the same bare number, a route to writing one database's bytes into the
+    # other on disk.
+    var a = patra_open(_tpath);
+    var b = patra_open(_tpath2);
+    patra_exec(a, "CREATE TABLE t (id INT, v INT)");
+    patra_exec(b, "CREATE TABLE t (id INT, v INT)");
+    var i = 0;
+    while (i < 50) { patra_exec(a, "INSERT INTO t VALUES (1, 1111)"); i = i + 1; }
+    i = 0;
+    while (i < 50) { patra_exec(b, "INSERT INTO t VALUES (2, 2222)"); i = i + 1; }
+
+    # Read both, repeatedly and interleaved, so the cache is exercised warm.
+    var round = 0;
+    while (round < 5) {
+        var ra = patra_query(a, "SELECT * FROM t WHERE v = 1111");
+        assert_eq(patra_result_count(ra), 50, "A sees only its own rows");
+        patra_result_free(ra);
+        var rb = patra_query(b, "SELECT * FROM t WHERE v = 2222");
+        assert_eq(patra_result_count(rb), 50, "B sees only its own rows");
+        patra_result_free(rb);
+        # And neither can see the other's marker value.
+        var xa = patra_query(a, "SELECT * FROM t WHERE v = 2222");
+        assert_eq(patra_result_count(xa), 0, "A never sees B's rows");
+        patra_result_free(xa);
+        var xb = patra_query(b, "SELECT * FROM t WHERE v = 1111");
+        assert_eq(patra_result_count(xb), 0, "B never sees A's rows");
+        patra_result_free(xb);
+        round = round + 1;
+    }
+
+    # Writes must not cross either: mutate A, re-read B.
+    patra_exec(a, "UPDATE t SET v = 3333 WHERE id = 1");
+    var rb2 = patra_query(b, "SELECT * FROM t WHERE v = 2222");
+    assert_eq(patra_result_count(rb2), 50, "B is untouched by A's UPDATE");
+    patra_result_free(rb2);
+    var rb3 = patra_query(b, "SELECT * FROM t WHERE v = 3333");
+    assert_eq(patra_result_count(rb3), 0, "A's new value never reaches B");
+    patra_result_free(rb3);
+
+    patra_close(a);
+    patra_close(b);
+    patra_cache_enable(0);
+    cleanup(); cleanup2();
+}
+
+fn test_or_ignore_survives_tombstones() {
+    test_group("INSERT OR IGNORE past 256 index entries (1.14.0)");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (id INT, v INT)");
+
+    # Churn ONE key. Lazy delete leaves a tombstone in the index under that key
+    # and only VACUUM reclaims it, so the key's index entry count climbs past
+    # the probe's fixed 256-ref buffer while exactly one row stays live.
+    # Before 1.14.0 the probe read a truncated result as "no conflict" and
+    # OR IGNORE inserted a duplicate — silently, reporting success.
+    var i = 0;
+    while (i < 320) {
+        patra_exec(db, "INSERT INTO t VALUES (5, 50)");
+        patra_exec(db, "DELETE FROM t WHERE id = 5");
+        i = i + 1;
+    }
+    patra_exec(db, "INSERT INTO t VALUES (5, 50)");
+    var rs0 = patra_query(db, "SELECT COUNT(*) FROM t");
+    assert_eq(patra_result_get_int(rs0, 0, 0), 1, "one live row after the churn");
+    patra_result_free(rs0);
+
+    var r = patra_exec(db, "INSERT OR IGNORE INTO t VALUES (5, 50)");
+    assert_eq(r, PATRA_OK, "OR IGNORE reports success");
+    var rs = patra_query(db, "SELECT COUNT(*) FROM t");
+    assert_eq(patra_result_get_int(rs, 0, 0), 1, "and did NOT insert a duplicate");
+    patra_result_free(rs);
+
+    # A genuinely new key must still insert.
+    patra_exec(db, "INSERT OR IGNORE INTO t VALUES (6, 60)");
+    var rs2 = patra_query(db, "SELECT COUNT(*) FROM t");
+    assert_eq(patra_result_get_int(rs2, 0, 0), 2, "a new key still inserts");
+    patra_result_free(rs2);
+
+    patra_close(db);
+    cleanup();
+}
+
+fn test_insert_row_autoincrement() {
+    test_group("patra_insert_row applies AUTOINCREMENT (1.14.0)");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (id INT AUTOINCREMENT, v INT)");
+
+    # The programmatic insert path is a clone of _exec_insert that never got
+    # the autoinc block, so every row landed with id = 0. With the auto-index
+    # on the first INT column that means one key for all of them, and under
+    # OR IGNORE all but the first were dropped as duplicates.
+    var ivals = fl_alloc(2 * 8);
+    var types = fl_alloc(2 * 8);
+    store64(types, COL_INT);
+    store64(types + 8, COL_INT);
+    var i = 0;
+    while (i < 5) {
+        store64(ivals, 0);              # caller leaves the id unset
+        store64(ivals + 8, 100 + i);
+        assert_eq(patra_insert_row(db, "t", 1, 2, types, ivals, 0, 0, 0, 0), PATRA_OK,
+          "programmatic insert succeeds");
+        i = i + 1;
+    }
+
+    var rs = patra_query(db, "SELECT COUNT(*) FROM t");
+    assert_eq(patra_result_get_int(rs, 0, 0), 5, "all five rows landed");
+    patra_result_free(rs);
+
+    # Ids must be distinct and ascending, not five zeros.
+    var rs2 = patra_query(db, "SELECT id FROM t ORDER BY id");
+    assert_eq(patra_result_count(rs2), 5, "five ids");
+    var prev = 0;
+    var j = 0;
+    while (j < 5) {
+        var idv = patra_result_get_int(rs2, j, 0);
+        assert_eq(idv > prev, 1, "ids are distinct and ascending");
+        prev = idv;
+        j = j + 1;
+    }
+    patra_result_free(rs2);
+
+    # And an explicitly-supplied id is still honoured.
+    store64(ivals, 900);
+    store64(ivals + 8, 999);
+    patra_insert_row(db, "t", 1, 2, types, ivals, 0, 0, 0, 0);
+    var rs3 = patra_query(db, "SELECT v FROM t WHERE id = 900");
+    assert_eq(patra_result_count(rs3), 1, "explicit id honoured");
+    patra_result_free(rs3);
+
+    fl_free(ivals); fl_free(types);
+    patra_close(db);
+    cleanup();
+}
+
+# -- v1.14.0: mutex-vs-flock lock order ----
+
+var _dl_path = "/tmp/patra_deadlock.patra";
+var _dl_db2 = 0;
+var _dl_done = 0;
+
+# Second handle on the SAME file, from another thread. It takes the statement
+# mutex and then blocks on the exclusive flock the main thread's transaction
+# holds. Before 1.14.0 the main thread's next in-transaction statement blocked
+# on that mutex, and neither ever proceeded.
+var _dl_started = 0;
+
+fn _dl_worker(arg): i64 {
+    _dl_started = 1;
+    patra_exec(_dl_db2, "INSERT INTO t VALUES (99, 99)");
+    _dl_done = 1;
+    return 0;
+}
+
+fn test_no_mutex_flock_deadlock() {
+    test_group("a transaction does not deadlock a second handle (1.14.0)");
+    syscall(SYS_UNLINK, _dl_path);
+    syscall(SYS_UNLINK, "/tmp/patra_deadlock.patra.wal");
+    var a = patra_open(_dl_path);
+    patra_exec(a, "CREATE TABLE t (id INT, v INT)");
+    _dl_db2 = patra_open(_dl_path);
+    _dl_done = 0;
+
+    # Repeat the interleaving: the hazard needs B to be holding the statement
+    # mutex and blocked on the flock at the moment A issues its next statement,
+    # which a single unsynchronised run hits only sometimes. The handshake plus
+    # a spin makes the window very likely on each round, and 20 rounds makes
+    # missing it every time implausible. Verified: with the pre-1.14.0
+    # unconditional mutex restored, this hangs.
+    var rounds = 0;
+    while (rounds < 20) {
+        assert_eq(patra_begin(a), PATRA_OK, "handle A opens a transaction");
+        patra_exec(a, "INSERT INTO t VALUES (1, 1)");
+
+        _dl_started = 0;
+        _dl_done = 0;
+        var th = thread_create(&_dl_worker, 0);
+        # Wait until B is inside patra_exec, then spin a little longer to let
+        # it take the mutex and reach the blocking flock.
+        var spin = 0;
+        while (_dl_started == 0) { spin = spin + 1; }
+        spin = 0;
+        while (spin < 200000) { spin = spin + 1; }
+
+        # A keeps working INSIDE its transaction. This is the step that used to
+        # block forever on the mutex B holds. A hang here is the failure.
+        patra_exec(a, "INSERT INTO t VALUES (2, 2)");
+        assert_eq(patra_commit(a), PATRA_OK, "A commits while B waits");
+        thread_join(th);
+        assert_eq(_dl_done, 1, "B completed once A released the lock");
+        rounds = rounds + 1;
+    }
+
+    var rs = patra_query(a, "SELECT COUNT(*) FROM t");
+    assert_eq(patra_result_get_int(rs, 0, 0), 60, "every round's rows landed");
+    patra_result_free(rs);
+
+    patra_close(a);
+    patra_close(_dl_db2);
+    _dl_db2 = 0;
+    syscall(SYS_UNLINK, _dl_path);
+}
+
+fn test_pcache_evict_fails_open() {
+    test_group("an unidentified handle still invalidates (1.14.0)");
+    cleanup();
+    patra_cache_enable(1);
+
+    var a = patra_open(_tpath);
+    patra_exec(a, "CREATE TABLE t (id INT, v INT)");
+    patra_exec(a, "INSERT INTO t VALUES (1, 30)");
+
+    # A second handle whose page-cache identity is deliberately removed — the
+    # state a handle is in when the registry is full, or when a CONTENDED open
+    # skipped the LOCK_EX block that assigns HDR_DBID.
+    var b = patra_open(_tpath);
+    pc_unregister(_db_fd(b));
+    assert_eq(_pc_dbid(_db_fd(b)), 0, "handle B has no cache identity");
+
+    # A primes its cache.
+    var r0 = patra_query(a, "SELECT v FROM t WHERE id = 1");
+    assert_eq(patra_result_get_int(r0, 0, 0), 30, "A reads 30");
+    patra_result_free(r0);
+
+    # B commits a change. _pc_evict must invalidate even though B is
+    # unidentified — the first cut of the (dbid, page) re-keying returned early
+    # here, so A kept serving the pre-write bytes and a later read-modify-write
+    # from A wrote them back, destroying B's committed change permanently.
+    patra_exec(b, "UPDATE t SET v = 99 WHERE id = 1");
+
+    var r1 = patra_query(a, "SELECT v FROM t WHERE id = 1");
+    assert_eq(patra_result_get_int(r1, 0, 0), 99, "A sees B's committed value");
+    patra_result_free(r1);
+
+    # And A's own read-modify-write must not revert it.
+    patra_exec(a, "UPDATE t SET id = 1 WHERE id = 1");
+    patra_close(a);
+    patra_close(b);
+    var c = patra_open(_tpath);
+    var r2 = patra_query(c, "SELECT v FROM t WHERE id = 1");
+    assert_eq(patra_result_get_int(r2, 0, 0), 99, "on disk: B's value survived");
+    patra_result_free(r2);
+    patra_close(c);
+
+    patra_cache_enable(0);
+    cleanup();
+}
+
 # -- v1.13.8: a WAL is bound to its database (audit S1-8) ----
 
 fn _wpath(): i64 { return "/tmp/patra_test.patra.wal"; }
+
+# Snapshot / restore the .wal file. 1.14.0 made patra_close ROLL BACK an open
+# transaction (it used to abandon it, leaking the WAL fd and the lock), which
+# means a clean close no longer leaves an orphaned WAL behind. Simulating a
+# CRASH — which is what these tests are actually about — therefore has to be
+# explicit: capture the live WAL, let the close clean up, then put the bytes
+# back. Without this the "foreign WAL" tests below pass vacuously, because
+# there is no longer any WAL for recovery to refuse.
+var _wsnap = 0;
+var _wsnap_len = 0;
+
+fn _wal_snapshot(): i64 {
+    if (_wsnap == 0) { _wsnap = fl_alloc(262144); }
+    _wsnap_len = 0;
+    var fd = file_open(_wpath(), 0, 0);
+    if (fd < 0) { return 0; }
+    var n = sys_read(fd, _wsnap, 262144);
+    sys_close(fd);
+    if (n > 0) { _wsnap_len = n; }
+    return _wsnap_len;
+}
+
+fn _wal_restore(): i64 {
+    if (_wsnap_len <= 0) { return 0; }
+    var fd = file_open(_wpath(), 578, 420);
+    if (fd < 0) { return 0; }
+    sys_write(fd, _wsnap, _wsnap_len);
+    sys_close(fd);
+    return _wsnap_len;
+}
 
 fn test_wal_bound_to_database() {
     test_group("a WAL is bound to its database (S1-8)");
@@ -5604,16 +6440,31 @@ fn test_wal_bound_to_database() {
     patra_begin(a);
     patra_exec(a, "INSERT INTO t VALUES (2, 22)");
     patra_exec(a, "DELETE FROM t WHERE id = 1");
+    assert_eq(_wal_snapshot() > 0, 1, "A's WAL captured before the close");
     patra_close(a);
+    syscall(SYS_UNLINK, _wpath());
 
-    # Replace the database, leaving the orphaned WAL in place — the shape of
+    # Replace the database, then drop A's orphaned WAL beside it — the shape of
     # restoring a backup over a database that had crashed. Before v1.13.8 the
     # foreign WAL was replayed wholesale and this fresh file came back holding
     # A's 30 rows.
+    #
+    # ⚠ B is created and CLOSED before the WAL is restored, so that B's own
+    # HDR_DBID is on disk when recovery runs. Without that step the file's id
+    # is still 0 at recovery time and wal_recover refuses on the `dbid == 0`
+    # branch instead of the mismatch — which made this test pass with the
+    # v1.13.8 binding removed entirely. Verified: with `_wal_hdr_dbid != dbid`
+    # disabled, the assertions below now fail.
     cleanup();
+    var b0 = patra_open(_tpath);
+    patra_exec(b0, "CREATE TABLE t (id INT, v INT)");
+    patra_exec(b0, "INSERT INTO t VALUES (7, 77)");
+    var idb = load64(_db_hdr(b0) + HDR_DBID);
+    patra_close(b0);
+    assert(idb != 0, "B has its own identity on disk before recovery runs");
+
+    _wal_restore();
     var b = patra_open(_tpath);
-    patra_exec(b, "CREATE TABLE t (id INT, v INT)");
-    patra_exec(b, "INSERT INTO t VALUES (7, 77)");
     var rs = patra_query(b, "SELECT COUNT(*) FROM t");
     assert_eq(patra_result_get_int(rs, 0, 0), 1, "foreign WAL not replayed");
     patra_result_free(rs);
@@ -5635,7 +6486,9 @@ fn test_wal_bound_to_database() {
     patra_begin(c);
     var m = 0;
     while (m < 10) { patra_exec(c, "INSERT INTO t VALUES (2, 22)"); m = m + 1; }
-    patra_close(c);                 # abandoned mid-transaction
+    assert_eq(_wal_snapshot() > 0, 1, "C's WAL captured before the close");
+    patra_close(c);                 # 1.14.0: rolls back and unlinks
+    _wal_restore();                 # put it back: simulate death mid-txn
 
     var d = patra_open(_tpath);
     var rs3 = patra_query(d, "SELECT COUNT(*) FROM t");
@@ -6016,6 +6869,21 @@ fn main() {
     test_bind_errors();
     test_bind_text_into_text_col();
 
+    test_insert_row_autoincrement();
+    test_or_ignore_survives_tombstones();
+    test_no_mutex_flock_deadlock();
+    test_two_databases_dont_share_a_wal();
+    test_pcache_isolates_databases();
+    test_pcache_evict_fails_open();
+    test_close_rolls_back_open_transaction();
+    test_cyclic_data_chain_terminates();
+    test_hostile_header_rejected();
+    test_alter_add_rowsz_guard();
+    test_btree_equal_separator_split();
+    test_btree_index_matches_scan();
+    test_wal_symlink_refused();
+    test_wal_incomplete_restore_keeps_wal();
+    test_tx_refuses_without_wal();
     # v1.11.0 thread-safety (P1)
     test_concurrency();
     test_read_concurrency();

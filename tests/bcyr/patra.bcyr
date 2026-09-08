@@ -698,6 +698,29 @@ fn main() {
     patra_close(_bdb);
     syscall(SYS_UNLINK, _gcpath);
 
+    # --- Explicit transaction (1.14.0) ---
+    # 2,000 INSERTs inside one BEGIN..COMMIT, on a REAL-DISK path so the
+    # fdatasync cost is visible (tmpfs makes fdatasync a no-op and hides the
+    # whole point). Before 1.14.0 _db_hdr_commit fdatasync'd the database
+    # header after EVERY statement inside a transaction, even though the WAL
+    # already holds the before-images and patra_commit syncs at the end — so a
+    # transaction paid a full sync per statement and was slower than
+    # autocommit, which is the opposite of what a transaction is for.
+    syscall(SYS_UNLINK, _gcpath);
+    _bdb = patra_open(_gcpath);
+    patra_exec(_bdb, "CREATE TABLE tx (val INT)");
+    var b_tx = bench_new("insert_2k_in_txn");
+    bench_batch_start(b_tx);
+    patra_begin(_bdb);
+    for (var bt = 0; bt < 2000; bt = bt + 1) {
+        patra_exec(_bdb, "INSERT INTO tx VALUES (1)");
+    }
+    patra_commit(_bdb);
+    bench_batch_stop(b_tx, 2000);
+    vec_push(benches, b_tx);
+    patra_close(_bdb);
+    syscall(SYS_UNLINK, _gcpath);
+
     # --- Prepared statement (1.8.2): exec_prepared vs exec ---
     # Same INSERT, 1000 invocations. The prepared path skips tokenize+parse
     # on every call — saves ~8-10µs per invocation per the parse_insert

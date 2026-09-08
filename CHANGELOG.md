@@ -5,6 +5,286 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.0] - 2026-09-07 — P(-1) hardening sweep: 23 defects, seven of them silent wrong answers
+
+A **P(-1) scaffold-hardening pass** (CLAUDE.md § Process), run as a 12-lens
+adversarial audit with every finding independently refuted by two more
+reviewers, then re-verified by hand before any fix. **Every defect below lived
+in a tree where all gates passed** — v1.13.12's 1,064 assertions, 8 fuzz
+harnesses, lint and vet clean — which is the same result the 2026-08-18 audit
+reported, and the reason this pass exists.
+
+**Every fix is mutation-verified**: 16 separate mutations, each confirming the
+new test fails when its fix is removed. Two of those mutations exposed a test
+that had been passing *vacuously* — see **Fixed — a shipped regression test**.
+
+Gates: **1,260 assertions** (was 1,064) · 8 / 8 fuzz · 41 benchmarks · libro
+15/15 · vidya 19/19 · fmt + lint 0-warn · vet / deny clean.
+
+### Breaking
+
+Nothing in the SQL surface or the C-level API signature set changes. Two
+behaviours a consumer can observe do change, both because the old behaviour was
+to corrupt or destroy data silently:
+
+- **`patra_begin` can now fail.** It returns `PATRA_ERR_IO` when the WAL cannot
+  be opened, instead of returning `PATRA_OK` and running the transaction with no
+  undo log. **Check its return.** A caller that ignored it was previously
+  getting a transaction whose `patra_rollback` restored nothing.
+- **`ALTER TABLE … ADD COLUMN` now returns `PATRA_ERR_ROWSZ`** when the widened
+  row would not fit a page, instead of destroying every row in the table and
+  returning `PATRA_OK`.
+
+`patra_close` on a handle with an open transaction now **rolls it back** rather
+than abandoning it. That is a behaviour change, but the previous behaviour leaked
+the WAL fd and the lock, so no correct program depended on it.
+
+### Fixed — S0: silent wrong answers reachable from plain SQL
+
+- ⛔ **A B+ tree split whose separator ties the parent's separator orphaned a
+  sibling subtree: indexed `SELECT` silently lost rows a full scan still
+  found.** `_bt_push_up` re-derived the separator's insert position by searching
+  the parent's keys for the first `sep < keys[i]`. When `sep` *equals* the
+  separator already immediately right of the split child, the strict `<` skips
+  it, so the new key and page were spliced one slot too far right and the
+  pre-existing child between them was stranded between two identical
+  separators — claiming the empty range `[S,S]` while actually holding keys up
+  to the next separator. Nothing is corrupted; the subtree becomes
+  **unreachable**: both readers start after the count of separators `< lo`, and
+  `_bt_find_leaf` reaches it for no key at all, so `remove_ref` / `update_ref`
+  cannot repair or tombstone it either.
+
+  The separator is now placed by the **page number of the child that split**
+  (`_bt_child_pos`), which is what it always meant. Reproduced on an
+  unmodified tree with 96 rows of ordinary `INSERT`, **no `CREATE INDEX`** —
+  `tbl_create` auto-indexes the first INT column — and every statement
+  returning `PATRA_OK`: `WHERE id = 200` returned **0** while a scan returned
+  **23**. A skewed batch load (groups of 40 rows per key, descending) loses rows
+  on multiple keys.
+
+- ⛔ **WAL state was process-global while transactions are per-database.** Two
+  databases open in one process shared one WAL: the second `patra_begin`
+  overwrote `_wal_fd` / `_wal_db_fd`, orphaning the first transaction's
+  before-images, and every later `page_write` from *either* database logged into
+  the second's WAL against the second's fd. `patra_rollback(A)` then restored
+  **B's** pages into B and returned `PATRA_OK` to A, and `patra_commit` unlinked
+  a WAL that was not its own. The state now lives in a table keyed by the
+  **database fd** — the key `page_write(fd, …)` already carries, so the ~25 call
+  sites that never see the WAL did not have to change.
+
+- ⛔ **The shared page cache was keyed by page number alone**, so two databases
+  in one process served each other's pages. Page numbering restarts at 1 in
+  every file, so *every* page collided: cross-database disclosure on read, and —
+  because `page_write` evicted by the same bare number — a route to writing one
+  database's bytes into another on disk. Now keyed on **(database id, page
+  number)**, using the `HDR_DBID` that has existed since v1.13.8. The cache is
+  off by default, so this bit only consumers who opted in.
+
+- ⛔ **`ALTER TABLE … ADD COLUMN` silently destroyed every row** when the widened
+  row exceeded page capacity. `tbl_create` has rejected that geometry since the
+  2026-08-18 audit's S0-1; `ALTER` reached it by another road and never checked.
+  It staged the rows, freed every data page, then failed every re-insert on the
+  geometry check *whose return was discarded* — table empty, statement
+  `PATRA_OK`. Now refused **before anything is freed**, and both ALTER paths
+  check `tbl_insert`'s return.
+
+- ⛔ **`INSERT OR IGNORE` inserted a duplicate** once a key accumulated more than
+  256 index entries. The probe used a fixed 256-ref buffer and could not tell
+  "no conflict" from "I stopped early". Lazy delete makes that reachable with
+  **one live row**: every delete leaves a tombstone under the key, and only
+  `VACUUM` reclaims them, so a delete/re-insert loop on a single key crosses 256
+  and silently breaks the guarantee the statement exists to provide. The probe
+  now grows until the walk is not truncated (`_idx_probe_refs`,
+  `btree_search_t`), and reports `PATRA_ERR_FULL` rather than guessing if it
+  cannot decide.
+
+- ⛔ **`patra_insert_row` / `patra_insert_row_or_ignore` never applied
+  `AUTOINCREMENT`.** The programmatic path is a clone of `_exec_insert` that was
+  written without the autoinc block, so every row landed with `id = 0`. With the
+  auto-index on that column all rows share one key — and under `OR IGNORE` every
+  row after the first is a "duplicate" and is silently dropped.
+
+- ⛔ **Two handles on one file could deadlock the process permanently.**
+  Statement entry points take the process mutex and then block on the file's
+  flock; `patra_begin` takes the flock with no mutex. Opposite orders:
+  `patra_begin(h1)` holds `LOCK_EX`; `patra_exec(h2)` takes the mutex and blocks
+  on the flock; `patra_exec(h1)` blocks on the mutex — forever, with no timeout.
+  A statement issued **inside** a transaction no longer takes the statement
+  mutex, which removes the cycle. Guarded by a 20-round threaded regression test
+  that hangs if the order regresses.
+
+  ⚠ The obvious alternative — hold the mutex for the transaction's span, giving
+  one global order — was implemented and **reverted**: it serializes transactions
+  across *different* databases, so a single thread opening a transaction on each
+  of two files deadlocks itself. The comment in `src/lib.cyr` says so, to stop
+  it being re-applied.
+
+### Fixed — Security
+
+- ⛔ **The `.wal` was opened without `O_NOFOLLOW`** — the only one of patra's
+  three file paths that was, and the worst to miss, because it is the only one
+  opened `O_CREAT | O_TRUNC`. `<db>.wal` is fully predictable, so an attacker
+  who can create a name in the database's directory plants a symlink and patra
+  truncates and writes WAL bytes through it with the process's privileges.
+  **Reproduced**: a 202-byte victim file became 12,368 bytes beginning `PTWA`,
+  and the commit path's unlink then removed the *symlink*, leaving the damage in
+  place and the evidence gone. The `.patra` and `.jsonl` paths took
+  `O_NOFOLLOW` at v1.5.2 for audit 2026-04-21 §2.8; the WAL was overlooked.
+  Both WAL opens now carry it.
+
+### Fixed — S1: durability, and malformed-file hardening
+
+- **`patra_begin` discarded `wal_start`'s return.** A WAL that could not be
+  opened — symlink refused, `EACCES`, `ENOSPC`, fd exhaustion, read-only fs —
+  produced a transaction with no before-images that reported success:
+  `wal_log_page` opens `if (_wal_fd < 0) { return PATRA_OK; }`, which is right
+  for auto-commit and **fails open** here, so `page_write`'s write-ahead guard
+  passed and `patra_rollback` restored nothing while returning `PATRA_OK`.
+- **Both WAL restore loops ignored their `sys_write`, then unlinked the WAL.** An
+  `ENOSPC` or short write during rollback or recovery left the database
+  part-restored and destroyed the only copy of the before-images. Both now track
+  failure, **keep the WAL** so the next open retries (replaying a before-image is
+  idempotent), and report it.
+- **The WAL's directory entry was never made durable.** `fsync` on a file says
+  nothing about the entry that names it, so after a power loss the log could be
+  absent after the crash it exists for, or present after the commit that
+  unlinked it. `_pt_sync_dir` now runs after the create and after every unlink.
+- **`DP_NROWS` was trusted unclamped on nine mutation and staging paths.** The
+  2026-08-18 clamp landed only on the scan path. Both `ALTER` staging loops
+  additionally sized their scratch from `TBL_NROWS` and filled it from the
+  `DP_NROWS` chain with neither clamped — the exact shape S0-5 named.
+- **The table directory was never validated.** `patra_hdr_verify` now rejects
+  `TBL_NCOLS` outside `[1, MAX_COLS]`, `TBL_ROOT` / `TBL_SCHEMA` outside
+  `[1, HDR_PGCOUNT)`, and negative `TBL_NROWS` — at most 63 entries, once per
+  open. `SCH_NCOLS`, a second independent on-disk copy, is clamped at all nine
+  of its reads.
+- **Cyclic chains hung the database.** Fourteen `DP_NEXT` walks and both
+  `BYTES`/`TEXT` chain walks followed a link read straight off disk with no
+  bound, **inside the statement's flock window** — so a crafted file hung every
+  other process on that file until it was killed. All are now bounded by the
+  file's page count; a zero-length chain chunk is refused outright. The B+ tree
+  read walk gains a **node budget**: `BT_MAX_DEPTH` alone is not a bound when a
+  corrupt internal node can point at itself 64 ways (64¹⁰ page reads).
+- **`_rs_materialize` sized a heap allocation from an unvalidated on-disk
+  length**, and did not check the result. Bounded by the file's capacity, and
+  both halves of the chain ref are zeroed on rejection so
+  `patra_result_read_bytes` cannot copy from a null pointer.
+- **`page_free` discarded `page_write`'s failure** and pushed the page onto the
+  free list anyway — so `page_alloc` later read `FP_NEXT` out of stale bytes and
+  handed out a live data page, or corrupted the list. **`page_alloc`'s 0 failure
+  sentinel was unchecked at five sites** in `btree.cyr` and `bytes.cyr`, where
+  page 0 is the *header*: every subsequent store wrote structure over it.
+- **`ORDER BY` on a column that does not exist indexed the type array with
+  `ci == -1`**, reading the 8 bytes before the allocation. The permissive
+  behaviour (return unsorted) is unchanged; only the out-of-bounds read is gone.
+- **Re-issuing `CREATE INDEX` leaked the entire previous B-tree** — every page,
+  unreachable and never freed. The `ALTER` paths already released theirs.
+- **`patra_close` abandoned an open transaction**, leaking the WAL fd and the
+  lock. It now rolls back.
+- **All ten schema-page loads discarded `page_read`'s return**, and `pg_alloc`
+  recycles slab pages **without zeroing** — so a failed read left the previous
+  occupant's bytes, most plausibly *another table's schema*, and the statement
+  used it. `_sch_load` now range-checks and zeroes on failure, which degrades to
+  a no-op instead of an operation against the wrong layout.
+
+### Fixed — five regressions this release's own fixes introduced
+
+The hardening diff went through the same adversarial review as the defects it
+fixes, and that review found **five defects introduced by the fixes**, one of
+them a blocker. They are listed rather than quietly folded in, because "the fix
+introduced a worse bug" is the specific risk a sweep this size carries.
+
+- ⛔ **`_pc_evict` failed CLOSED on an unidentified handle** — permanent on-disk
+  data loss. Re-keying the cache on `(dbid, page)` gave `get` / `put` / `evict`
+  the same "no identity, do nothing" guard. That is right for the first two,
+  where the cost is a read that would have happened anyway, and **wrong for
+  evict**, which is the invalidate-on-write hook: an unregistered handle
+  mutated pages while every *registered* handle kept serving the pre-write bytes,
+  and a registered reader's read-modify-write then wrote the stale 4 KB page
+  back, destroying the committed change. The generation gate does not catch it —
+  `_pc_set_gen` is process-global, so the unregistered writer's own commit
+  relabels the cache and the reader finds nothing to flush.
+
+  A handle is unregistered when the registry is full **or when `HDR_DBID` was
+  still 0 at open**, which happens on a *contended* first open, because the id is
+  assigned inside the `LOCK_EX | LOCK_NB` block a contended open skips. Evict now
+  fails **open** — no identity means drop every slot holding that page number,
+  and flush — and `patra_open` no longer discards `pc_register`'s return.
+  Guarded by `test_pcache_evict_fails_open`, verified to lose the write without
+  the fix.
+
+- ⛔ **Both B+ tree split guards abandoned an already-truncated node.** The
+  `page_alloc` 0-sentinel checks were added *after* the `page_write` that commits
+  the left half, so a full file left the leaf at `BT_NKEYS = 32` and simply
+  dropped keys 32..63 — index entries destroyed by the guard meant to protect
+  page 0. Both splits now allocate **before** committing anything, so the failure
+  path has modified nothing.
+
+- **Three leaks.** The two new `PATRA_ERR_FULL` returns in `_exec_insert`'s
+  `OR IGNORE` probe freed the probe cell but not the row buffer, and — worse —
+  skipped the TEXT/BYTES chain reclaim the neighbouring `ihit` path does, so an
+  undecidable probe orphaned the chain pages the bind loop had already written.
+  The B+ tree leaf-split guard leaked its two 520-byte temporaries.
+
+- **The page-cache registry raced and was too small.** It was read and written
+  with no mutex while `_pc_dbid` runs on the read path, and 64 entries is low for
+  a connection-per-thread consumer. Now under `_pc_mtx`, 256 entries, and
+  re-registering an fd updates in place rather than shadowing — `_pc_dbid`
+  returns the first match, so a duplicate would hide the newer identity.
+
+### Fixed — a shipped regression test had been passing vacuously
+
+`test_wal_bound_to_database`, added at **v1.13.8** to guard the WAL's
+database-identity binding, never exercised it. The test replaced the database
+before reopening, so `HDR_DBID` was still 0 when recovery ran and `wal_recover`
+refused on its `dbid == 0` branch — not on the mismatch. **Removing the binding
+entirely left the test green.** It now creates and closes the second database
+first, so its identity is on disk before recovery runs; with the binding
+disabled it fails `foreign WAL not replayed (got 30, expected 1)`.
+
+This surfaced only because 1.14.0's `patra_close` change altered the test's
+setup. It is the second vacuous-gate finding in two releases.
+
+### Performance
+
+- ⭐ **A transaction no longer fdatasyncs on every statement — 9.6× on a
+  2,000-insert transaction.** `_db_hdr_commit` fdatasync'd the database header
+  after every statement inside a `BEGIN … COMMIT`, which made a transaction
+  *slower than autocommit* — the opposite of the reason to open one. It is
+  redundant: `wal_log_hdr` has already made the header's before-image durable
+  (that sync stays), so a crash mid-transaction is undone by recovery whatever
+  state the header is in, and `patra_commit` ends with a full fdatasync'ing
+  `patra_hdr_write`. Measured on a real-disk path, new `insert_2k_in_txn`
+  benchmark: **1.054 ms → 109.7 µs per insert**.
+
+- **40 pre-existing benchmarks, one moved more than 6 %**: `insert_1k_prepared`
+  15.58 → 16.79 µs (**+7.7 %**), the cost of the new clamps and bounds on the
+  insert path. `read_scan_4t_par` initially regressed 7 % from a per-page
+  division in the clamp; hoisting it out of the two hot scan loops
+  (`_dp_pcap` / `_dp_nrows_cap`) brought it back inside noise. Everything else
+  is unchanged. Binary **225,312 B** DCE-on (was 212,744), the cost of the
+  added validation.
+
+### Documentation
+
+- **`README.md` promised a shared handle is thread-safe. It is not**, and the
+  README contradicted itself two screens later. The claim was true for 1.11.x,
+  when every statement serialized on the process mutex; **v1.12.0 made the read
+  path lock-free and the claim was never revised**. Concurrent `SELECT`s on one
+  handle race the per-handle header buffer and the shared file offset — wrong
+  rows, phantom values, hangs. Corrected in the README and in
+  `docs/development/state.md`'s thread-safety contract.
+
+### Not changed, deliberately
+
+Behaviour that returns wrong *answers* rather than corrupting *data* was left
+alone this cut, to keep the release free of gratuitous consumer breakage:
+`LIMIT 0` returns every row rather than none; `SUM` / `MIN` / `MAX` over a
+`STR` / `TEXT` / `BYTES` column reinterpret the raw bytes (for chain columns,
+an internal page number) instead of erroring; `ORDER BY` on a chain column sorts
+by the chain reference; identifiers over 31 bytes truncate rather than being
+rejected. Each is real, verified, and recorded in the roadmap with its repro.
+
 ## [1.13.12] - 2026-09-07 — cyrius 6.6.0, and `CYRIUS_DCE=1` finally eliminates
 
 Toolchain-pin cut: cyrius **6.5.36 → 6.6.0** — 6.5.37 through 6.6.0, **38

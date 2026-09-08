@@ -4,6 +4,11 @@ enum BtConst {
     BTREE_ORDER = 64;
     BT_MAX_KEYS = 63;
     BT_MAX_DEPTH = 10;
+    # Total nodes one range walk may visit (1.14.0). Depth alone does not bound
+    # a corrupt tree: at order 64, ten levels is 64^10 reads. A legitimate
+    # order-64 tree deep enough to matter holds billions of keys, so this
+    # ceiling cannot reject a real query.
+    BT_MAX_NODES = 1000000;
 }
 
 enum BtOff {
@@ -57,7 +62,10 @@ var _bt_pdepth = 0;
 
 # Create empty B-tree (single leaf root), returns page number
 fn btree_create(fd, hdr): i64 {
+    # 1.14.0: page_alloc returns 0 on failure. Unchecked, page 0 is the
+    # HEADER — every store below would have written B-tree structure over it.
     var pg = page_alloc(fd, hdr);
+    if (pg == 0) { return 0; }
     var buf = pg_alloc();
     memset(buf, 0, PAGE_SIZE);
     store64(buf + BT_TYPE, PAGE_BTREE);
@@ -148,23 +156,56 @@ fn _bt_leaf_ins(buf, key, val): i64 {
 
 # ── Insert into non-full internal ──────────
 
-fn _bt_int_ins(buf, key, rchild): i64 {
+# Position of child page `child` in an internal node's BT_VALS (0..nk), or -1.
+#
+# A separator belongs immediately after the child it was split out of, and that
+# child is identified by PAGE NUMBER, not by key. Deriving the position from the
+# key instead is wrong whenever the key ties an existing separator — see the
+# comment on _bt_int_ins.
+fn _bt_child_pos(buf, nk, child): i64 {
+    var found = 0 - 1;
+    for (var i = 0; i <= nk; i = i + 1) {
+        if (found < 0) {
+            if (load64(buf + BT_VALS + i * 8) == child) { found = i; }
+        }
+    }
+    return found;
+}
+
+# Insert `key` at key-slot `pos` and `rchild` at child-slot `pos + 1`.
+#
+# ⚠ 1.14.0: `pos` is now supplied by the caller, which derives it from the page
+# number of the child that split. This function used to re-derive it by scanning
+# BT_KEYS for the first `key < keys[i]` — and that is WRONG when the separator
+# EQUALS the separator already sitting immediately right of the split child: the
+# strict `<` skips past it and returns pos+1, so the new key and page are spliced
+# one slot too far right and the pre-existing child between them is stranded
+# between two IDENTICAL separators, i.e. claiming the empty range [S,S] while
+# actually holding keys up to the next separator.
+#
+# Nothing is corrupted; the subtree becomes UNREACHABLE. Both readers
+# (_bt_rwalk, _bt_mut_walk) start at the child after the count of separators
+# < lo, so they skip it for every key above S, and _bt_find_leaf reaches it for
+# no key at all — so remove_ref/update_ref cannot repair or tombstone it either.
+# A full scan still finds the rows, so an indexed SELECT silently disagrees with
+# a scan over the same data.
+#
+# Reachable from ordinary SQL: a leaf's left half can be entirely one value
+# (btree_insert takes sep = tk[32]), so 33+ copies of a leaf's minimum make S its
+# own upper separator; equal keys then route RIGHT, that leaf fills with keys
+# strictly below S, and its next median is S again — the tie.
+# Repro: 41 rows id=100, 23 rows id=200, then 32 rows id=1 — 96 rows, plain
+# INSERTs, every statement PATRA_OK — and `WHERE id = 200` returned 0 while a
+# scan returned 23.
+fn _bt_int_ins(buf, pos, key, rchild): i64 {
     var nk = load64(buf + BT_NKEYS);
     # CLAMP: BT_NKEYS is read off a disk page, so a torn write or a hostile
     # file controls it. Every *reader* clamped; the mutation paths did not,
     # and used it as a loop bound while filling fixed-size buffers.
     # (audit 2026-08-18 S1-5)
     if (nk > BT_MAX_KEYS) { nk = BT_MAX_KEYS; }
-    var pos = nk;
-    var ff = 0;
-    for (var i = 0; i < nk; i = i + 1) {
-        if (ff == 0) {
-            if (key < load64(buf + BT_KEYS + i * 8)) {
-                pos = i;
-                ff = 1;
-            }
-        }
-    }
+    if (pos < 0) { pos = nk; }
+    if (pos > nk) { pos = nk; }
     var j = nk - 1;
     while (j >= pos) {
         store64(buf + BT_KEYS + (j + 1) * 8, load64(buf + BT_KEYS + j * 8));
@@ -185,7 +226,11 @@ fn _bt_int_ins(buf, key, rchild): i64 {
 fn _bt_push_up(fd, hdr, root, left_pg, sep, right_pg): i64 {
     if (_bt_pdepth <= 1) {
         # left_pg is the root — create new root
+        # 1.14.0: see btree_create. Returning `root` unchanged abandons the
+        # split rather than writing a new root over the header page; the caller
+        # keeps a consistent (if unsplit) tree.
         var nr = page_alloc(fd, hdr);
+        if (nr == 0) { return root; }
         var nb = pg_alloc();
         memset(nb, 0, PAGE_SIZE);
         store64(nb + BT_TYPE, PAGE_BTREE);
@@ -209,8 +254,22 @@ fn _bt_push_up(fd, hdr, root, left_pg, sep, right_pg): i64 {
     # (audit 2026-08-18 S1-5)
     if (nk > BT_MAX_KEYS) { nk = BT_MAX_KEYS; }
 
+    # The separator goes immediately after the child that split. Fall back to
+    # the old key-derived position only if left_pg is not in this node at all,
+    # which means the page is corrupt — no worse than before, and not silent.
+    var cpos = _bt_child_pos(pb, nk, left_pg);
+    if (cpos < 0) {
+        cpos = nk;
+        var cf = 0;
+        for (var ci = 0; ci < nk; ci = ci + 1) {
+            if (cf == 0) {
+                if (sep < load64(pb + BT_KEYS + ci * 8)) { cpos = ci; cf = 1; }
+            }
+        }
+    }
+
     if (nk < BT_MAX_KEYS) {
-        _bt_int_ins(pb, sep, right_pg);
+        _bt_int_ins(pb, cpos, sep, right_pg);
         page_write(fd, par_pg, pb);
         pg_free(pb);
         return root;
@@ -220,17 +279,9 @@ fn _bt_push_up(fd, hdr, root, left_pg, sep, right_pg): i64 {
     var tk = _pt_alloc(520);
     var tc = _pt_alloc(528);
 
-    # Find position for sep
-    var pos = nk;
-    var ff = 0;
-    for (var i = 0; i < nk; i = i + 1) {
-        if (ff == 0) {
-            if (sep < load64(pb + BT_KEYS + i * 8)) {
-                pos = i;
-                ff = 1;
-            }
-        }
-    }
+    # Position for sep — same rule as the non-full path above: it belongs
+    # immediately after the child that split, located by page number.
+    var pos = cpos;
 
     # Build temp keys (64)
     var ti = 0;
@@ -259,6 +310,12 @@ fn _bt_push_up(fd, hdr, root, left_pg, sep, right_pg): i64 {
     var mid = 31;
     var mid_key = load64(tk + mid * 8);
 
+    # 1.14.0: allocate before committing the truncated parent — same reasoning
+    # as the leaf split above. Written after the page_write, the guard would
+    # have left the parent with BT_NKEYS = 31 and orphaned children 32..64.
+    var rpg = page_alloc(fd, hdr);
+    if (rpg == 0) { _pt_free(tk); _pt_free(tc); pg_free(pb); return root; }
+
     # Left stays in par_pg
     store64(pb + BT_NKEYS, mid);
     for (var i = 0; i < mid; i = i + 1) {
@@ -270,7 +327,6 @@ fn _bt_push_up(fd, hdr, root, left_pg, sep, right_pg): i64 {
     page_write(fd, par_pg, pb);
 
     # Right in new page
-    var rpg = page_alloc(fd, hdr);
     var rnk = 64 - mid - 1;
     memset(pb, 0, PAGE_SIZE);
     store64(pb + BT_TYPE, PAGE_BTREE);
@@ -352,6 +408,16 @@ fn btree_insert(fd, hdr, root, key, val): i64 {
     var split = 32;
     var sep = load64(tk + split * 8);
 
+    # 1.14.0: allocate the right page BEFORE committing the truncated left
+    # half. The 0-sentinel guard added here first sat AFTER the page_write
+    # below, so abandoning the split on a full file left the leaf written with
+    # BT_NKEYS = 32 and simply dropped keys 32..63 — index entries destroyed by
+    # the very guard meant to protect page 0. Allocating first means the
+    # failure path has modified nothing, and the tree stays exactly as it was.
+    # (Also frees the two 520-byte temporaries, which the first cut leaked.)
+    var rpg = page_alloc(fd, hdr);
+    if (rpg == 0) { _pt_free(tk); _pt_free(tv); pg_free(buf); return root; }
+
     # Left half stays in leaf_pg
     store64(buf + BT_NKEYS, split);
     for (var i = 0; i < split; i = i + 1) {
@@ -361,7 +427,6 @@ fn btree_insert(fd, hdr, root, key, val): i64 {
     page_write(fd, leaf_pg, buf);
 
     # Right half in new page
-    var rpg = page_alloc(fd, hdr);
     memset(buf, 0, PAGE_SIZE);
     store64(buf + BT_TYPE, PAGE_BTREE);
     store64(buf + BT_LEAF, 1);
@@ -387,16 +452,48 @@ fn btree_search(fd, hdr, root, key, out, max): i64 {
     return _bt_range(fd, hdr, root, key, key, out, max);
 }
 
+# As btree_search, but reports TRUNCATION: `tflag` (an 8-byte cell owned by the
+# caller) is set to 1 when the walk filled `out` and stopped with more refs
+# still to come.
+#
+# 1.14.0. _bt_range returns only a count, so a caller could not tell "3 refs
+# exist" from "at least `max` exist and I stopped". INSERT OR IGNORE's probe
+# read that as "no conflict among these" and inserted a DUPLICATE once a key
+# accumulated more than 256 index entries — which lazy-delete makes easy, since
+# every delete leaves a tombstone under the key and only VACUUM removes them.
+# A delete/re-insert loop on one key therefore silently broke OR IGNORE.
+#
+# The cell is caller-owned rather than a module global on purpose: reads are
+# lock-free and concurrent, so a global truncation flag would be racy between
+# the search and the check.
+fn btree_search_t(fd, hdr, root, key, out, max, tflag): i64 {
+    store64(tflag, 0);
+    var n = _bt_range(fd, hdr, root, key, key, out, max);
+    if (n >= max) { store64(tflag, 1); }
+    return n;
+}
+
 # ── Range scan [lo, hi] — collects refs into out ────────────
 
 fn _bt_range(fd, hdr, root, lo, hi, out, max): i64 {
     var cnt = 0;
-    _bt_rwalk(fd, hdr, root, lo, hi, out, max, &cnt, 0);
+    # 1.14.0: node budget. BT_MAX_DEPTH alone does not bound this walk — at
+    # order 64 a corrupt internal node whose 64 child pointers all name itself
+    # costs 64^10 page reads before the depth cap fires, which is not a bound
+    # in any useful sense. It is reachable from a crafted .patra, and it runs
+    # inside the query's flock window, so it hangs every other process on the
+    # file. A real tree that fits a real file visits far fewer nodes than this.
+    var budget = BT_MAX_NODES;
+    _bt_rwalk(fd, hdr, root, lo, hi, out, max, &cnt, 0, &budget);
     return cnt;
 }
 
-fn _bt_rwalk(fd, hdr, pg, lo, hi, out, max, cp, depth): i64 {
+fn _bt_rwalk(fd, hdr, pg, lo, hi, out, max, cp, depth, bp): i64 {
     if (depth >= BT_MAX_DEPTH) { return 0; }
+    # 1.14.0: consume from the shared node budget — see _bt_range.
+    var left = load64(bp);
+    if (left <= 0) { return 0; }
+    store64(bp, left - 1);
     var buf = pg_alloc();
     if (page_read_checked(fd, hdr, pg, buf) != PATRA_OK) {
         pg_free(buf);
@@ -432,7 +529,7 @@ fn _bt_rwalk(fd, hdr, pg, lo, hi, out, max, cp, depth): i64 {
             if (stop == 0) {
                 if (load64(cp) < max) {
                     _bt_rwalk(fd, hdr, load64(buf + BT_VALS + i * 8),
-                      lo, hi, out, max, cp, depth + 1);
+                      lo, hi, out, max, cp, depth + 1, bp);
                     if (i < nk) {
                         if (load64(buf + BT_KEYS + i * 8) > hi) {
                             stop = 1;

@@ -36,7 +36,11 @@ fn _bytes_write_chain(fd, hdr, ptr, len): i64 {
         store64(buf + BY_NEXT, next_pg);
         memcpy(buf + BY_DATA, ptr + off, chunk);
 
+        # 1.14.0: page_alloc returns 0 on failure, and page 0 is the HEADER —
+        # unchecked, a full or unwritable file wrote chain payload over it and
+        # then returned 0 as the chain head, which reads back as "no value".
         var this_pg = page_alloc(fd, hdr);
+        if (this_pg == 0) { pg_free(buf); return 0; }
         page_write(fd, this_pg, buf);
         next_pg = this_pg;
     }
@@ -53,8 +57,21 @@ fn _bytes_read_chain(fd, hdr, first_page, len, out): i64 {
     var buf = pg_alloc();
     var cur = first_page;
     var copied = 0;
+    # 1.14.0: bound the walk. A chain page whose BY_LEN is 0 made no progress —
+    # `copied` stayed put and the loop followed BY_NEXT forever, so a chain that
+    # pointed at itself (or any cycle of zero-length pages) hung the calling
+    # query INSIDE its flock window, blocking every other reader and writer of
+    # the file until the process was killed. A crafted .patra is enough.
+    # Two independent guards: a zero-length non-terminal chunk is meaningless
+    # and is refused outright, and the hop count cannot exceed the number of
+    # pages in the file, since a legitimate chain visits each at most once.
+    var hops = 0;
+    var maxhops = load64(hdr + HDR_PGCOUNT);
+    if (maxhops < 1) { maxhops = 1; }
 
     while (cur != 0) {
+        hops = hops + 1;
+        if (hops > maxhops) { pg_free(buf); return PATRA_ERR_PAGE; }
         if (page_read_checked(fd, hdr, cur, buf) != PATRA_OK) {
             pg_free(buf);
             return PATRA_ERR_PAGE;
@@ -66,6 +83,7 @@ fn _bytes_read_chain(fd, hdr, first_page, len, out): i64 {
         var chunk = load64(buf + BY_LEN);
         if (chunk < 0) { pg_free(buf); return PATRA_ERR_PAGE; }
         if (chunk > BY_DATA_MAX) { pg_free(buf); return PATRA_ERR_PAGE; }
+        if (chunk == 0) { pg_free(buf); return PATRA_ERR_PAGE; }
         if (copied + chunk > len) { chunk = len - copied; }
         memcpy(out + copied, buf + BY_DATA, chunk);
         copied = copied + chunk;
@@ -86,8 +104,17 @@ fn _bytes_free_chain(fd, hdr, first_page): i64 {
 
     var buf = pg_alloc();
     var cur = first_page;
+    # 1.14.0: same hop bound as _bytes_read_chain. A cycle here self-terminates
+    # today only by accident — page_free rewrites the page, so the second visit
+    # fails the BY_TYPE check — but not before the page has been pushed onto the
+    # free list twice, which corrupts it. Bound the walk explicitly.
+    var hops = 0;
+    var maxhops = load64(hdr + HDR_PGCOUNT);
+    if (maxhops < 1) { maxhops = 1; }
 
     while (cur != 0) {
+        hops = hops + 1;
+        if (hops > maxhops) { pg_free(buf); return PATRA_ERR_PAGE; }
         if (page_read_checked(fd, hdr, cur, buf) != PATRA_OK) {
             pg_free(buf);
             return PATRA_ERR_PAGE;

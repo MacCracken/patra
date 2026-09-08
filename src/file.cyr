@@ -4,6 +4,21 @@
 
 enum PageConst { PAGE_SIZE = 4096; MAX_TABLES = 63; MAX_COLS = 32; }
 
+# Upper bound on how many pages one chain walk may visit (1.14.0). Every data-
+# page and chain-page walk follows a `next` link read straight off disk, so a
+# crafted or torn file can make the chain cyclic — and those walks run inside
+# the statement's flock window, so a cycle hangs every other process on the
+# file. Walks that have the header use HDR_PGCOUNT, which is exact; this is the
+# fallback for the few that do not, and corresponds to page_offset's own
+# ceiling, so it can never reject a chain a valid file could contain.
+enum ChainBound { MAX_CHAIN_PAGES = 1125899906842624; }
+
+# Ceiling on how many index refs an INSERT OR IGNORE probe will collect for one
+# key before giving up and reporting that it cannot decide (1.14.0). 65,536 refs
+# is a 512 KB buffer — far past any real key's live duplicates plus tombstones,
+# and bounded so a hostile file cannot drive an unbounded allocation.
+enum IdxProbe { IDX_PROBE_MAX = 65536; }
+
 # Magic: "PTRA" as little-endian u32 (P=0x50 T=0x54 R=0x52 A=0x41)
 enum PatraFmt { PATRA_MAGIC = 0x41525450; PATRA_VER = 1; }
 
@@ -198,6 +213,32 @@ fn patra_hdr_verify(buf): i64 {
     var tc = load64(buf + HDR_TBLCOUNT);
     if (tc < 0) { return PATRA_ERR_PAGE; }
     if (tc > MAX_TABLES) { return PATRA_ERR_PAGE; }
+
+    # 1.14.0: validate the table DIRECTORY, not just its count.
+    #
+    # Every consumer of these fields trusted them. TBL_NCOLS in particular is
+    # read straight out of this page and used as a loop bound while indexing
+    # SCH_ENTRY_SZ-sized entries into a 4 KB schema page — a crafted count of a
+    # few thousand walks far past the buffer. TBL_ROOT / TBL_SCHEMA are used as
+    # page numbers with no range check, so a crafted value reads an arbitrary
+    # file offset into a page buffer, and TBL_NROWS sizes heap allocations.
+    #
+    # This runs on every patra_hdr_read, so it is the one place that sees the
+    # directory before anything else does. At most MAX_TABLES (63) iterations
+    # of four comparisons — unmeasurable next to the page read it follows.
+    for (var ti = 0; ti < tc; ti = ti + 1) {
+        var e = buf + HDR_TBLDIR + ti * TBL_ENTRY_SZ;
+        var nc = load64(e + TBL_NCOLS);
+        if (nc < 1) { return PATRA_ERR_PAGE; }
+        if (nc > MAX_COLS) { return PATRA_ERR_PAGE; }
+        var rt = load64(e + TBL_ROOT);
+        if (rt < 1) { return PATRA_ERR_PAGE; }
+        if (rt >= pgc) { return PATRA_ERR_PAGE; }
+        var sc = load64(e + TBL_SCHEMA);
+        if (sc < 1) { return PATRA_ERR_PAGE; }
+        if (sc >= pgc) { return PATRA_ERR_PAGE; }
+        if (load64(e + TBL_NROWS) < 0) { return PATRA_ERR_PAGE; }
+    }
     return PATRA_OK;
 }
 
@@ -206,12 +247,29 @@ fn _pt_err(msg): i64 {
     sakshi_error(msg, strlen(msg));
 }
 
+# Column count off a schema page, clamped to what a schema page can hold.
+#
+# 1.14.0. SCH_NCOLS is read straight from disk and used as a loop bound while
+# indexing SCH_ENTRY_SZ-sized entries into a 4 KB page and as an index into
+# per-column type arrays; a crafted count walked far past both. The table
+# directory's TBL_NCOLS is now validated in patra_hdr_verify, but SCH_NCOLS is a
+# SECOND, independent on-disk copy read directly off the schema page, so it
+# needs its own clamp — the two can disagree, and the query path historically
+# sized from one and read with the other.
+fn _sch_ncols_clamped(schema): i64 {
+    var nc = load64(schema + SCH_NCOLS);
+    if (nc < 0) { return 0; }
+    if (nc > MAX_COLS) { return MAX_COLS; }
+    return nc;
+}
+
 # ── File create / open ────────────────────
 
 # O_NOFOLLOW on Linux x86_64 = 0x20000 (131072). Prevents `open(2)` from
 # following a symbolic link at the final path component. Audit 2026-04-21
 # §2.8: closes the TOCTOU/symlink plant described in CVE-2025-68146.
-enum OpenFlag { O_NOFOLLOW = 131072; }
+# O_NOFOLLOW = 0x20000, O_DIRECTORY = 0x10000 on Linux x86_64.
+enum OpenFlag { O_NOFOLLOW = 131072; O_DIRECTORY = 65536; }
 
 # Create new .patra file (O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW,
 # mode 0644 = 420). O_EXCL already refuses an existing target; O_NOFOLLOW
@@ -237,6 +295,51 @@ fn _pt_file_create(path): i64 {
 # on Linux. file_open bridges the agnos ABI (namelen + AO_* flags).
 fn _pt_file_open(path): i64 {
     return file_open(path, 2 + O_NOFOLLOW, 0);
+}
+
+# fsync the DIRECTORY containing `path` (1.14.0).
+#
+# fsync on a file makes its CONTENTS durable; it says nothing about the
+# directory entry that names it. The WAL is created and unlinked on the crash
+# path, and neither was ever made durable, so after a power loss the filesystem
+# could legitimately present either:
+#
+#   * a database whose pages were modified but whose .wal entry never landed —
+#     the undo log is simply absent, and recovery has nothing to replay; or
+#   * a .wal that still exists after the commit which unlinked it — replayed on
+#     the next open, undoing committed work.
+#
+# Both are silent. Syncing the directory after the create and after each unlink
+# orders those entries against the data the way the log's whole contract
+# assumes.
+#
+# Best-effort by design: a platform where the directory cannot be opened for
+# fsync (agnos today) is no worse off than before, so failure is not an error.
+fn _pt_sync_dir(path): i64 {
+    var n = strlen(path);
+    var cut = 0 - 1;
+    for (var i = 0; i < n; i = i + 1) {
+        if (load8(path + i) == 47) { cut = i; }
+    }
+    var dir = 0;
+    if (cut < 0) {
+        dir = ".";
+    } else {
+        var dl = cut;
+        if (dl == 0) { dl = 1; }
+        var d = _pt_alloc(dl + 1);
+        if (d == 0) { return 0; }
+        memcpy(d, path, dl);
+        store8(d + dl, 0);
+        dir = d;
+    }
+    var dfd = file_open(dir, O_DIRECTORY, 0);
+    if (dfd >= 0) {
+        syscall(SYS_FDATASYNC, dfd);
+        sys_close(dfd);
+    }
+    if (cut >= 0) { _pt_free(dir); }
+    return 0;
 }
 
 # ── Allocator serialization (v1.12.0 P2) ───────────

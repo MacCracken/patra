@@ -152,18 +152,29 @@ fn tbl_drop(fd, hdr, idx): i64 {
     # Read schema to learn the row layout (for BLOB cleanup)
     var schema = pg_alloc();
     page_read(fd, spg, schema);
-    var ncols = load64(schema + SCH_NCOLS);
+    var ncols = _sch_ncols_clamped(schema);
     var has_blob = _tbl_has_bytes(schema, ncols);
     var row_sz = row_compute_size(schema, ncols);
 
     # Free BLOB chains referenced by every row, then free the data pages.
     # If there are no BLOB columns the row walk is skipped entirely.
+    # 1.14.0: bound the chain walk. DP_NEXT is read straight off a data page,
+    # so a crafted or torn file can make the chain cyclic — and every one of
+    # these walks runs INSIDE the statement's flock window, so a cycle hung the
+    # database for every other process until the hang was killed. A legitimate
+    # chain visits each page at most once, so the file's page count is a
+    # correct and generous bound.
+    var hops = 0;
+    var maxhops = load64(hdr + HDR_PGCOUNT);
+    if (maxhops < 1) { maxhops = 1; }
     var cur = load64(entry + TBL_ROOT);
     var buf = pg_alloc();
     while (cur != 0) {
+        hops = hops + 1;
+        if (hops > maxhops) { cur = 0; continue; }
         page_read(fd, cur, buf);
         if (has_blob != 0) {
-            var nr = load64(buf + DP_NROWS);
+            var nr = _dp_nrows_clamped(buf, row_sz);
             for (var ri = 0; ri < nr; ri = ri + 1) {
                 _tbl_free_row_bytes(fd, hdr, buf + DP_DATA + ri * row_sz, schema, ncols);
             }
@@ -232,13 +243,22 @@ fn tbl_insert(fd, hdr, idx, row_data, row_sz, lpc): i64 {
     } else {
         cur = load64(entry + TBL_ROOT);
         page_read(fd, cur, buf);
-        while (load64(buf + DP_NEXT)) {
+        # 1.14.0: bounded — see the note in tbl_drop. A cyclic DP_NEXT spun
+        # this tail-walk forever with the write lock held.
+        var thops = 0;
+        var tmax = load64(hdr + HDR_PGCOUNT);
+        if (tmax < 1) { tmax = 1; }
+        var tstop = 0;
+        while (tstop == 0) {
+            if (load64(buf + DP_NEXT) == 0) { tstop = 1; continue; }
+            thops = thops + 1;
+            if (thops > tmax) { tstop = 1; continue; }
             cur = load64(buf + DP_NEXT);
             page_read(fd, cur, buf);
         }
     }
 
-    var nrows = load64(buf + DP_NROWS);
+    var nrows = _dp_nrows_clamped(buf, row_sz);
     var used = DP_DATA + nrows * row_sz;
 
     if (used + row_sz <= PAGE_SIZE) {
@@ -287,6 +307,23 @@ fn _dp_nrows_clamped(buf, row_sz): i64 {
     return nr;
 }
 
+# Same clamp with the per-page capacity precomputed. The division above is
+# loop-invariant across a chain walk, and paying it per page cost ~7% on
+# read_scan_4t_par when the clamps went in at 1.14.0. The two hot scan loops
+# hoist it with _dp_pcap and call this; every cold path keeps the
+# one-argument form, which is harder to get wrong.
+fn _dp_pcap(row_sz): i64 {
+    if (row_sz <= 0) { return 0; }
+    return (PAGE_SIZE - DP_DATA) / row_sz;
+}
+
+fn _dp_nrows_cap(buf, pcap): i64 {
+    var nr = load64(buf + DP_NROWS);
+    if (nr < 0) { return 0; }
+    if (nr > pcap) { return pcap; }
+    return nr;
+}
+
 # `cap` is the number of rows `out` can hold. Currently unused in-tree, but
 # bounded regardless: an unbounded memcpy driven by an on-disk DP_NROWS is not
 # something to leave lying around for a future caller. (audit 2026-08-18 S0-5)
@@ -297,10 +334,16 @@ fn tbl_scan(fd, hdr, idx, out, row_sz, cap): i64 {
     var written = 0;
     var stop = 0;
 
+    var hops = 0;
+    var maxhops = load64(hdr + HDR_PGCOUNT);
+    if (maxhops < 1) { maxhops = 1; }
+    var pcap = _dp_pcap(row_sz);
     while (cur != 0) {
+        hops = hops + 1;
+        if (hops > maxhops) { stop = 1; }
         if (stop == 0) {
             page_read(fd, cur, buf);
-            var nrows = _dp_nrows_clamped(buf, row_sz);
+            var nrows = _dp_nrows_cap(buf, pcap);
             if (written + nrows > cap) { nrows = cap - written; }
             if (nrows > 0) {
                 memcpy(out + written * row_sz, buf + DP_DATA, nrows * row_sz);
@@ -322,10 +365,18 @@ fn tbl_scan_where(fd, hdr, idx, out, row_sz, schema, ncols, pr, cap): i64 {
     var cur = load64(entry + TBL_ROOT);
     var buf = pg_alloc();
     var kept = 0;
+    var pcap = _dp_pcap(row_sz);
 
+    var hops = 0;
+    var maxhops = load64(hdr + HDR_PGCOUNT);
+    if (maxhops < 1) { maxhops = 1; }
     while (cur != 0) {
+        # 1.14.0: bounded chain walk — a cyclic DP_NEXT otherwise hangs this
+        # statement with its flock held. See tbl_drop.
+        hops = hops + 1;
+        if (hops > maxhops) { cur = 0; continue; }
         page_read(fd, cur, buf);
-        var nrows = _dp_nrows_clamped(buf, row_sz);
+        var nrows = _dp_nrows_cap(buf, pcap);
         for (var i = 0; i < nrows; i = i + 1) {
             # `kept` is bounded by the caller's capacity, never by TBL_NROWS.
             # The result buffer is sized from the table directory's TBL_NROWS
@@ -414,9 +465,16 @@ fn tbl_update(fd, hdr, idx, row_sz, schema, ncols, pr): i64 {
         } else { uic = 0 - 1; }
     }
 
+    var hops = 0;
+    var maxhops = load64(hdr + HDR_PGCOUNT);
+    if (maxhops < 1) { maxhops = 1; }
     while (cur != 0) {
+        # 1.14.0: bounded chain walk — a cyclic DP_NEXT otherwise hangs this
+        # statement with its flock held. See tbl_drop.
+        hops = hops + 1;
+        if (hops > maxhops) { cur = 0; continue; }
         page_read(fd, cur, buf);
-        var nrows = load64(buf + DP_NROWS);
+        var nrows = _dp_nrows_clamped(buf, row_sz);
         var modified = 0;
 
         for (var i = 0; i < nrows; i = i + 1) {
@@ -506,9 +564,16 @@ fn tbl_delete(fd, hdr, idx, row_sz, schema, ncols, pr): i64 {
         }
     }
 
+    var hops = 0;
+    var maxhops = load64(hdr + HDR_PGCOUNT);
+    if (maxhops < 1) { maxhops = 1; }
     while (cur != 0) {
+        # 1.14.0: bounded chain walk — a cyclic DP_NEXT otherwise hangs this
+        # statement with its flock held. See tbl_drop.
+        hops = hops + 1;
+        if (hops > maxhops) { cur = 0; continue; }
         page_read(fd, cur, buf);
-        var nrows = load64(buf + DP_NROWS);
+        var nrows = _dp_nrows_clamped(buf, row_sz);
         var kept = 0;
 
         for (var i = 0; i < nrows; i = i + 1) {
