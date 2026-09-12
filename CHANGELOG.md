@@ -5,6 +5,15 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.2] - 2026-09-12
+
+### Changed
+
+- **Toolchain `6.6.0` → `6.6.2`.** No source change: this repo was already on the
+  value form, so the flip cost it nothing. Re-verified on every surface it ships —
+  build, tests, and any bench/fuzz/distlib target, including every
+  `[lib.<profile>]` bundle.
+
 ## [1.14.1] - 2026-09-07 — the table-open prologue exists once, and reports failure
 
 Closes [`docs/development/issues/archive/2026-09-07-schema-load-prologue-cloned-ten-times.md`](docs/development/issues/archive/2026-09-07-schema-load-prologue-cloned-ten-times.md),
@@ -4052,12 +4061,3 @@ detection on transactions exceeding 64 pages.
 - No crash recovery (WAL) or transaction semantics (BEGIN/COMMIT)
 
 ## [Unreleased]
-
-## [1.14.2] - 2026-09-12
-
-### Changed
-
-- **Toolchain `6.6.0` → `6.6.2`.** No source change: this repo was already on the
-  value form, so the flip cost it nothing. Re-verified on every surface it ships —
-  build, tests, and any bench/fuzz/distlib target, including every
-  `[lib.<profile>]` bundle.
