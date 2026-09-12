@@ -4050,3 +4050,14 @@ detection on transactions exceeding 64 pages.
 - Only first INT column is auto-indexed (no CREATE INDEX syntax)
 - No JOINs, subqueries, or aggregates
 - No crash recovery (WAL) or transaction semantics (BEGIN/COMMIT)
+
+## [Unreleased]
+
+## [1.14.2] - 2026-09-12
+
+### Changed
+
+- **Toolchain `6.6.0` → `6.6.2`.** No source change: this repo was already on the
+  value form, so the flip cost it nothing. Re-verified on every surface it ships —
+  build, tests, and any bench/fuzz/distlib target, including every
+  `[lib.<profile>]` bundle.
