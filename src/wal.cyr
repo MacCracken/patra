@@ -71,6 +71,29 @@ var _wal_tx_counter = 0;
 # wal_start for a consumer that skipped it. Builds into a local and publishes
 # _wal_slots LAST — the same publish-order rule v1.13.11 had to learn in
 # pcache.cyr, where a guard tested the very global it assigned first.
+# 1.14.3 (cyrius 6.6.4): wall-clock seconds without a raw syscall number. The old
+# `syscall(201, 0)` was x86_64 time(2); on aarch64 that number is LISTEN(2) (fd 0,
+# -EINVAL → every WAL timestamp was -22) and on x86 Mach-O it was unrouted (SIGSYS).
+# clock_gettime(CLOCK_REALTIME) is routed on every target: Linux fills ts and returns
+# 0; Darwin RETURNS ns since the epoch (lib/chrono.cyr's clock_epoch_secs shape).
+fn _wal_epoch_secs(): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    var tsm[16];
+    return syscall(228, 0, &tsm) / 1000000000;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
+    # Linux (x86_64 and aarch64 — 228 is routed): r == 0 and ts[0] holds the seconds.
+    # Windows: `syscall(228, …)` is the GetTickCount64 reroute — it RETURNS the tick count
+    # and never touches ts (still 0 from the store above), so the sum is the ticks. Either
+    # way a non-zero, advancing value, which is all this fallback seed needs. Treating a
+    # non-zero return as failure returned 0 on PE (review of the 1.14.3 cut).
+    var ts[16];
+    store64(&ts, 0);
+    var r = syscall(228, 0, &ts);
+    return r + load64(&ts);
+    #endif
+}
+
 fn wal_slots_init(): i64 {
     if (_wal_slots != 0) { return 0; }
     var t = _pt_alloc(WAL_MAX_TX * WS_SZ);
@@ -194,7 +217,7 @@ fn _pt_rand64(): i64 {
         #ifdef CYRIUS_TARGET_AGNOS
         var t = syscall(SYS_TIME_UNIX);
         #else
-        var t = syscall(201, 0);
+        var t = _wal_epoch_secs();
         #endif
         _wal_tx_counter = _wal_tx_counter + 1;
         v = t * 2654435761 + _wal_tx_counter * 1099511628211;
@@ -222,7 +245,7 @@ fn _wal_gen_salts(slot): i64 {
         # not an agnos syscall — a raw syscall(201) would mis-dispatch.
         var t = syscall(SYS_TIME_UNIX);
         #else
-        var t = syscall(201, 0);
+        var t = _wal_epoch_secs();
         #endif
         _wal_tx_counter = _wal_tx_counter + 1;
         store64(slot + WS_SALT1, t * 2654435761 + _wal_tx_counter);

@@ -9,7 +9,9 @@
 # O_NOFOLLOW added in 1.5.2 (audit §2.8). file_open (io) bridges the agnos
 # ABI (namelen + AO_* flags); Linux passthrough keeps O_APPEND/O_NOFOLLOW.
 fn jsonl_open(path): i64 {
-    return file_open(path, 132162, 420);
+    # 1.14.3: O_RDWR | O_CREAT | O_APPEND | O_NOFOLLOW spelled by name — the literal 132162
+    # carried the x86_64 O_NOFOLLOW bit, which is O_LARGEFILE on aarch64 (cyrius 6.6.4).
+    return file_open(path, O_RDWR | O_CREAT | O_APPEND | O_NOFOLLOW, 420);
 }
 
 # Close JSONL file

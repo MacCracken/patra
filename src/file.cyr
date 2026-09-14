@@ -137,8 +137,10 @@ enum Flock { LOCK_SH = 1; LOCK_EX = 2; LOCK_NB = 4; LOCK_UN = 8; }
 enum Sync { SYS_FDATASYNC = 12; }
 #endif
 #ifndef CYRIUS_TARGET_AGNOS
-# Linux/macos: the peer does not define SYS_FLOCK, so supply #73 here; the peer
-# defines SYS_FDATASYNC (#75) on Linux, matched here for macos self-sufficiency.
+# Linux/macos: SYS_FLOCK = 73 is supplied here for macos self-sufficiency (the
+# macOS peer does not define it; both Linux peers do since cyrius 6.6.4, with the
+# same value — a same-value redefinition is silent). The peer defines SYS_FDATASYNC
+# (#75) on Linux, matched here for macos.
 enum Flock { LOCK_SH = 1; LOCK_EX = 2; LOCK_NB = 4; LOCK_UN = 8; SYS_FLOCK = 73; }
 enum Sync { SYS_FDATASYNC = 75; }
 #endif
@@ -265,11 +267,15 @@ fn _sch_ncols_clamped(schema): i64 {
 
 # ── File create / open ────────────────────
 
-# O_NOFOLLOW on Linux x86_64 = 0x20000 (131072). Prevents `open(2)` from
-# following a symbolic link at the final path component. Audit 2026-04-21
-# §2.8: closes the TOCTOU/symlink plant described in CVE-2025-68146.
-# O_NOFOLLOW = 0x20000, O_DIRECTORY = 0x10000 on Linux x86_64.
-enum OpenFlag { O_NOFOLLOW = 131072; O_DIRECTORY = 65536; }
+# O_NOFOLLOW prevents `open(2)` from following a symbolic link at the final path
+# component. Audit 2026-04-21 §2.8: closes the TOCTOU/symlink plant described in
+# CVE-2025-68146. ⚠ 1.14.3 (cyrius 6.6.4): the VALUES come from the stdlib peer now —
+# `enum OpenFlag { O_NOFOLLOW = 131072; O_DIRECTORY = 65536; }` stood here with the
+# x86_64 numbers, and on arm64 (whose fcntl.h overrides the generic set) those bits are
+# O_LARGEFILE and O_DIRECT:
+# the WAL open FOLLOWED a symlink and truncated its target, and _pt_sync_dir's
+# directory open got EINVAL (cyrius issue 2026-09-12, traced on aarch64 at 6.6.3).
+# On Darwin they are 0x100 / 0x100000. Never hardcode an O_* value.
 
 # Create new .patra file (O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW,
 # mode 0644 = 420). O_EXCL already refuses an existing target; O_NOFOLLOW

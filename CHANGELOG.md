@@ -5,6 +5,28 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.3] - 2026-09-13
+
+### Fixed
+
+- **The WAL's `O_NOFOLLOW` followed symlinks on aarch64 — and truncated the target.**
+  `src/file.cyr` carried `enum OpenFlag { O_NOFOLLOW = 131072; O_DIRECTORY = 65536; }`, the
+  x86_64 values; on aarch64 (asm-generic) those bits are O_LARGEFILE and O_DIRECT, so
+  `wal_start`'s `O_RDWR|O_CREAT|O_TRUNC|O_NOFOLLOW` open followed a symlink at the WAL path
+  and truncated its target (traced at cyrius 6.6.3: "hi" → 0 bytes), and `_pt_sync_dir`'s
+  `O_DIRECTORY` open got EINVAL so the directory was never fsynced on that path. The enum
+  is gone: `O_NOFOLLOW` / `O_DIRECTORY` are stdlib symbols since cyrius 6.6.4 with each
+  peer's own value (Darwin's differ again). `src/jsonl.cyr`'s literal `132162` is spelled
+  `O_RDWR | O_CREAT | O_APPEND | O_NOFOLLOW`. Cyrius issue
+  `2026-09-12-raw-x86-syscall-numbers-fdlopen-dynlib-aarch64.md`.
+- **WAL timestamps used raw `syscall(201, 0)`** — x86_64 time(2); on aarch64 that number is
+  LISTEN(2) on fd 0 (every timestamp was -22), on Intel-Mac it was unrouted (SIGSYS). Now
+  `_wal_epoch_secs()` (clock_gettime, routed everywhere; whole seconds on Darwin too).
+
+### Changed
+
+- **Toolchain `6.6.2` → `6.6.4`.**
+
 ## [1.14.2] - 2026-09-12
 
 ### Changed
