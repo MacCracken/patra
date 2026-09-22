@@ -53,8 +53,19 @@ below. Two cross-build warnings are open but **unfiled**, pending a decision.
 
 ### Open — patra's own
 
-**Empty as of v1.14.1.** The one filing —
-`2026-09-07-schema-load-prologue-cloned-ten-times` — shipped as v1.14.1 and is
+- **[`issues/2026-09-21-raw-syscall-sweep-and-gate.md`](issues/2026-09-21-raw-syscall-sweep-and-gate.md)**
+  — filed 2026-09-21 from libro 2.10.3, which did the same sweep. **345 raw
+  `syscall(…)` sites** (24 in `src/`, the rest harness exits, unlinks, opens),
+  every one with a stdlib wrapper; two of them re-implement `clock_epoch_secs`
+  by hand (`src/wal.cyr:82,92`, x86_64 `228`). Replace with `x*` / `sys_*` /
+  `random_bytes` / `clock_epoch_secs`, add `chrono` + `random` to `[deps]
+  stdlib` (sidecar 12 → 14), drop `file.cyr`'s private `SYS_*` tables, and add
+  libro's "No raw syscalls" CI gate. One decision inside it: fdatasync on the
+  WAL path (local `_pt_fdatasync` now, `xfdatasync` upstream). **Scheduled with
+  the 6.6.6 pin bump below** — the user's call, 2026-09-21.
+
+The previous filing — `2026-09-07-schema-load-prologue-cloned-ten-times` —
+shipped as v1.14.1 and is
 [archived](issues/archive/2026-09-07-schema-load-prologue-cloned-ten-times.md).
 
 ### Deliberately not fixed at v1.14.0 — wrong answers, not corruption
@@ -192,3 +203,87 @@ are **not scheduled**. Each states the trigger that would move it.
 
 Patra crossed v1.0 at 1.0.0 (2026-04-17). No v2.0 criteria are queued — the
 surface is intentionally small, and no new SQL surface is planned.
+
+## Moving the cyrius pin to 6.6.6
+
+**Current pin: `cyrius = "6.6.4"` (cyrius.cyml:7).**
+
+### ⛔ Windows data corruption in the JSONL journal and the WAL — fixed by the pin, no source change
+
+patra opens its JSONL journal **`O_RDWR | O_CREAT | O_APPEND | O_NOFOLLOW`**
+(`src/jsonl.cyr:14`, `jsonl_open`) and its WAL **`O_RDWR | O_CREAT | O_TRUNC |
+O_NOFOLLOW`** (`src/wal.cyr:286`), and patra already carries live
+`#ifdef CYRIUS_TARGET_WIN` branches (`src/wal.cyr:208`, `:234`). Before 6.6.6,
+`EOPEN_PE` decoded only `O_CREAT` and `O_EXCL` — the access mode, `O_TRUNC` and
+`O_APPEND` were all ignored. On a PE build that means:
+
+- **`jsonl_append` did not append.** Every record wrote from offset 0 and
+  overwrote the one before it. An append-only journal is the worst case named in
+  the 6.6.6 changelog, and this is exactly it.
+- **The WAL's `O_TRUNC` did not truncate.** A rewritten `<db>.wal` kept the old
+  tail of the previous file beyond the new content.
+
+6.6.6 rewires `EOPEN_PE` through `_pe_open_flags` (`src/backend/x86/emit.cyr`),
+which now decodes the access mode, `O_CREAT`, `O_EXCL`, `O_TRUNC` and
+`O_APPEND`, pinned on real Windows hardware by
+`tests/tcyr/crossos/open_flag_translation.tcyr`. **The fix is in the compiler,
+not in `lib/`** — so it arrives with the pin bump alone and needs nothing from
+patra. `file_open` is the stdlib `lib/io.cyr` entry point, which routes to the
+same PE open path.
+
+Also gained on PE: opens honour the access mode (`O_RDONLY` now refuses a
+write), and `file_exists` / `file_read_all` no longer request write access, so
+they succeed on read-only files and read-only volumes.
+
+### ⚠ What you still do NOT get on Windows — `O_NOFOLLOW`
+
+Both opens pass `O_NOFOLLOW` (added at 1.5.2, audit §2.8). **6.6.6 deliberately
+does not map it**: the nearest Win32 flag, `FILE_FLAG_OPEN_REPARSE_POINT`,
+*opens* the symlink instead of *refusing* like `O_NOFOLLOW` does, so mapping it
+would be a semantic change rather than a port. The constant is defined so
+portable source compiles, and that is all. Two consequences for patra on PE:
+
+- the symlink refusal that `O_NOFOLLOW` buys on Linux **is not enforced**; a
+  pre-planted symlink at the db/wal/jsonl path redirects the open to its target;
+- cyrius measured the related case on real `cass` (2026-09-19): `CREATE_NEW`
+  over a dangling symlink **succeeds and creates the target**, where the same
+  flags on Linux fail.
+
+patra does not use `O_EXCL`, so the sharper keyfile variant does not apply — but
+if the WAL/db path can be attacker-influenced on a Windows deployment, the
+Linux-side guarantee is not there. Worth an issue against cyrius rather than a
+workaround here.
+
+### Everything else on the 6.6.6 list is absent
+
+Grepped `src/`, `programs/` and `tests/` (excluding vendored `lib/`): zero
+`struct` declarations, zero `async` fns, zero `operator` fns, zero
+`ret2`/`rethi` pair returns, zero SIMD-typed returns, zero top-level `{ }`
+blocks, zero `: cstring` parameters, zero duplicate global `var` declarations,
+zero locally defined `vec_*`. `lib/regression.cyr` is not vendored and no
+`regression_*` helper is called, so the new exec deadline is irrelevant.
+`[deps] stdlib` names `vec` (not `assert`), so assert.cyr's new transitive
+`include "lib/vec.cyr"` cannot collide either.
+
+**Measured:** `cyrius build` under 6.6.4 and under 6.6.6 both exit 0 with an
+identical (empty) diagnostic set.
+
+### Do in the same pass — the raw syscall sweep
+
+[`issues/2026-09-21-raw-syscall-sweep-and-gate.md`](issues/2026-09-21-raw-syscall-sweep-and-gate.md)
+is scheduled with this bump: the pin move is the stdlib-update moment, the
+sweep adds `chrono` + `random` to `[deps] stdlib`, and its CI gate should land
+before the next cut so the tree is measured clean at 6.6.6. `src/wal.cyr:82,92`
+(`syscall(228, …)`) is the site to do first — it is 1.14.3's own repair of the
+`syscall(201)` timestamp bug, still spelled by number.
+
+### Verify after bumping
+
+1. `cyrius deps` — re-vendor so `lib/io.cyr` picks up 6.6.6 (now
+   self-sufficient; `xrmdir` routes to `RemoveDirectoryW` on PE).
+2. `cyrius build` + `cyrius test` + `cyrius lint` + `cyrius distlib` on Linux.
+3. **The one that matters:** cross-compile for PE (`CYRIUS_TARGET_WIN=1`) and,
+   on real Windows, call `jsonl_open` + `jsonl_append` twice and confirm the
+   file holds **two** lines, not one. Then rewrite a WAL over a longer one and
+   confirm no tail survives. That is the regression this pin exists to close,
+   and it cannot be verified on Linux.
