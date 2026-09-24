@@ -13,44 +13,44 @@ patra_init();
 
 var jpath = "/tmp/patra_fuzz_jsonl.jsonl";
 
-fn _cleanup() { syscall(SYS_UNLINK, jpath); return 0; }
+fn _cleanup() { xunlink(jpath); return 0; }
 
 # -- 1. jsonl_get_int overflow -> 0 ---------------------------
 
 var line = "{\"x\": 99999999999999999999}";
 var v = jsonl_get_int(line, strlen(line), "x", 1);
-if (v != 0) { syscall(SYS_EXIT, 1); }
+if (v != 0) { sys_exit(1); }
 
 # -- 2. jsonl_get_int cutoff value parses --------------------
 
 line = "{\"x\": 922337203685477580}";
 v = jsonl_get_int(line, strlen(line), "x", 1);
-if (v != 922337203685477580) { syscall(SYS_EXIT, 2); }
+if (v != 922337203685477580) { sys_exit(2); }
 
 # -- 3. Negative value ---------------------------------------
 
 line = "{\"x\": -42}";
 v = jsonl_get_int(line, strlen(line), "x", 1);
-if (v != 0 - 42) { syscall(SYS_EXIT, 3); }
+if (v != 0 - 42) { sys_exit(3); }
 
 # -- 4. Missing key returns 0 without crashing ---------------
 
 line = "{\"x\": 1}";
 v = jsonl_get_int(line, strlen(line), "ghost", 5);
-if (v != 0) { syscall(SYS_EXIT, 4); }
+if (v != 0) { sys_exit(4); }
 
 # -- 5. Malformed JSON line (no closing brace) -- no crash ----
 
 line = "{\"x\": 5";
 v = jsonl_get_int(line, strlen(line), "x", 1);
 # Don't assert specific value; assert survived the call
-if (v < 0 - 1000) { syscall(SYS_EXIT, 5); }
+if (v < 0 - 1000) { sys_exit(5); }
 
 # -- 6. jsonl_read on a file with very long lines ------------
 
 _cleanup();
 var jfd = jsonl_open(jpath);
-if (jfd < 0) { syscall(SYS_EXIT, 10); }
+if (jfd < 0) { sys_exit(10); }
 
 var big = fl_alloc(9000);
 memset(big, 97, 9000);
@@ -64,7 +64,7 @@ jsonl_append(jfd, big, 2);
 fl_free(big);
 
 var lr = jsonl_read(jfd);
-if (jsonl_lines_count(lr) < 2) { syscall(SYS_EXIT, 11); }
+if (jsonl_lines_count(lr) < 2) { sys_exit(11); }
 jsonl_lines_free(lr);
 jsonl_close(jfd);
 
@@ -84,9 +84,9 @@ store8(raw + 6, 125);
 jsonl_append(jfd, raw, 7);
 fl_free(raw);
 lr = jsonl_read(jfd);
-if (jsonl_lines_count(lr) != 1) { syscall(SYS_EXIT, 20); }
+if (jsonl_lines_count(lr) != 1) { sys_exit(20); }
 jsonl_lines_free(lr);
 jsonl_close(jfd);
 
 _cleanup();
-syscall(SYS_EXIT, 0);
+sys_exit(0);

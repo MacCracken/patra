@@ -79,6 +79,8 @@ cyrius distlib                               # regenerate dist/patra.cyr from [l
 - **Do not skip fuzz / test verification** before claiming a feature works
 - **Do not skip benchmarks** before claiming performance improvements
 - **Do not add Cyrius stdlib includes in individual src files** — `lib.cyr` manages all includes; the manifest resolves stdlib
+- **Do not call `syscall(…)` or pass numeric `open(2)` flags** — anywhere in `src/`, `tests/`, `fuzz/`, `programs/`. Use the stdlib wrapper — `lib/io.cyr`'s `x*` / `file_*` wherever one exists (the bare path wrappers `sys_unlink` / `sys_open` / `sys_mkdir` / … take a length on agnos), otherwise `sys_*`, `random_bytes`, `clock_epoch_secs`, `src/file.cyr`'s `_pt_fdatasync` — and spell flags as `O_*`. CI's "No raw syscalls or numeric open flags" step enforces both
+- **Do not copy a stdlib ABI constant into patra** (`SYS_*`, `O_*`, `LOCK_*`, flag bits) — include the stdlib module that defines it; per-target values differ and a private copy is correct on one target only
 - **Do not use `break` in while loops with `var` declarations** — unreliable; use flag + `continue` instead
 - **Do not hardcode toolchain versions in CI YAML** — the `cyrius = "X.Y.Z"` pin in `cyrius.cyml` is the only source of truth
 

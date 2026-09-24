@@ -24,16 +24,16 @@ patra_init();
 var _p = "fuzz_stmtseq.patra";
 
 fn fresh(): i64 {
-    sys_unlink(_p);
+    xunlink(_p);
     # The WAL must go too. Leaving it behind is not merely untidy: patra does
     # not bind a WAL to the database it belongs to, so an orphaned .wal is
     # replayed into whatever file later takes that name. This harness found
     # that defect the hard way — an earlier revision unlinked only the .patra
     # and a previous run's WAL resurrected 30 rows into a fresh database.
     # Tracked in the roadmap; until it is fixed, clean up explicitly.
-    sys_unlink("fuzz_stmtseq.patra.wal");
+    xunlink("fuzz_stmtseq.patra.wal");
     var db = patra_open(_p);
-    if (db == 0) { syscall(SYS_EXIT, 1); }
+    if (db == 0) { sys_exit(1); }
     patra_exec(db, "CREATE TABLE t (id INT, v INT)");
     return db;
 }
@@ -65,14 +65,14 @@ fn seed(db, n): i64 {
 
 var db = fresh();
 seed(db, 20);
-if (nrows(db) != 20) { syscall(SYS_EXIT, 10); }
-if (hdr_nrows(db) != 20) { syscall(SYS_EXIT, 11); }
+if (nrows(db) != 20) { sys_exit(10); }
+if (hdr_nrows(db) != 20) { sys_exit(11); }
 
 patra_begin(db);
 patra_exec(db, "DELETE FROM t WHERE id = 1");
 patra_rollback(db);
-if (nrows(db) != 20) { syscall(SYS_EXIT, 12); }
-if (hdr_nrows(db) != 20) { syscall(SYS_EXIT, 13); }
+if (nrows(db) != 20) { sys_exit(12); }
+if (hdr_nrows(db) != 20) { sys_exit(13); }
 patra_close(db);
 
 # ── 2. Commit must persist, and the two counts must agree ──
@@ -83,8 +83,8 @@ patra_begin(db);
 seed(db, 5);
 patra_exec(db, "DELETE FROM t WHERE id = 1");
 patra_commit(db);
-if (nrows(db) != 0) { syscall(SYS_EXIT, 20); }
-if (hdr_nrows(db) != 0) { syscall(SYS_EXIT, 21); }
+if (nrows(db) != 0) { sys_exit(20); }
+if (hdr_nrows(db) != 0) { sys_exit(21); }
 patra_close(db);
 
 # ── 3. A transaction holds its exclusive lock for its WHOLE span ──
@@ -103,41 +103,41 @@ fn lock_is_free(): i64 {
 
 db = fresh();
 seed(db, 3);
-if (lock_is_free() != 1) { syscall(SYS_EXIT, 30); }
+if (lock_is_free() != 1) { sys_exit(30); }
 patra_begin(db);
-if (lock_is_free() != 0) { syscall(SYS_EXIT, 31); }
+if (lock_is_free() != 0) { sys_exit(31); }
 patra_exec(db, "INSERT INTO t VALUES (2, 20)");
-if (lock_is_free() != 0) { syscall(SYS_EXIT, 32); }
+if (lock_is_free() != 0) { sys_exit(32); }
 patra_exec(db, "UPDATE t SET v = 21 WHERE id = 2");
-if (lock_is_free() != 0) { syscall(SYS_EXIT, 33); }
+if (lock_is_free() != 0) { sys_exit(33); }
 var rsq = patra_query(db, "SELECT id FROM t WHERE id = 1");
 if (rsq != 0) { patra_result_free(rsq); }
-if (lock_is_free() != 0) { syscall(SYS_EXIT, 34); }
+if (lock_is_free() != 0) { sys_exit(34); }
 patra_exec(db, "DELETE FROM t WHERE id = 2");
-if (lock_is_free() != 0) { syscall(SYS_EXIT, 35); }
+if (lock_is_free() != 0) { sys_exit(35); }
 patra_commit(db);
-if (lock_is_free() != 1) { syscall(SYS_EXIT, 36); }
+if (lock_is_free() != 1) { sys_exit(36); }
 
 patra_begin(db);
 patra_exec(db, "INSERT INTO t VALUES (3, 30)");
 patra_rollback(db);
-if (lock_is_free() != 1) { syscall(SYS_EXIT, 37); }
+if (lock_is_free() != 1) { sys_exit(37); }
 patra_close(db);
 
 # ── 4. Redundant / out-of-order transaction calls are inert ──
 
 db = fresh();
 seed(db, 4);
-if (patra_commit(db) != PATRA_OK) { syscall(SYS_EXIT, 40); }
-if (patra_rollback(db) != PATRA_OK) { syscall(SYS_EXIT, 41); }
+if (patra_commit(db) != PATRA_OK) { sys_exit(40); }
+if (patra_rollback(db) != PATRA_OK) { sys_exit(41); }
 patra_begin(db);
 patra_begin(db);
 patra_exec(db, "INSERT INTO t VALUES (9, 90)");
 patra_commit(db);
-if (patra_commit(db) != PATRA_OK) { syscall(SYS_EXIT, 42); }
-if (nrows(db) != 5) { syscall(SYS_EXIT, 43); }
-if (hdr_nrows(db) != 5) { syscall(SYS_EXIT, 44); }
-if (lock_is_free() != 1) { syscall(SYS_EXIT, 45); }
+if (patra_commit(db) != PATRA_OK) { sys_exit(42); }
+if (nrows(db) != 5) { sys_exit(43); }
+if (hdr_nrows(db) != 5) { sys_exit(44); }
+if (lock_is_free() != 1) { sys_exit(45); }
 patra_close(db);
 
 # ── 5. Interleaved mutation orderings keep index and rows agreeing ──
@@ -165,23 +165,23 @@ for (var r = 0; r < 12; r = r + 1) {
     patra_exec(db, "INSERT INTO t VALUES (5, 50)");
     patra_exec(db, "INSERT INTO t VALUES (6, 60)");
 }
-if (idx_vs_scan(db, 5) != 12) { syscall(SYS_EXIT, 50); }
+if (idx_vs_scan(db, 5) != 12) { sys_exit(50); }
 
 patra_exec(db, "DELETE FROM t WHERE id = 6");
-if (idx_vs_scan(db, 5) != 12) { syscall(SYS_EXIT, 51); }
+if (idx_vs_scan(db, 5) != 12) { sys_exit(51); }
 
 patra_exec(db, "UPDATE t SET v = 55 WHERE id = 5");
-if (idx_vs_scan(db, 5) != 12) { syscall(SYS_EXIT, 52); }
+if (idx_vs_scan(db, 5) != 12) { sys_exit(52); }
 
 patra_begin(db);
 patra_exec(db, "DELETE FROM t WHERE id = 5");
 patra_rollback(db);
-if (idx_vs_scan(db, 5) != 12) { syscall(SYS_EXIT, 53); }
-if (hdr_nrows(db) != 12) { syscall(SYS_EXIT, 54); }
+if (idx_vs_scan(db, 5) != 12) { sys_exit(53); }
+if (hdr_nrows(db) != 12) { sys_exit(54); }
 
 patra_exec(db, "DELETE FROM t WHERE id = 5");
-if (idx_vs_scan(db, 5) != 0) { syscall(SYS_EXIT, 55); }
-if (hdr_nrows(db) != 0) { syscall(SYS_EXIT, 56); }
+if (idx_vs_scan(db, 5) != 0) { sys_exit(55); }
+if (hdr_nrows(db) != 0) { sys_exit(56); }
 patra_close(db);
 
 # ── 6. An orphaned WAL must not be replayed into a different database ──
@@ -197,16 +197,16 @@ patra_exec(db, "INSERT INTO t VALUES (2, 22)");
 patra_exec(db, "DELETE FROM t WHERE id = 1");
 patra_close(db);                 # abandoned: the .wal survives
 
-sys_unlink(_p);                  # replace the database, keep the orphaned WAL
+xunlink(_p);                  # replace the database, keep the orphaned WAL
 var fresh_db = patra_open(_p);
-if (fresh_db == 0) { syscall(SYS_EXIT, 70); }
+if (fresh_db == 0) { sys_exit(70); }
 patra_exec(fresh_db, "CREATE TABLE t (id INT, v INT)");
 patra_exec(fresh_db, "INSERT INTO t VALUES (7, 77)");
-if (nrows(fresh_db) != 1) { syscall(SYS_EXIT, 71); }
-if (hdr_nrows(fresh_db) != 1) { syscall(SYS_EXIT, 72); }
-if (load64(_db_hdr(fresh_db) + HDR_DBID) == 0) { syscall(SYS_EXIT, 73); }
+if (nrows(fresh_db) != 1) { sys_exit(71); }
+if (hdr_nrows(fresh_db) != 1) { sys_exit(72); }
+if (load64(_db_hdr(fresh_db) + HDR_DBID) == 0) { sys_exit(73); }
 patra_close(fresh_db);
-sys_unlink("fuzz_stmtseq.patra.wal");
+xunlink("fuzz_stmtseq.patra.wal");
 
 # ── 7. Reopen after each shape: recovery must leave a consistent file ──
 
@@ -216,12 +216,12 @@ patra_begin(db);
 seed(db, 7);
 patra_close(db);            # abandon a transaction WITHOUT commit/rollback
 var db2 = patra_open(_p);
-if (db2 == 0) { syscall(SYS_EXIT, 80); }
+if (db2 == 0) { sys_exit(80); }
 var after = nrows(db2);
-if (after < 0) { syscall(SYS_EXIT, 81); }
-if (hdr_nrows(db2) != after) { syscall(SYS_EXIT, 82); }
-if (lock_is_free() != 1) { syscall(SYS_EXIT, 83); }
+if (after < 0) { sys_exit(81); }
+if (hdr_nrows(db2) != after) { sys_exit(82); }
+if (lock_is_free() != 1) { sys_exit(83); }
 patra_close(db2);
 
-sys_unlink(_p);
-syscall(SYS_EXIT, 0);
+xunlink(_p);
+sys_exit(0);

@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "Patra — structured storage and SQL queries for Cyrius. The sovereign database."
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.6.4"
+cyrius = "6.6.6"
 repository = "https://github.com/MacCracken/patra"
 
 [build]
@@ -30,12 +30,14 @@ modules = [
 ]
 
 # Order mirrors the includes at the top of src/lib.cyr — sakshi last.
-# patra's fold uses ONE sakshi symbol: sakshi_error (src/file.cyr:206). The
+# patra's fold uses ONE sakshi symbol: sakshi_error (src/file.cyr, _pt_err). The
 # sakshi_set_level call was removed from patra_init at v1.13.10 (it clobbered
-# the host's process-global log level); src/lib.cyr:150 says so. The remaining
-# sakshi_set_level / sakshi_get_level calls are test-only, exercising that fix.
+# the host's process-global log level); patra_init in src/lib.cyr says so. The
+# remaining sakshi_set_level / sakshi_get_level calls are test-only, exercising
+# that fix. chrono and random (1.15.0) supply clock_epoch_secs and random_bytes
+# to src/wal.cyr, replacing raw syscalls.
 [deps]
-stdlib = ["syscalls", "string", "alloc", "freelist", "io", "fmt", "str", "vec", "atomic", "sync", "thread_local", "sakshi"]
+stdlib = ["syscalls", "string", "alloc", "freelist", "io", "fmt", "str", "vec", "atomic", "sync", "thread_local", "chrono", "random", "sakshi"]
 
 # Three rules for this file. All three have already been violated once —
 # rule 3 during the very cut that added it.

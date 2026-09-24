@@ -1,3 +1,67 @@
+> **ARCHIVED 2026-09-23 — RESOLVED in patra 1.15.0** (cyrius 6.6.6). Every raw
+> `syscall(…)` is gone: 345 lines, 346 calls (one harness line held two). That is
+> 24 in `src/` and 321 lines in the harnesses, the unit this filing counted in. CI's
+> "No raw syscalls or numeric open flags" step keeps them gone. Every acceptance
+> criterion below holds, measured rather than asserted:
+>
+> - the acceptance `grep` returns nothing; the CI step runs the same scan with
+>   comments stripped, over `src/`, `tests/tcyr`, `tests/bcyr`, `fuzz/` and
+>   `programs/`;
+> - `src/file.cyr` carries no private `SYS_*`: `enum Sync`, `SYS_FLOCK = 73` and
+>   patra's own copy of `LOCK_*` are gone (`LOCK_*` come from `lib/io.cyr`);
+> - `_pt_rand64` has one code path, and `_wal_epoch_secs` no longer exists —
+>   both fallbacks call `clock_epoch_secs()` directly, which also absorbed the two
+>   agnos `SYS_TIME_UNIX` arms;
+> - the gate is mutation-verified: run over the pre-sweep tree it reports **345**
+>   syscall sites and **14** numeric open flags; a planted `syscall(60, 0)`, a
+>   planted `syscall(SYS_GETPID)` with a trailing comment and a planted numeric
+>   `file_open` flag are each named by `file:line`, and the same text inside a
+>   comment is not. It passes under both `bash -e` and `bash -eo pipefail`;
+> - `dist/patra.deps` emits **14** leaves and the CI sidecar gate agrees.
+>
+> **The fdatasync decision took option 1**: one `_pt_fdatasync(fd)` in
+> `src/file.cyr` — `sys_fdatasync` on Linux and macOS, `xfsync` on agnos and
+> Windows. Option 2 (`xfdatasync` in `lib/io.cyr`) is listed in `roadmap.md`
+> under *To file upstream*; it has **not** been filed.
+>
+> **Three defects the sweep found that this filing did not list** — the same
+> class (one target's ABI hard-coded at a call site), all fixed in 1.15.0, all
+> established by reading the peers and the compiler's own diagnostic, not by
+> running on the affected OS:
+>
+> 1. **macOS never used the CSPRNG.** Darwin's getentropy route returns 0 on
+>    success; `sys_getrandom` normalizes that to the byte count, the raw
+>    `syscall(SYS_GETRANDOM, …) == n` did not, so every `HDR_DBID` and WAL salt on
+>    macOS came from the time + counter fallback.
+> 2. **macOS could not create a database or truncate a WAL.** `src/` still passed
+>    the x86_64 numbers `194` and `578` as open flags, directly under a comment
+>    reading "Never hardcode an O_* value". On Darwin they decode without
+>    `O_CREAT` / `O_TRUNC`. This is why the CI step also rejects numeric flags.
+> 3. **Windows failed every write inside a transaction.** fdatasync (75) is not a
+>    routed PE syscall, so it returned -ENOSYS, and `wal_log_page` was the one
+>    site that checked. `xfsync` returns 0 there; durability on Windows is
+>    unchanged (none — no flush is wired), but transactions now work.
+>
+> **The harness half mattered more than "mechanical" suggested.** Before the
+> sweep the unit suite, all three programs and six of eight fuzz harnesses did
+> not *compile* for aarch64 (`SYS_UNLINK` does not exist there). After it every
+> one builds warning-free and passes under `qemu-aarch64`: 1301/1301 assertions
+> (1.15.0's final count), 8/8 fuzz, 3/3 programs.
+>
+> **One departure from the inventory**: harness `SYS_CLOSE` / `SYS_WRITE` sites
+> became `sys_close` / `sys_write`, not `file_close` / `file_write`. `src/` and
+> the rest of the suite already use the `sys_` spelling (`src/` calls
+> `file_close` / `file_write` zero times), and every syscall peer defines both
+> with the same signature, so they are equally portable. Only `open` needs
+> `file_open`, whose agnos bridge `sys_open` lacks. Relatedly, five `sys_unlink`
+> calls in `fuzz_stmtseq` (not raw syscalls) became `xunlink`, because agnos's
+> `sys_unlink` takes a length; every harness now builds for agnos.
+>
+> The cut's code review also found an unrelated, pre-existing recovery bug,
+> filed separately as `issues/2026-09-23-wal-recovery-runs-only-at-open.md`.
+>
+> Full record: `CHANGELOG.md` [1.15.0].
+
 # Raw `syscall(…)` sweep + CI gate — 345 sites, 24 of them in `src/` — OPEN
 
 **Status:** 🟡 **OPEN** — scheduled for the next stdlib-update pass (the cyrius pin bump to

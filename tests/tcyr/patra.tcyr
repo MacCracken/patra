@@ -12,7 +12,7 @@ var _tpath = "/tmp/patra_test.patra";
 # no real open would return here.
 var _PCFD = 4242;
 
-fn cleanup() { syscall(SYS_UNLINK, _tpath); }
+fn cleanup() { xunlink(_tpath); }
 
 # -- v0.1: Header --------------------------------------------
 
@@ -41,7 +41,7 @@ fn test_file_create() {
     patra_hdr_read(fd, buf);
     assert_eq(patra_hdr_verify(buf), PATRA_OK, "header valid");
     fl_free(buf);
-    syscall(SYS_CLOSE, fd);
+    sys_close(fd);
 }
 
 # -- v0.1: Page alloc / free ---------------------------------
@@ -60,7 +60,7 @@ fn test_page_alloc() {
     var p2 = page_alloc(fd, hdr);
     assert_eq(p2, 2, "reused freed page");
     fl_free(hdr);
-    syscall(SYS_CLOSE, fd);
+    sys_close(fd);
 }
 
 # -- v0.1: Page read / write ---------------------------------
@@ -83,7 +83,7 @@ fn test_page_rw() {
     assert_eq(load64(buf + 8), 99, "read 99");
     fl_free(buf);
     fl_free(hdr);
-    syscall(SYS_CLOSE, fd);
+    sys_close(fd);
 }
 
 # -- v0.1: Row encoding --------------------------------------
@@ -562,7 +562,7 @@ fn test_delete_then_insert() {
 # -- v0.4: JSONL ----------------------------------------------
 
 var _jpath = "/tmp/patra_test.jsonl";
-fn jcleanup() { syscall(SYS_UNLINK, _jpath); return 0; }
+fn jcleanup() { xunlink(_jpath); return 0; }
 
 fn test_json_build() {
     test_group("json build");
@@ -697,7 +697,7 @@ fn test_btree_basic() {
 
     fl_free(out);
     fl_free(hdr);
-    syscall(SYS_CLOSE, fd);
+    sys_close(fd);
 }
 
 fn test_btree_split() {
@@ -726,7 +726,7 @@ fn test_btree_split() {
 
     fl_free(out);
     fl_free(hdr);
-    syscall(SYS_CLOSE, fd);
+    sys_close(fd);
 }
 
 fn test_btree_range() {
@@ -753,7 +753,7 @@ fn test_btree_range() {
 
     fl_free(out);
     fl_free(hdr);
-    syscall(SYS_CLOSE, fd);
+    sys_close(fd);
 }
 
 fn test_btree_duplicates() {
@@ -773,7 +773,7 @@ fn test_btree_duplicates() {
 
     fl_free(out);
     fl_free(hdr);
-    syscall(SYS_CLOSE, fd);
+    sys_close(fd);
 }
 
 fn test_indexed_select() {
@@ -1456,22 +1456,22 @@ fn test_symlink_refused() {
     test_group("symlink refused");
     var target = "/tmp/patra_nofollow_real.patra";
     var link = "/tmp/patra_nofollow_link.patra";
-    syscall(SYS_UNLINK, target);
-    syscall(SYS_UNLINK, link);
+    xunlink(target);
+    xunlink(link);
 
     # Create a real db at target, then symlink link -> target
     var db = patra_open(target);
     assert(db != 0, "real db open");
     patra_close(db);
-    # SYS_SYMLINK = 88 on x86_64 Linux: symlink(target, linkpath)
-    syscall(88, target, link);
+    # xsymlink: symlinkat on aarch64, which has no bare symlink(2).
+    assert_eq(xsymlink(target, link), 0, "symlink planted");
 
     # Open via symlink must fail
     db = patra_open(link);
     assert_eq(db, 0, "open via symlink refused");
 
-    syscall(SYS_UNLINK, link);
-    syscall(SYS_UNLINK, target);
+    xunlink(link);
+    xunlink(target);
 }
 
 # §4.2 #12 -- page_offset overflow returns sentinel; page_alloc via
@@ -1582,11 +1582,11 @@ fn test_wal_bad_magic_refused() {
 
     # Drop a junk .wal next to the DB
     var wpath = "/tmp/patra_test.patra.wal";
-    var wfd = syscall(SYS_OPEN, wpath, 578, 420);
+    var wfd = file_open(wpath, O_RDWR | O_CREAT | O_TRUNC, 420);
     var junk = fl_alloc(WAL_REC_SZ);
     memset(junk, 0xAA, WAL_REC_SZ);
-    syscall(SYS_WRITE, wfd, junk, WAL_REC_SZ);
-    syscall(SYS_CLOSE, wfd);
+    sys_write(wfd, junk, WAL_REC_SZ);
+    sys_close(wfd);
     fl_free(junk);
 
     # Reopen: wal_recover must refuse and leave the DB intact
@@ -1597,7 +1597,7 @@ fn test_wal_bad_magic_refused() {
     assert_eq(patra_result_get_int(rs, 0, 0), 42, "value preserved");
     patra_result_free(rs);
     patra_close(db);
-    syscall(SYS_UNLINK, wpath);
+    xunlink(wpath);
 }
 
 # §4.2 (new) -- valid WAL with a forged tail record (bad checksum) replays
@@ -1612,19 +1612,19 @@ fn test_wal_checksum_stops_replay() {
 
     # Craft a minimal well-formed WAL header + one bad-checksum record
     var wpath = "/tmp/patra_test.patra.wal";
-    var wfd = syscall(SYS_OPEN, wpath, 578, 420);
+    var wfd = file_open(wpath, O_RDWR | O_CREAT | O_TRUNC, 420);
     var hdr = fl_alloc(WAL_HDR_SZ);
     store32(hdr, WAL_MAGIC);
     store32(hdr + 4, WAL_VER);
-    syscall(SYS_WRITE, wfd, hdr, WAL_HDR_SZ);
+    sys_write(wfd, hdr, WAL_HDR_SZ);
     fl_free(hdr);
     # Forged record: claims to restore page 1 with zeros, checksum all zero
     var rec = fl_alloc(WAL_REC_SZ);
     memset(rec, 0, WAL_REC_SZ);
     store64(rec, 1);  # page 1
-    syscall(SYS_WRITE, wfd, rec, WAL_REC_SZ);
+    sys_write(wfd, rec, WAL_REC_SZ);
     fl_free(rec);
-    syscall(SYS_CLOSE, wfd);
+    sys_close(wfd);
 
     # Reopen: header is valid, but the record's checksum (0) will not match
     # _wal_hash(1, zeros). Replay must stop before overwriting page 1.
@@ -4562,7 +4562,7 @@ fn _conc_worker(db): i64 {
 
 fn test_concurrency() {
     test_group("concurrency (P1 shared-handle)");
-    syscall(SYS_UNLINK, _cpath);
+    xunlink(_cpath);
     var db = patra_open(_cpath);
     assert(db != 0, "open");
     patra_exec(db, "CREATE TABLE t (id INT, v INT)");
@@ -4593,7 +4593,7 @@ fn test_concurrency() {
     assert_eq(bad, 0, "no corrupt rows");
 
     patra_close(db);
-    syscall(SYS_UNLINK, _cpath);
+    xunlink(_cpath);
 }
 
 # -- v1.12.0: read concurrency (yeo-cy-test P2) --------------
@@ -4653,7 +4653,7 @@ fn _rd_worker(ctx): i64 {
 
 fn test_read_concurrency() {
     test_group("read concurrency (P2 parallel)");
-    syscall(SYS_UNLINK, _rdpath);
+    xunlink(_rdpath);
     var setup = patra_open(_rdpath);
     assert(setup != 0, "open setup");
     patra_exec(setup, "CREATE TABLE t (id INT, v INT)");
@@ -4690,7 +4690,7 @@ fn test_read_concurrency() {
     fl_free(_rd_ctx);
 
     assert_eq(total, 0, "all parallel reads correct (own handle each)");
-    syscall(SYS_UNLINK, _rdpath);
+    xunlink(_rdpath);
 }
 
 # -- v1.12.0: connection-per-thread cross-handle visibility (P2) --
@@ -4714,7 +4714,7 @@ var _xhpath = "/tmp/patra_test_xhandle.patra";
 
 fn test_cross_handle_visibility() {
     test_group("cross-handle visibility (P2 conn-per-thread)");
-    syscall(SYS_UNLINK, _xhpath);
+    xunlink(_xhpath);
     # Handle B creates the table.
     var b = patra_open(_xhpath);
     assert(b != 0, "open B");
@@ -4744,7 +4744,7 @@ fn test_cross_handle_visibility() {
     patra_result_free(rs3);
     patra_close(a);
     patra_close(b);
-    syscall(SYS_UNLINK, _xhpath);
+    xunlink(_xhpath);
 }
 
 # -- v1.12.0: commit generation (P2 cache coherence) ---------
@@ -4762,7 +4762,7 @@ fn _xgen(db): i64 {
 
 fn test_commit_gen() {
     test_group("commit generation (P2)");
-    syscall(SYS_UNLINK, _gpath);
+    xunlink(_gpath);
     var db = patra_open(_gpath);
     assert(db != 0, "open");
     assert_eq(_xgen(db), 0, "fresh file => gen 0");
@@ -4785,7 +4785,7 @@ fn test_commit_gen() {
     patra_exec(db, "DELETE FROM t WHERE id = 2");
     assert_eq(_xgen(db), 5, "DELETE bumps to 5");
     patra_close(db);
-    syscall(SYS_UNLINK, _gpath);
+    xunlink(_gpath);
 }
 
 # -- v1.12.7: per-handle tail-page cache (table-cache race fix) -----
@@ -4802,8 +4802,8 @@ var _tc2path = "/tmp/patra_test_tcache2.patra";
 
 fn test_tail_cache_per_handle() {
     test_group("tail-page cache per-handle (v1.12.7)");
-    syscall(SYS_UNLINK, _tc1path);
-    syscall(SYS_UNLINK, _tc2path);
+    xunlink(_tc1path);
+    xunlink(_tc2path);
 
     # Part 1: two handles on the SAME file, interleaved inserts. Each handle's
     # cache must track its own appends; the interleave must not drop or misplace
@@ -4861,8 +4861,8 @@ fn test_tail_cache_per_handle() {
 
     patra_close(f1);
     patra_close(f2);
-    syscall(SYS_UNLINK, _tc1path);
-    syscall(SYS_UNLINK, _tc2path);
+    xunlink(_tc1path);
+    xunlink(_tc2path);
 }
 
 # -- v1.12.0: page cache module (P2 pcache, unwired) ---------
@@ -4959,7 +4959,7 @@ fn test_pcache() {
 fn test_cache_coherence() {
     test_group("page cache coherence (P2, enabled)");
     patra_cache_enable(1);
-    syscall(SYS_UNLINK, _gpath);
+    xunlink(_gpath);
     var a = patra_open(_gpath);
     var b = patra_open(_gpath);   # second handle, shared cache
     patra_exec(a, "CREATE TABLE t (id INT, v INT)");
@@ -4994,7 +4994,7 @@ fn test_cache_coherence() {
     patra_result_free(r4);
     patra_close(a);
     patra_close(b);
-    syscall(SYS_UNLINK, _gpath);
+    xunlink(_gpath);
     patra_cache_enable(0);
 }
 
@@ -5112,9 +5112,9 @@ fn test_update_set_list_bound() {
 fn _lock_state(): i64 {
     var f = _pt_file_open(_tpath);
     if (f < 0) { return 0 - 1; }
-    var ex = _pt_flock(f, LOCK_EX + 4);
+    var ex = _pt_flock(f, LOCK_EX + LOCK_NB);
     if (ex == 0) { _pt_flock(f, LOCK_UN); sys_close(f); return 0; }
-    var sh = _pt_flock(f, LOCK_SH + 4);
+    var sh = _pt_flock(f, LOCK_SH + LOCK_NB);
     if (sh == 0) { _pt_flock(f, LOCK_UN); sys_close(f); return 1; }
     sys_close(f);
     return 2;
@@ -5603,7 +5603,7 @@ var _vpath = "/tmp/patra_test_victim.txt";
 
 # Read the whole victim file into `buf` (cap bytes); returns bytes read, or -1.
 fn _read_victim(buf, cap): i64 {
-    var fd = file_open(_vpath, 0, 0);
+    var fd = file_open(_vpath, O_RDONLY, 0);
     if (fd < 0) { return 0 - 1; }
     var n = sys_read(fd, buf, cap);
     sys_close(fd);
@@ -5613,7 +5613,7 @@ fn _read_victim(buf, cap): i64 {
 fn test_wal_symlink_refused() {
     test_group("WAL open refuses a planted symlink (1.14.0)");
     cleanup();
-    syscall(SYS_UNLINK, _wpath());
+    xunlink(_wpath());
     xunlink(_vpath);
 
     # A victim file the attacker wants destroyed, and a symlink planted at the
@@ -5622,7 +5622,7 @@ fn test_wal_symlink_refused() {
     # the link and truncated the victim: a 202-byte file became 12,368 bytes
     # beginning with the WAL magic `PTWA`, and the commit path's unlink then
     # removed the *link*, leaving the damage and losing the evidence.
-    var vfd = file_open(_vpath, 194, 420);
+    var vfd = file_open(_vpath, O_RDWR | O_CREAT | O_EXCL, 420);
     assert_eq(vfd >= 0, 1, "victim file created");
     sys_write(vfd, "VICTIM", 6);
     sys_close(vfd);
@@ -5654,7 +5654,7 @@ fn test_wal_symlink_refused() {
 fn test_tx_refuses_without_wal() {
     test_group("no WAL, no transaction (1.14.0)");
     cleanup();
-    syscall(SYS_UNLINK, _wpath());
+    xunlink(_wpath());
 
     # Same mechanism, checked from the durability side rather than the
     # security side. wal_log_page opens with `if (_wal_fd < 0) { return
@@ -5682,8 +5682,8 @@ fn test_tx_refuses_without_wal() {
     # EACCES / ENOSPC / EMFILE on that path.
     patra_close(db);
     cleanup();
-    syscall(SYS_UNLINK, _wpath());
-    syscall(SYS_MKDIR, _wpath(), 493);
+    xunlink(_wpath());
+    xmkdir(_wpath(), 493);
 
     var db2 = patra_open(_tpath);
     patra_exec(db2, "CREATE TABLE t (id INT, v INT)");
@@ -5691,7 +5691,7 @@ fn test_tx_refuses_without_wal() {
     assert_eq(load64(db2 + DB_TX), 0, "no transaction left open");
     patra_close(db2);
 
-    syscall(SYS_RMDIR, _wpath());
+    xrmdir(_wpath());
     cleanup();
 }
 
@@ -5716,7 +5716,7 @@ fn test_wal_incomplete_restore_keeps_wal() {
     # page_offset returns -1 and the restore seek fails.
     var s1 = 0x5A5A5A5A5A5A5A5A;
     var s2 = 0x3C3C3C3C3C3C3C3C;
-    var wfd = file_open(_wpath(), 578, 420);
+    var wfd = file_open(_wpath(), O_RDWR | O_CREAT | O_TRUNC, 420);
     assert_eq(wfd >= 0, 1, "crafted WAL created");
     var hdr = fl_alloc(WAL_HDR_SZ);
     memset(hdr, 0, WAL_HDR_SZ);
@@ -5749,14 +5749,14 @@ fn test_wal_incomplete_restore_keeps_wal() {
     # The point of the fix: the WAL it could not fully apply is still there,
     # so the next open retries. Before 1.14.0 the seek failure merely ended the
     # loop and the unlink ran anyway, discarding the before-images for good.
-    var chk = file_open(_wpath(), 0, 0);
+    var chk = file_open(_wpath(), O_RDONLY, 0);
     assert_eq(chk >= 0, 1, "WAL retained after an incomplete restore");
     if (chk >= 0) { sys_close(chk); }
 
     # A clean recovery still unlinks: without this the test would pass just as
     # well against code that never unlinks at all.
     xunlink(_wpath());
-    var wfd2 = file_open(_wpath(), 578, 420);
+    var wfd2 = file_open(_wpath(), O_RDWR | O_CREAT | O_TRUNC, 420);
     var hdr2 = fl_alloc(WAL_HDR_SZ);
     memset(hdr2, 0, WAL_HDR_SZ);
     store32(hdr2, WAL_MAGIC);
@@ -5770,7 +5770,7 @@ fn test_wal_incomplete_restore_keeps_wal() {
     var fd2 = _pt_file_open(_tpath);
     assert_eq(wal_recover(fd2, _wpath(), dbid, pgc), 1, "a clean recovery succeeds");
     sys_close(fd2);
-    var chk2 = file_open(_wpath(), 0, 0);
+    var chk2 = file_open(_wpath(), O_RDONLY, 0);
     assert_eq(chk2 >= 0, 0, "and unlinks the WAL it fully applied");
     if (chk2 >= 0) { sys_close(chk2); }
 
@@ -6045,12 +6045,12 @@ fn test_hostile_header_rejected() {
 
 var _tpath2 = "/tmp/patra_test_2.patra";
 fn _wpath2(): i64 { return "/tmp/patra_test_2.patra.wal"; }
-fn cleanup2() { syscall(SYS_UNLINK, _tpath2); syscall(SYS_UNLINK, _wpath2()); return 0; }
+fn cleanup2() { xunlink(_tpath2); xunlink(_wpath2()); return 0; }
 
 fn test_two_databases_dont_share_a_wal() {
     test_group("two open databases keep separate WALs (1.14.0)");
     cleanup(); cleanup2();
-    syscall(SYS_UNLINK, _wpath());
+    xunlink(_wpath());
 
     var a = patra_open(_tpath);
     var b = patra_open(_tpath2);
@@ -6070,8 +6070,8 @@ fn test_two_databases_dont_share_a_wal() {
     patra_exec(b, "INSERT INTO t VALUES (200, 200)");
 
     # Both WAL files must exist at once — one per database.
-    var wa = file_open(_wpath(), 0, 0);
-    var wb = file_open(_wpath2(), 0, 0);
+    var wa = file_open(_wpath(), O_RDONLY, 0);
+    var wb = file_open(_wpath2(), O_RDONLY, 0);
     assert_eq(wa >= 0, 1, "A has its own WAL on disk");
     assert_eq(wb >= 0, 1, "B has its own WAL on disk");
     if (wa >= 0) { sys_close(wa); }
@@ -6111,7 +6111,7 @@ fn test_two_databases_dont_share_a_wal() {
 fn test_close_rolls_back_open_transaction() {
     test_group("patra_close resolves an open transaction (1.14.0)");
     cleanup();
-    syscall(SYS_UNLINK, _wpath());
+    xunlink(_wpath());
     var db = patra_open(_tpath);
     patra_exec(db, "CREATE TABLE t (id INT, v INT)");
     patra_exec(db, "INSERT INTO t VALUES (1, 11)");
@@ -6121,7 +6121,7 @@ fn test_close_rolls_back_open_transaction() {
     # WAL on disk with the module globals pointing at a closed fd.
     patra_close(db);
 
-    var chk = file_open(_wpath(), 0, 0);
+    var chk = file_open(_wpath(), O_RDONLY, 0);
     assert_eq(chk >= 0, 0, "the WAL is gone — the transaction was resolved");
     if (chk >= 0) { sys_close(chk); }
 
@@ -6300,8 +6300,8 @@ fn _dl_worker(arg): i64 {
 
 fn test_no_mutex_flock_deadlock() {
     test_group("a transaction does not deadlock a second handle (1.14.0)");
-    syscall(SYS_UNLINK, _dl_path);
-    syscall(SYS_UNLINK, "/tmp/patra_deadlock.patra.wal");
+    xunlink(_dl_path);
+    xunlink("/tmp/patra_deadlock.patra.wal");
     var a = patra_open(_dl_path);
     patra_exec(a, "CREATE TABLE t (id INT, v INT)");
     _dl_db2 = patra_open(_dl_path);
@@ -6344,7 +6344,7 @@ fn test_no_mutex_flock_deadlock() {
     patra_close(a);
     patra_close(_dl_db2);
     _dl_db2 = 0;
-    syscall(SYS_UNLINK, _dl_path);
+    xunlink(_dl_path);
 }
 
 fn test_pcache_evict_fails_open() {
@@ -6507,6 +6507,56 @@ fn test_tbl_open_propagates() {
     cleanup();
 }
 
+# -- v1.15.0: seeds and syncs go through the stdlib wrappers ----
+
+# The raw `syscall(SYS_GETRANDOM, …) == n` these replaced read Darwin's
+# getentropy route, which returns 0 on success, as a failure: on macOS every
+# database id and WAL salt silently took the time + counter fallback. Only the
+# fallback advances _wal_tx_counter, so an unchanged counter proves the CSPRNG
+# path ran. Linux cannot reproduce the Darwin return; this pins the contract on
+# every host the suite runs on, aarch64 included.
+fn test_stdlib_seed_and_sync() {
+    test_group("seeds and syncs go through the stdlib wrappers (1.15.0)");
+    var c0 = _wal_tx_counter;
+    var prev = 0;
+    var distinct = 1;
+    for (var i = 0; i < 16; i = i + 1) {
+        var v = _pt_rand64();
+        if (v == prev) { distinct = 0; }
+        prev = v;
+    }
+    var slot = fl_alloc(WS_SZ);
+    memset(slot, 0, WS_SZ);
+    assert_eq(_wal_gen_salts(slot), 0, "salts generated");
+    var s1 = load64(slot + WS_SALT1);
+    var s2 = load64(slot + WS_SALT2);
+    fl_free(slot);
+    assert_eq(_wal_tx_counter, c0, "CSPRNG path taken: the time fallback never ran");
+    assert_eq(distinct, 1, "consecutive random ids differ");
+    assert(s1 != s2, "the two salts differ");
+    # The fallback's clock reads a real epoch on this target (before 1.14.3 a raw
+    # syscall(201) returned -22 on aarch64). A sanity check of chrono only: the
+    # fallback itself cannot be forced while the CSPRNG works.
+    assert_gt(clock_epoch_secs(), 1700000000, "fallback clock reads a plausible epoch");
+
+    # _pt_fdatasync must report failure: wal_log_page's write-ahead check reads
+    # its sign, and a wrapper that swallowed errors would disarm that check.
+    cleanup();
+    var fd = _pt_file_create(_tpath);
+    assert(fd >= 0, "file created");
+    assert_eq(_pt_fdatasync(fd), 0, "fdatasync on a live fd succeeds");
+    sys_close(fd);
+    # agnos (a whole-filesystem sync) and Windows (no flush) report success by
+    # design, so only the fdatasync targets can assert the failure sign.
+    #ifndef CYRIUS_TARGET_AGNOS
+    #ifndef CYRIUS_TARGET_WIN
+    assert_lt(_pt_fdatasync(fd), 0, "fdatasync on a closed fd fails");
+    assert_lt(_pt_fdatasync(0 - 1), 0, "fdatasync on fd -1 fails");
+    #endif
+    #endif
+    cleanup();
+}
+
 # -- v1.13.8: a WAL is bound to its database (audit S1-8) ----
 
 fn _wpath(): i64 { return "/tmp/patra_test.patra.wal"; }
@@ -6524,7 +6574,7 @@ var _wsnap_len = 0;
 fn _wal_snapshot(): i64 {
     if (_wsnap == 0) { _wsnap = fl_alloc(262144); }
     _wsnap_len = 0;
-    var fd = file_open(_wpath(), 0, 0);
+    var fd = file_open(_wpath(), O_RDONLY, 0);
     if (fd < 0) { return 0; }
     var n = sys_read(fd, _wsnap, 262144);
     sys_close(fd);
@@ -6534,7 +6584,7 @@ fn _wal_snapshot(): i64 {
 
 fn _wal_restore(): i64 {
     if (_wsnap_len <= 0) { return 0; }
-    var fd = file_open(_wpath(), 578, 420);
+    var fd = file_open(_wpath(), O_RDWR | O_CREAT | O_TRUNC, 420);
     if (fd < 0) { return 0; }
     sys_write(fd, _wsnap, _wsnap_len);
     sys_close(fd);
@@ -6544,7 +6594,7 @@ fn _wal_restore(): i64 {
 fn test_wal_bound_to_database() {
     test_group("a WAL is bound to its database (S1-8)");
     cleanup();
-    syscall(SYS_UNLINK, _wpath());
+    xunlink(_wpath());
 
     # Database A: 30 committed rows, then a transaction abandoned without
     # commit or rollback, so its .wal survives — exactly as after a crash.
@@ -6557,7 +6607,7 @@ fn test_wal_bound_to_database() {
     patra_exec(a, "DELETE FROM t WHERE id = 1");
     assert_eq(_wal_snapshot() > 0, 1, "A's WAL captured before the close");
     patra_close(a);
-    syscall(SYS_UNLINK, _wpath());
+    xunlink(_wpath());
 
     # Replace the database, then drop A's orphaned WAL beside it — the shape of
     # restoring a backup over a database that had crashed. Before v1.13.8 the
@@ -6589,7 +6639,7 @@ fn test_wal_bound_to_database() {
     assert_eq(patra_result_get_int(rs2, 0, 0), 77, "and holds our value");
     patra_result_free(rs2);
     patra_close(b);
-    syscall(SYS_UNLINK, _wpath());
+    xunlink(_wpath());
 
     # A database's OWN WAL must still be replayed — binding must not cost us
     # crash recovery.
@@ -6625,7 +6675,7 @@ fn test_wal_bound_to_database() {
     patra_close(f);
 
     cleanup();
-    syscall(SYS_UNLINK, _wpath());
+    xunlink(_wpath());
 }
 
 # -- v1.13.8: WHERE type mismatch is an error (audit S2-7) ---
@@ -6702,6 +6752,46 @@ fn test_init_preserves_log_level() {
 
     # Restore something neutral for the rest of the suite.
     sakshi_set_level(SK_WARN);
+}
+
+# -- v1.15.0: the open flags the sweep respelled ----
+
+# 1.15.0 spelled patra's base open flags symbolically; they had been x86_64
+# numbers, wrong on Darwin. On Linux the values did not change, so nothing else
+# in the suite notices if a bit goes missing. These pin the two whose loss would
+# otherwise pass: O_EXCL in _pt_file_create and O_TRUNC in wal_start.
+fn test_open_flags() {
+    test_group("create refuses an existing file; wal_start truncates (1.15.0)");
+    cleanup();
+    var fd = _pt_file_create(_tpath);
+    assert(fd >= 0, "first create succeeds");
+    sys_close(fd);
+    var fd2 = _pt_file_create(_tpath);
+    assert_eq(fd2, 0 - 1, "_pt_file_create refuses an existing file (O_EXCL)");
+    if (fd2 >= 0) { sys_close(fd2); }
+
+    # A leftover 1 MB file at <db>.wal, planted after open so that recovery does
+    # not see it. The transaction's WAL must replace it, not overwrite its head.
+    cleanup();
+    xunlink(_wpath());
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (id INT, v INT)");
+    var jfd = file_open(_wpath(), O_RDWR | O_CREAT | O_TRUNC, 420);
+    var junk = fl_alloc(65536);
+    memset(junk, 90, 65536);
+    for (var k = 0; k < 16; k = k + 1) { sys_write(jfd, junk, 65536); }
+    fl_free(junk);
+    sys_close(jfd);
+    patra_begin(db);
+    patra_exec(db, "INSERT INTO t VALUES (1, 1)");
+    var wfd = file_open(_wpath(), O_RDONLY, 0);
+    var wsz = xlseek(wfd, 0, 2);
+    sys_close(wfd);
+    assert_lt(wsz, 1048576, "wal_start truncated a leftover WAL (O_TRUNC)");
+    patra_rollback(db);
+    patra_close(db);
+    cleanup();
+    xunlink(_wpath());
 }
 
 fn main() {
@@ -7001,6 +7091,8 @@ fn main() {
     test_wal_symlink_refused();
     test_wal_incomplete_restore_keeps_wal();
     test_tx_refuses_without_wal();
+    test_stdlib_seed_and_sync();
+    test_open_flags();
     # v1.11.0 thread-safety (P1)
     test_concurrency();
     test_read_concurrency();
@@ -7015,4 +7107,4 @@ fn main() {
 }
 
 var r = main();
-syscall(SYS_EXIT, r);
+sys_exit(r);

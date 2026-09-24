@@ -16,6 +16,8 @@ include "lib/vec.cyr"
 include "lib/atomic.cyr"
 include "lib/sync.cyr"
 include "lib/thread_local.cyr"
+include "lib/chrono.cyr"
+include "lib/random.cyr"
 include "lib/sakshi.cyr"
 
 # ── Modules (order matters: sql before where before table) ──
@@ -283,7 +285,7 @@ fn patra_close(db): i64 {
     pc_unregister(fd);
 
     if (load64(db + DB_BATCH_PENDING) != 0) {
-        syscall(SYS_FDATASYNC, fd);
+        _pt_fdatasync(fd);
     }
     pg_free(load64(db + DB_HDR));
     sys_close(fd);
@@ -345,7 +347,7 @@ fn patra_rows_affected(db): i64 {
 # Set group-commit mode (PATRA_SYNC_FULL or PATRA_SYNC_BATCH); flushes first.
 fn patra_set_sync_mode(db, mode): i64 {
     if (load64(db + DB_BATCH_PENDING) != 0) {
-        syscall(SYS_FDATASYNC, load64(db + DB_FD));
+        _pt_fdatasync(load64(db + DB_FD));
         store64(db + DB_BATCH_PENDING, 0);
     }
     store64(db + DB_SYNC_MODE, mode);
@@ -358,7 +360,7 @@ fn patra_get_sync_mode(db): i64 { return load64(db + DB_SYNC_MODE); }
 # Force durability of any pending BATCH-mode writes. No-op in FULL mode.
 fn patra_flush(db): i64 {
     if (load64(db + DB_BATCH_PENDING) != 0) {
-        syscall(SYS_FDATASYNC, load64(db + DB_FD));
+        _pt_fdatasync(load64(db + DB_FD));
         store64(db + DB_BATCH_PENDING, 0);
     }
     return PATRA_OK;
@@ -401,7 +403,7 @@ fn _db_hdr_commit(db, fd, hdr): i64 {
         if (r != PATRA_OK) { return r; }
         var pending = load64(db + DB_BATCH_PENDING) + 1;
         if (pending >= PATRA_BATCH_FLUSH_N) {
-            syscall(SYS_FDATASYNC, fd);
+            _pt_fdatasync(fd);
             pending = 0;
         }
         store64(db + DB_BATCH_PENDING, pending);

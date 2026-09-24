@@ -6,7 +6,7 @@
 
 - **SQL subset** — CREATE TABLE, CREATE INDEX, ALTER TABLE (ADD / DROP COLUMN + RENAMEs), DROP TABLE, INSERT (with `OR IGNORE`), SELECT (*, column list, aggregates), WHERE (including LIKE), UPDATE, DELETE, ORDER BY, LIMIT, VACUUM
 - **Aggregates** — COUNT(*), SUM, MIN, MAX with WHERE support
-- **B-tree storage** — pages in a single `.patra` file, crash-safe with WAL + flock
+- **B-tree storage** — pages in a single `.patra` file, crash-safe with WAL + flock on Linux (other targets, and one open multi-process recovery gap: [SECURITY.md](SECURITY.md#supported-deployments))
 - **Indexes** — B-tree indexes on INT *and* STR columns (STR keys via djb2-64 hash + verify-on-hit)
 - **Transactions** — BEGIN/COMMIT/ROLLBACK with write-ahead logging
 - **Durability modes** — per-write fsync (default) or opt-in group-commit / batched fsync (`patra_set_sync_mode`)
@@ -21,7 +21,7 @@
 - **Own the stack** — no C database underneath. Cyrius reads and writes the file format directly.
 - **Small** — target compiled size: 5-10KB. The database engine smaller than most database *clients*.
 - **Enough SQL** — not a full RDBMS. The subset that AGNOS services actually need: audit trails, config storage, agent state, knowledge indexes.
-- **flock concurrency** — advisory file locking via syscall. Multiple processes can safely read/write.
+- **flock concurrency** — advisory file locking. Multiple processes can read and write one file on Linux and macOS; see [SECURITY.md](SECURITY.md#supported-deployments) for the caveats.
 - **Fixed-size pages** — 4KB pages, B-tree index, sequential scan fallback for small tables.
 
 ## Architecture
@@ -34,6 +34,7 @@ patra/
     table.cyr     — table metadata, schema, column types
     btree.cyr     — B-tree index (insert, search, delete, iterate)
     page.cyr      — 4KB page layout, read/write, free list
+    pcache.cyr    — opt-in shared page cache (default off)
     file.cyr      — .patra file format, header, flock locking
     where.cyr     — WHERE clause evaluation (=, !=, <, >, <=, >=, LIKE, AND, OR)
     row.cyr       — row encoding/decoding (fixed-width fields + chain refs)
@@ -82,7 +83,7 @@ from the version-pinned snapshot.
 ```toml
 [deps.patra]
 git = "https://github.com/MacCracken/patra.git"
-tag = "1.14.3"
+tag = "1.15.0"
 ```
 
 > ⚠ **If you are carrying a `[deps.sakshi]` block "required alongside patra",
@@ -101,19 +102,21 @@ tag = "1.14.3"
 > levels away — measured as
 > `agnosai -> bote -> [deps.libro] -> [deps.patra] -> [deps.sakshi] 2.4.2`.
 
-patra's threading primitives come from the cyrius stdlib. A consumer vendoring
-`dist/patra.cyr` must declare these in its own `[deps].stdlib`, or the link fails
-on undefined `atomic_*` / `mutex_*` / `thread_local_*`:
+patra's threading primitives, clock and CSPRNG come from the cyrius stdlib. A
+consumer vendoring `dist/patra.cyr` by hand should declare the same leaves in its
+own `[deps].stdlib` (`chrono` and `random` since 1.15.0), so that `cyrius deps`
+vendors and locks them. The bundle carries its own `include "lib/…"` lines,
+which resolve from the pinned toolchain, so a leaf left undeclared still builds.
+It is just missing from your lock:
 
 ```toml
 [deps]
-stdlib = ["syscalls", "string", "alloc", "freelist", "io", "fmt", "str", "vec", "atomic", "sync", "thread_local", "sakshi"]
+stdlib = ["syscalls", "string", "alloc", "freelist", "io", "fmt", "str", "vec", "atomic", "sync", "thread_local", "chrono", "random", "sakshi"]
 ```
 
-The single-include bundle (`dist/patra.cyr`) needs the same list. It references
-`sakshi_error` without defining it, and **`dist/patra.deps` does list `sakshi`** —
-12 leaves, matching `[deps].stdlib` exactly, and CI fails the build if those two
-numbers ever disagree.
+The bundle's sidecar, **`dist/patra.deps`, lists the same 14 leaves**, `sakshi`
+included, and CI fails the build if its count and `[deps].stdlib`'s ever
+disagree.
 
 > ⚠ This paragraph asserted the opposite ("`dist/patra.deps` does not list
 > `sakshi`") from v1.13.2 until v1.13.12, and used it as the premise for a
@@ -121,11 +124,11 @@ numbers ever disagree.
 > through 1.13.1 — a `cyrius distlib` parser bug, fixed upstream in cyrius
 > 6.5.28 — and the doc was never corrected once it stopped being true.
 
-**Thread-safety**: a patra db handle is safe to share across threads — auto-commit
-statement calls (`patra_exec` / `patra_query` / the prepared variants /
-`patra_insert_row`) are internally consistent. Explicit `patra_begin … patra_commit`
-spans are *not* internally serialized across **threads**; keep a transaction on
-one thread. Across **processes** the span is protected: since v1.13.3 statements
+**Thread-safety**: **give each reading thread its own handle** (`patra_open`).
+Concurrent `SELECT`s on one shared handle are *not* safe: see the ⚠ note under
+*Concurrent readers* below. Auto-commit *writes* on a shared handle are
+serialized across threads (and tested); explicit `patra_begin … patra_commit`
+spans are *not*, so keep a transaction on one thread. Across **processes** the span is protected: since v1.13.3 statements
 defer to the transaction's exclusive `flock` rather than releasing it, so a
 transaction holds its lock from `BEGIN` to `COMMIT`/`ROLLBACK`.
 
@@ -138,7 +141,9 @@ handles and processes, and the OS page cache serves shared pages from RAM.
 `patra_init()` is still called once on the main thread before spawning workers
 (it installs that thread's TLS block); worker threads spawned via the cyrius
 `thread` module inherit one automatically, but a foreign (non-cyrius) thread must
-call `thread_local_init()` once before its first patra call. > ⚠ **Corrected in 1.14.0.** The feature list above used to say "a shared
+call `thread_local_init()` once before its first patra call.
+
+> ⚠ **Corrected in 1.14.0.** The feature list above used to say "a shared
 > handle is also safe across threads (since 1.11.0)", which contradicted this
 > section two screens below it and ADR-0002. **It is not safe.** Since 1.12.0
 > the read path is lock-free by design, so concurrent `SELECT`s on ONE handle
@@ -149,10 +154,12 @@ call `thread_local_init()` once before its first patra call. > ⚠ **Corrected i
 > serialized on the process mutex, and was never revised when 1.12.0 removed
 > that serialization from reads.
 >
-> **Open one handle per thread.** That is the documented model
-> (connection-per-thread), it is what the benchmarks measure, and it is the only
-> configuration the test suite exercises. Sharing a handle across threads is
-> unsupported; a future release may add `SYS_PREAD64`-based positional I/O,
+> **Open one handle per reading thread.** That is the documented model
+> (connection-per-thread), and it is what the benchmarks and the concurrent-read
+> tests measure. The suite also drives auto-commit *writes* from four threads on
+> one shared handle (`test_concurrency`), which the statement mutex serializes;
+> it is *reads* on a shared handle that are unsupported. A future release may
+> add `SYS_PREAD64`-based positional I/O,
 > which would remove the fd-offset half of the problem, but the header buffer
 > would still need its own fix.
 
@@ -236,7 +243,7 @@ patra_finalize(st);
 
 Both read handle-local state set at exec time and are unaffected by `SELECT` / DDL; a null handle returns `0`.
 
-**Atomic readback (concurrent writers)** — `patra_last_insert_id` / `patra_rows_affected` read handle-local fields in a *separate* call from the write. Under a lock-free worker pool sharing one handle, a concurrent write can land between the two and overwrite the field, so the readback can return another worker's value. For that model, use the atomic variants, which capture the value inside the same statement-mutex critical section as the write:
+**Atomic readback (concurrent writers)** — `patra_last_insert_id` / `patra_rows_affected` read handle-local fields in a *separate* call from the write. When a worker pool shares one handle for *writes* (safe for auto-commit writes; not for concurrent reads, see *Thread-safety*), a concurrent write can land between the two and overwrite the field, so the readback can return another worker's value. For that model, use the atomic variants, which capture the value inside the same statement-mutex critical section as the write:
 
 - `patra_insert_returning(db, stmt, out_id)` — run a prepared `INSERT` and write its assigned id to `out_id` (a writable i64 cell; pass `0` to ignore). Returns the exec status. Equivalent to `patra_exec_prepared` + `patra_last_insert_id`, but race-free across concurrent writers; only meaningful on an `AUTOINCREMENT` target.
 - `patra_exec_returning(db, stmt, out_affected)` — run a prepared `INSERT` / `UPDATE` / `DELETE` and write its affected-row count to `out_affected`. The race-free pairing of `patra_rows_affected`.

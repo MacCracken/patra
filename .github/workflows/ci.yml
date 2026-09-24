@@ -34,6 +34,43 @@ jobs:
       - name: Resolve deps
         run: cyrius deps
 
+      - name: No raw syscalls or numeric open flags (stdlib wrappers only)
+        # patra reaches the kernel only through stdlib wrappers — sys_* from
+        # lib/syscalls*.cyr, the x* / file_* family in lib/io.cyr, random_bytes,
+        # clock_epoch_secs, and src/file.cyr's _pt_fdatasync — and spells open(2)
+        # flags as O_* symbols. A raw `syscall(N, …)`, or `syscall(SYS_NAME, …)`,
+        # hard-codes one target's ABI: SYS_UNLINK does not exist on aarch64, 75
+        # (fdatasync) is unrouted on Windows. A numeric flag does the same one
+        # step removed: 194 and 578 are x86 bit patterns that decode without
+        # O_CREAT / O_TRUNC on Darwin. 1.15.0 removed the last 345 syscall sites
+        # and 14 numeric flags. Comments are stripped first, so prose that names
+        # a number stays legal. Drop-in from libro 2.10.3, plus the flag check,
+        # which rejects a digit anywhere in the flags argument (`O_NOFOLLOW + 194`
+        # too). Known limits: a call split across lines is not seen, a `#` inside a
+        # string literal hides the rest of that line, and a string literal
+        # containing `syscall(` is flagged.
+        run: |
+          FILES="src/*.cyr tests/tcyr/*.tcyr tests/bcyr/*.bcyr fuzz/*.fcyr programs/*.cyr"
+          SYS=$(for f in $FILES; do
+            sed -E 's/#.*$//' "$f" | grep -nE '\bsyscall[[:space:]]*\(' | sed "s|^|$f:|" || true
+          done)
+          FLAGS=$(for f in $FILES; do
+            sed -E 's/#.*$//' "$f" | grep -nE '\b(file_open(_r)?|sys_open|xopen)[[:space:]]*\([^,]*,[^,)]*[0-9]' | sed "s|^|$f:|" || true
+          done)
+          fail=0
+          if [ -n "$SYS" ]; then
+            echo "FAIL: raw syscall(...) — call the stdlib wrapper instead:"
+            echo "$SYS"
+            fail=1
+          fi
+          if [ -n "$FLAGS" ]; then
+            echo "FAIL: numeric open(2) flags — spell them as O_* symbols:"
+            echo "$FLAGS"
+            fail=1
+          fi
+          [ $fail -eq 0 ] || exit 1
+          echo "No raw syscalls or numeric open flags: clean."
+
       - name: Format check
         # Per-file loop, deliberately NOT `cyrfmt --check src/*.cyr`: cyrfmt
         # reads only argv[1] and silently ignores the rest, so the glob form

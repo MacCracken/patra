@@ -61,9 +61,9 @@ fn main() {
     patra_close(db);
 
     # Clean up
-    syscall(SYS_UNLINK, "demo.patra");
+    xunlink("demo.patra");
     return 0;
 }
 
 var exit_code = main();
-syscall(SYS_EXIT, exit_code);
+sys_exit(exit_code);

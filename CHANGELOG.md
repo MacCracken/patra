@@ -5,6 +5,287 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.15.0] - 2026-09-23 — no raw syscalls: every kernel touch goes through the stdlib
+
+Closes [`docs/development/issues/archive/2026-09-21-raw-syscall-sweep-and-gate.md`](docs/development/issues/archive/2026-09-21-raw-syscall-sweep-and-gate.md),
+filed 2026-09-21 from libro 2.10.3, and moves the toolchain pin to cyrius 6.6.6.
+
+Gates: **1,301 assertions** (was 1,288) · 8 / 8 fuzz · 41 benchmarks · libro
+15/15 · vidya 19/19 · fmt + lint 0-warn · vet 0 untrusted / deny 0 violations ·
+`dist/` in sync, sidecar **14** leaves == 14 declared · a new **"No raw syscalls
+or numeric open flags"** gate. Binary **225,496 B** DCE-on (1.14.3: 225,344) /
+340,184 B DCE-off.
+
+⭐ **The whole suite now runs on aarch64.** Under `qemu-aarch64` (user mode, on
+the x86_64 verification host): **1,301 / 1,301** assertions, **8 / 8** fuzz
+harnesses, **3 / 3** programs, every one built warning-free. Before this release
+the unit suite, all three programs and six of the eight fuzz harnesses **did not
+compile** for aarch64 (`SYS_UNLINK` does not exist there), so patra's aarch64
+support had never been exercised by its own tests.
+
+### Changed — toolchain 6.6.4 → 6.6.6, source-change-free on its own
+
+- Bumped and verified **before** any source change: build, 1,288 / 1,288, 8 / 8
+  fuzz, libro, vidya, fmt and lint all green; `dist/` regenerates byte-identical;
+  the demo's output is byte-identical. `cyrius deps` re-vendored 14 of the 27
+  snapshot files and added two (`alloc_cx.cyr`, `args_agnos.cyr`). The folded
+  sakshi is unchanged at **2.5.2**; it already was at 6.6.4, although
+  `docs/development/state.md` still said 2.4.12.
+- **+136 B DCE-on / +4,232 B DCE-off**, attributable only to the toolchain *as a
+  unit*. `cyrius build` re-syncs every declared stdlib leaf into `lib/` from the
+  pinned toolchain before it compiles, even with `--no-deps`, so an old `lib/`
+  copied into a scratch tree is overwritten and compiler and snapshot cannot be
+  separated. Pin dispatch itself works: scratch manifests pinned to 6.6.0, 6.6.2
+  and 6.6.6 each run their own compiler, with no drift warning.
+- **What 6.6.6 fixes for patra with no patra change** (cyrius CHANGELOG [6.6.6]):
+  PE `open` now honours the access mode, `O_TRUNC` and `O_APPEND`. Before, on
+  Windows, `jsonl_append` wrote every record at offset 0 over the one before, and
+  a rewritten `<db>.wal` kept the old file's tail. ⚠ **Not verified on Windows**;
+  the real-hardware check `roadmap.md` asks for is still unrun.
+- **The two cross-build warnings carried "open but unfiled" since v1.13.12 are
+  gone**, fixed upstream without a filing. `--aarch64` has been warning-free
+  since 6.6.4 (`xflock`'s aarch64 spelling, the `raw syscall 32` false
+  positive), and `--agnos` since 6.6.6 (`lib/io.cyr` now includes
+  `args_agnos.cyr`, the undefined `_agnos_getenv`). Under 6.6.4, and so in
+  1.14.3, `--agnos` still emitted that warning. Measured with a count of
+  `warning:` occurrences, since the first diagnostic is glued onto the
+  `compile …` line.
+- **`[deps] stdlib` gains `chrono` and `random`** (12 → 14 leaves), which supply
+  `clock_epoch_secs` and `random_bytes`. `dist/patra.deps` lists both, so
+  `[deps.patra]` consumers get them from `cyrius deps` with nothing to change. A
+  consumer that vendors `dist/patra.cyr` by hand should add both to its own
+  `[deps].stdlib`, so `cyrius deps` vendors and locks them. It is not a build
+  break: the bundle carries its own `include "lib/…"` lines, which resolve from
+  the pinned toolchain, and a consumer still declaring the old 12 leaves builds
+  and runs (checked, `patra_open` and a transaction included). DCE-off grows
+  **+16,448 B** from the two modules' unused API; the DCE-on build, which is what
+  CI and release ship, grows +64 B.
+- ⚠ **`cyrius deps` did not lock the two new leaves.** It vendored
+  `lib/chrono.cyr` and `lib/random.cyr` but left `cyrius.lock` at 29 entries,
+  and `cyrius deps --verify` passed, since it checks only what the lock lists.
+  `cyrius deps --relock` (accepted by the CLI, absent from `cyrius help`) wrote
+  all 31. The two new hashes match the 6.6.6 toolchain's copies, and the other 29
+  entries are unchanged. Anyone adding a stdlib leaf will hit the same thing.
+
+### Changed — every kernel touch goes through a stdlib wrapper
+
+**346 raw `syscall(…)` calls on 345 lines** (the issue's figure counts lines, as
+the new gate does): 24 in `src/`, 322 in the harnesses.
+
+| was | now | calls |
+|---|---|---:|
+| `syscall(228, 0, &ts)` and per-target arms (`_wal_epoch_secs`), plus a separate agnos `syscall(SYS_TIME_UNIX)` arm | `clock_epoch_secs()`; `_wal_epoch_secs` is deleted | 4 |
+| `syscall(SYS_GETRANDOM, buf, n, 0)`, with a Windows arm calling `sys_getrandom` | `random_bytes(buf, n)`, one path | 2 |
+| `syscall(SYS_LSEEK, …)` | `xlseek(…)` | 5 |
+| `syscall(SYS_FLOCK, fd, op)` | `xflock(fd, op)` | 1 |
+| `syscall(SYS_FDATASYNC, fd)` | `_pt_fdatasync(fd)`, below | 12 |
+| `syscall(SYS_EXIT, n)` | `sys_exit(n)` (still `exit(2)`, as before) | 216 |
+| `syscall(SYS_UNLINK, p)` | `xunlink(p)` | 76 |
+| `syscall(SYS_CLOSE, fd)` / `syscall(SYS_WRITE, …)` | `sys_close` / `sys_write`, the spelling `src/` already uses | 15 / 6 |
+| `syscall(SYS_OPEN, p, 194 \| 578, 420)` | `file_open(p, O_RDWR \| O_CREAT \| O_EXCL`/`O_TRUNC, 420)` | 6 |
+| `syscall(88, target, link)` (x86_64 `symlink`; 88 is `utimensat` on aarch64) | `xsymlink(target, link)` | 1 |
+| `syscall(SYS_MKDIR, …)` / `syscall(SYS_RMDIR, …)` | `xmkdir` / `xrmdir` | 2 |
+
+- **Five `sys_unlink(path)` calls in `fuzz/fuzz_stmtseq.fcyr` are `xunlink` now.**
+  They were stdlib wrappers, not raw syscalls, but agnos's `sys_unlink` takes a
+  length, so that harness did not build for agnos. Every harness, the suite,
+  the bench and the programs now cross-build for agnos with no warnings, and for
+  Windows with only the 5 stdlib-sourced ones.
+
+- **fdatasync goes through one `_pt_fdatasync(fd)`** in `src/file.cyr`:
+  `sys_fdatasync` on Linux and macOS, the stdlib's `xfsync` on agnos (a
+  whole-filesystem sync, exactly as before) and on Windows (a no-op returning 0;
+  see *Fixed*). The stdlib has no `xfdatasync`. Asking for one is option 2 of the
+  issue, written up in `roadmap.md` but **not filed**.
+- **`src/file.cyr` defines no syscall number, `O_*` or `LOCK_*` value of its
+  own.** `enum Sync` (`SYS_FDATASYNC = 12` / `75`), `SYS_FLOCK = 73` and patra's
+  copy of `LOCK_SH` / `LOCK_EX` / `LOCK_NB` / `LOCK_UN` are gone; the lock values
+  come from `lib/io.cyr`, which defines them on every target. A private copy of a
+  stdlib ABI constant is how the WAL followed symlinks on aarch64 until 1.14.3.
+- The three open-flag sites in `src/` that still spelled their base flags as
+  x86_64 numbers (`_pt_file_create`, `_pt_file_open`, `wal_start`) are symbolic
+  now, and `wal_recover`'s implicit read-only open says `O_RDONLY`. On Linux the
+  values are identical, measured at runtime on x86_64 and on aarch64 under qemu;
+  on macOS they were not (*Fixed*).
+
+### Fixed — Windows: every write inside a transaction failed
+
+fdatasync (x86 number 75) is not a routed PE syscall, so on Windows it returned
+-ENOSYS (-38; the compiler's own diagnostic says so). Eleven call sites ignored
+the return. `wal_log_page`'s write-ahead check did not, so **the first write
+inside any explicit transaction returned `PATRA_ERR_IO`** on Windows.
+`_pt_fdatasync` → `xfsync` returns 0 there, so transactions work, `ROLLBACK`
+included. **What they do not give on Windows is durability or crash
+atomicity, and autocommit never did either.** No flush is wired on PE, so no
+patra write there has ever been flushed. And with no `flock`, recovery never
+runs on open, so a transaction interrupted by a crash stays partly applied: the
+next `BEGIN`'s `O_TRUNC`, which 6.6.6 now honours on PE, discards its WAL. The
+alternative was to keep transactions failing until a flush is wired; this
+release follows the sweep's recorded design (`xfsync` wherever fdatasync is
+missing). `roadmap.md` lists the upstream reroutes that would close both gaps. The Windows cross-build's unrouted-syscall
+warnings go **18 → 5**, and a stdlib-only build reproduces all 5, so patra's own
+contribution is now **0**.
+
+By inspection plus the compiler's diagnostic. Not run on Windows.
+
+### Fixed — macOS: a new database could not be created, and a WAL was not truncated
+
+`_pt_file_create` passed `194 + O_NOFOLLOW` and `wal_start` `578 + O_NOFOLLOW`,
+x86_64 numbers directly under a 1.14.3 comment reading "Never hardcode an O_*
+value". On Darwin `O_CREAT` is 0x200, `O_TRUNC` 0x400 and `O_EXCL` 0x800, so 194
+decodes to `O_RDWR|O_ASYNC|O_FSYNC` (no create: **`patra_open` of a new path
+failed**) and 578 to `O_RDWR|O_ASYNC|O_CREAT` (no truncate: a rewritten WAL kept
+the previous file's tail, the same shape as the Windows gap 6.6.6 closed).
+
+By inspection of `lib/syscalls_macos.cyr` and the aarch64 peer's
+`CYRIUS_TARGET_MACOS` block. The tree **compiles** for both Mach-O targets
+(`CYRIUS_MACHO=1` / `CYRIUS_MACHO_ARM=1`) with no warning the pre-sweep tree
+lacked. It has not been run on macOS. There is no Mach-O runner on this host.
+
+### Security — macOS: database identities and WAL salts never came from the CSPRNG
+
+Darwin's getentropy route returns **0** on success. The stdlib's `sys_getrandom`
+normalizes that to the byte count; the raw `syscall(SYS_GETRANDOM, …) == n` did
+not. So on macOS every `HDR_DBID` and every WAL salt came from the time + counter
+fallback, which is predictable. Two processes that each created a database in
+the same second, with the same fallback count, got the **same `HDR_DBID`**, which
+defeats the 1.13.8 binding of a WAL to its database between them.
+`random_bytes` fixes it and loops short reads, which the raw call never did.
+Same basis as above: inspection, not a macOS run.
+
+### Added — CI gate "No raw syscalls or numeric open flags"
+
+libro 2.10.3's drop-in, extended with a check for numeric `open(2)` flags passed
+to `file_open` / `file_open_r` / `sys_open` / `xopen`, since that is the variant
+1.14.3 half-fixed. It rejects a digit anywhere in the flags argument, so
+`O_NOFOLLOW + 194` and `(194)` are caught too. Comments are stripped first, so
+prose naming a number stays legal. Verified to fail when it should: over the
+pre-sweep tree it reports all **345** syscall lines and **14** numeric flags,
+and planted variants (`syscall(60, 0)`, `syscall(SYS_GETPID)` with a trailing
+comment, `O_NOFOLLOW + 194`, `O_RDWR | 64`, `(194)`, `file_open_r`) are each
+named by `file:line`, while the same text inside a comment is not. Passes under
+both `bash -e` and `bash -eo pipefail`. Known limits, written into the step: a
+call split across lines is not seen, a `#` inside a string literal hides the rest
+of its line, and a string literal containing `syscall(` is flagged. The rule is
+in CLAUDE.md.
+
+### Tests
+
+**+13 assertions**, in three places.
+
+- **A new group, *seeds and syncs go through the stdlib wrappers (1.15.0)*** (+9).
+  Only the fallback advances `_wal_tx_counter`, so an unchanged counter across 16
+  `_pt_rand64` calls and a salt draw proves the CSPRNG path ran. The existing
+  "distinct identities" test cannot tell: the counter makes two same-process ids
+  differ either way. The group also checks that the two salts differ, and that
+  `_pt_fdatasync` succeeds on a live fd and **fails** on a closed one and on -1.
+  `wal_log_page` reads that sign. The failure assertions are compiled out on agnos
+  and Windows, where `xfsync` reports success by design. A check that the
+  fallback's clock reads a plausible epoch is a sanity check of `chrono` only:
+  the fallback path itself cannot be forced while the CSPRNG works.
+- **A new group, *create refuses an existing file; wal_start truncates (1.15.0)***
+  (+3). The flags were respelled without changing their Linux values, so nothing
+  else in the suite noticed a missing bit: a review mutation dropping `O_TRUNC`
+  from `wal_start`, or `O_EXCL` from `_pt_file_create`, passed all 1,298. Now the
+  first is caught by a 1 MB junk file planted at `<db>.wal`, which must shrink
+  once a transaction starts, and the second by a second create of an existing
+  file, which must fail.
+- **The symlink test asserts that its symlink was actually planted** (+1).
+
+**Mutation-verified five ways**, each failing on the intended assertion:
+- the rand64 draw treated as failed (the Darwin shape);
+- the salt draw treated as failed;
+- `_pt_fdatasync` swallowing errors;
+- `O_TRUNC` dropped;
+- `O_EXCL` dropped.
+
+### Performance — flat; one microbenchmark cluster moved, and the parser does identical work
+
+Four interleaved rounds per binary on the verification host, which was shared
+with another session's parallel test runs (load average 2.9 – 3.9). Medians of
+each run's `avg`; `lib/bench.cyr` was rewritten in 6.6.5 and its `min` / `max`
+changed meaning, so only `avg` is compared. Columns are 6.6.4 → 6.6.6 → 1.15.0.
+The bench binary predates the three open-flag tests, which live in the unit
+suite and cannot affect it.
+
+- **The paths the sweep touched are flat within their spread.**
+  `insert_500_sync_full` 941.6 → 923.1 → 949.3 µs (spread 7.3 %),
+  `insert_2k_in_txn` 95.6 → 96.4 → 97.8 µs (WAL + fdatasync; 18.5 %),
+  `insert_500_sync_batch` 57.5 → 56.9 → 60.3 µs (19.5 %), `jsonl_append_1k`
+  2.59 → 2.67 → 2.58 µs. On Linux `_pt_fdatasync` issues the same syscall as
+  before, so these could only move through noise.
+- **No benchmark moves more than 6.3 % across the toolchain step.** The largest
+  are `bytes_read_2kb` +6.3 %, inside its 9.1 % spread, and
+  `select_idx_500_vacuumed` −6.0 % (faster), just past its 5.7 %. "Spread" here
+  is (max − min) / median of one binary's four round averages, the largest of
+  the three binaries.
+- **The five `parse_*` benchmarks read +2.4 % to +5.3 %.** An earlier build of
+  this same sweep read **+16 % to +22 %** on them, with consistent rounds. The two builds differ only in how the bench harness spells
+  close (`file_close` from `lib/io.cyr` versus `sys_close`), which cannot reach
+  the parser. So the parser's work was measured directly: a parse-only driver,
+  built from the pre- and post-sweep trees at two iteration counts, with
+  user-space instructions counted by `perf_event_open`. **The parser retires
+  exactly 799,726 instructions per five-parse iteration both before and after
+  the sweep**, and minimum cycles per iteration differ by 0.1 % (169,826 vs
+  169,652). The movement is code placement: which unrelated functions are live
+  ahead of `sql.cyr` in a given binary. The sweep added no parser work. Any
+  future edit upstream of `sql.cyr` can move these five by the same amount.
+
+### Documentation
+
+- **README's thread-safety text still contradicted itself.** 1.14.0 corrected the
+  feature list and the Usage note, but a paragraph under *Dependencies* still said
+  a handle is "safe to share across threads". Separately, the 1.14.0 note called
+  connection-per-thread "the only configuration the test suite exercises", which
+  is untrue: `test_concurrency` drives auto-commit writes from four threads on one
+  shared handle. All three passages now state the actual contract. Concurrent
+  `SELECT`s on one handle are unsafe; auto-commit writes on a shared handle are
+  serialized and tested. The atomic-readback section is scoped to write-only
+  sharing. The 1.14.0 correction note had also lost its leading blank line and
+  rendered inline; fixed.
+- `docs/development/state.md`, `roadmap.md` and `docs/doc-health.md` were stale
+  since v1.14.1: 1.14.2 and 1.14.3 never refreshed them. `state.md` still read
+  version 1.14.1, pin 6.6.0 and sakshi 2.4.12, and `roadmap.md` pin 6.6.0. All
+  three are refreshed, as is `BENCHMARKS.md`'s currency note (it read v1.13.12
+  / 6.6.0 / 40 benchmarks), along with the manifest comment's `file:line` citations
+  (`src/file.cyr:206` had been wrong since before 1.14.3 and is now a function
+  name).
+- **`SECURITY.md` said patra "uses Linux syscall numbers directly"**, down to
+  "`O_NOFOLLOW` value `0x20000`". That was untrue for `O_NOFOLLOW` since 1.14.3
+  and is now untrue everywhere. The row now states what each target gets. The
+  symlink row gains the WAL's `O_NOFOLLOW` opens (1.14.0) and Windows'
+  non-enforcement; the WAL row's salt source is `random_bytes`.
+- `roadmap.md` said patra "does not use `O_EXCL`", so the Windows
+  `CREATE_NEW`-over-a-dangling-symlink case "does not apply". **It does:**
+  `_pt_file_create` opens `O_EXCL`. Corrected in its new *Platforms* section,
+  which states what patra guarantees on each target, with the Windows gaps
+  (no flush, no flock and so no WAL recovery on open, `O_NOFOLLOW` unenforced).
+
+### Found, not fixed
+
+- 🔴 **WAL recovery runs only at `patra_open`**:
+  [`docs/development/issues/2026-09-23-wal-recovery-runs-only-at-open.md`](docs/development/issues/2026-09-23-wal-recovery-runs-only-at-open.md).
+  This is pre-existing and reproduces identically on 1.14.3. When one process
+  dies mid-transaction while another holds the database open, the survivor reads
+  the dead transaction's uncommitted rows. If it then begins a transaction, that
+  truncates the orphaned WAL and makes those rows permanent. If it writes in
+  autocommit instead, the committed row is **lost** at the next open, when the
+  WAL is replayed over it. Every call returns `PATRA_OK`. Found by the code
+  review of this cut and reproduced with two processes. The fix changes the lock
+  protocol and gets its own cut.
+- **Filed with agnos**:
+  `agnos/docs/development/issues/2026-09-23-flock-never-waits-and-no-caller-spins.md`.
+  By design `flock`#59 returns -1 on a contended lock and expects "the ring-3
+  caller" to poll-spin, but no ring-3 layer does: cyrius's `xflock` calls it
+  once, and patra ignores the result at its 14 `LOCK_EX` and 3 `LOCK_SH` sites.
+  So on agnos, locks do not hold between processes that contend. Found by
+  reading the kernel, not reproduced. patra does not work around kernel lock
+  semantics.
+- **`_pc_alloc` never checks `alloc()`** (`src/pcache.cyr`) when it builds the
+  opt-in page cache's tables and 1,024 page buffers. A refused mapping is a null
+  store, not an error. Pre-existing, behind `patra_cache_enable`, and only under
+  memory exhaustion. Recorded in `roadmap.md`.
+
 ## [1.14.3] - 2026-09-13
 
 ### Fixed

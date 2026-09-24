@@ -15,12 +15,12 @@
 #                  [8..4103]    before-image page (4096 bytes)
 #                  [4104..4111] djb2-derived hash of (salt1, pg, data, salt2)
 #
-# Salts are drawn from SYS_GETRANDOM with a time+counter fallback, and are
-# re-generated on every wal_start so a WAL from one transaction is useless
-# to inject into another. Records whose hash does not match the header's
-# salts abort replay at that point; earlier records still apply. Bare or
-# old-version WAL files are refused outright and left in place so an
-# operator can inspect them.
+# Salts are drawn from the OS CSPRNG (random_bytes) with a time+counter
+# fallback, and are re-generated on every wal_start so a WAL from one
+# transaction is useless to inject into another. Records whose hash does not
+# match the header's salts abort replay at that point; earlier records still
+# apply. Bare or old-version WAL files are refused outright and left in place
+# so an operator can inspect them.
 
 # ── Per-database WAL state (1.14.0) ───────────────
 #
@@ -71,29 +71,6 @@ var _wal_tx_counter = 0;
 # wal_start for a consumer that skipped it. Builds into a local and publishes
 # _wal_slots LAST — the same publish-order rule v1.13.11 had to learn in
 # pcache.cyr, where a guard tested the very global it assigned first.
-# 1.14.3 (cyrius 6.6.4): wall-clock seconds without a raw syscall number. The old
-# `syscall(201, 0)` was x86_64 time(2); on aarch64 that number is LISTEN(2) (fd 0,
-# -EINVAL → every WAL timestamp was -22) and on x86 Mach-O it was unrouted (SIGSYS).
-# clock_gettime(CLOCK_REALTIME) is routed on every target: Linux fills ts and returns
-# 0; Darwin RETURNS ns since the epoch (lib/chrono.cyr's clock_epoch_secs shape).
-fn _wal_epoch_secs(): i64 {
-    #ifdef CYRIUS_TARGET_MACOS
-    var tsm[16];
-    return syscall(228, 0, &tsm) / 1000000000;
-    #endif
-    #ifndef CYRIUS_TARGET_MACOS
-    # Linux (x86_64 and aarch64 — 228 is routed): r == 0 and ts[0] holds the seconds.
-    # Windows: `syscall(228, …)` is the GetTickCount64 reroute — it RETURNS the tick count
-    # and never touches ts (still 0 from the store above), so the sum is the ticks. Either
-    # way a non-zero, advancing value, which is all this fallback seed needs. Treating a
-    # non-zero return as failure returned 0 on PE (review of the 1.14.3 cut).
-    var ts[16];
-    store64(&ts, 0);
-    var r = syscall(228, 0, &ts);
-    return r + load64(&ts);
-    #endif
-}
-
 fn wal_slots_init(): i64 {
     if (_wal_slots != 0) { return 0; }
     var t = _pt_alloc(WAL_MAX_TX * WS_SZ);
@@ -188,39 +165,28 @@ enum WalConst {
     WAL_VER_MIN = 2;
     WAL_HDR_SZ_V3 = 24;
 }
-# Randomness is acquired per-target, never via a hardcoded syscall number:
-#   - Linux x86_64 / aarch64 / macos / agnos: the syscall peer defines the
-#     SYS_GETRANDOM constant (#318 / #278 / #318 / #45), so the raw syscall is
-#     ABI-correct without a literal number (#318 would trap on agnos).
-#   - Windows has NO raw getrandom syscall and its peer deliberately omits the
-#     SYS_GETRANDOM constant — randomness routes through
-#     bcryptprimitives.dll!ProcessPrng via the sys_getrandom() wrapper. A raw
-#     syscall(SYS_GETRANDOM,...) cannot link on Windows; we MUST call the
-#     wrapper there. (sys_getrandom returns len on success, -1 on failure.)
+# Randomness and wall-clock time come from the stdlib, one code path each on
+# every target (1.15.0). lib/random.cyr's random_bytes wraps sys_getrandom,
+# which each syscall peer routes: getrandom on Linux, getentropy on Darwin,
+# ProcessPrng on Windows, #45 on agnos. It also normalizes Darwin's
+# 0-on-success to the byte count and loops short reads. The raw
+# `syscall(SYS_GETRANDOM, …) == n` this replaced did neither, so on macOS it
+# never matched and every salt and database id took the time fallback below.
+# lib/chrono.cyr's clock_epoch_secs replaces a hand-rolled per-target
+# clock_gettime (and a separate agnos time_unix arm) that re-implemented it.
 
-# Draw 16 bytes of randomness into (salt1, salt2). Prefers the OS CSPRNG;
-# if unavailable (very old kernel / restricted container / CSPRNG failure),
-# falls back to a time + tx-counter mix — weaker but still unique per txn.
-# One 64-bit random value, same OS-CSPRNG-then-fallback policy as the salts.
-# Shared with the database-identity assignment in patra_open.
+# One 64-bit random value: the OS CSPRNG, or, if that fails (very old kernel,
+# restricted container), a time + counter mix — weaker, and unique only within
+# this process: two processes falling back in the same second can collide.
+# Shared by the WAL salts and the database-identity assignment in patra_open.
 fn _pt_rand64(): i64 {
     var buf = _pt_alloc(8);
-    #ifdef CYRIUS_TARGET_WIN
-    var nr = sys_getrandom(buf, 8, 0);
-    #else
-    var nr = syscall(SYS_GETRANDOM, buf, 8, 0);
-    #endif
     var v = 0;
-    if (nr == 8) {
+    if (random_bytes(buf, 8) == 8) {
         v = load64(buf);
     } else {
-        #ifdef CYRIUS_TARGET_AGNOS
-        var t = syscall(SYS_TIME_UNIX);
-        #else
-        var t = _wal_epoch_secs();
-        #endif
         _wal_tx_counter = _wal_tx_counter + 1;
-        v = t * 2654435761 + _wal_tx_counter * 1099511628211;
+        v = clock_epoch_secs() * 2654435761 + _wal_tx_counter * 1099511628211;
     }
     _pt_free(buf);
     # 0 is the "unassigned" sentinel; never hand it back.
@@ -228,25 +194,16 @@ fn _pt_rand64(): i64 {
     return v;
 }
 
+# Draw 16 bytes of randomness into (salt1, salt2), with the same
+# CSPRNG-then-fallback policy as _pt_rand64.
 fn _wal_gen_salts(slot): i64 {
     var buf = _pt_alloc(16);
     if (buf == 0) { return PATRA_ERR_IO; }
-    #ifdef CYRIUS_TARGET_WIN
-    var nr = sys_getrandom(buf, 16, 0);
-    #else
-    var nr = syscall(SYS_GETRANDOM, buf, 16, 0);
-    #endif
-    if (nr == 16) {
+    if (random_bytes(buf, 16) == 16) {
         store64(slot + WS_SALT1, load64(buf));
         store64(slot + WS_SALT2, load64(buf + 8));
     } else {
-        #ifdef CYRIUS_TARGET_AGNOS
-        # agnos: time_unix #46 (unix seconds in rax). Linux time() #201 is
-        # not an agnos syscall — a raw syscall(201) would mis-dispatch.
-        var t = syscall(SYS_TIME_UNIX);
-        #else
-        var t = _wal_epoch_secs();
-        #endif
+        var t = clock_epoch_secs();
         _wal_tx_counter = _wal_tx_counter + 1;
         store64(slot + WS_SALT1, t * 2654435761 + _wal_tx_counter);
         store64(slot + WS_SALT2, t + _wal_tx_counter * 1099511628211);
@@ -282,9 +239,10 @@ fn _wal_hash(pg, page_data, salt1, salt2): i64 {
 
 # Begin WAL logging for a transaction
 fn wal_start(db_fd, wal_path, dbid): i64 {
-    var wfd = file_open(wal_path, 578 + O_NOFOLLOW, 420);
-    # O_RDWR | O_CREAT | O_TRUNC | O_NOFOLLOW = 2 + 64 + 512 + 131072.
-    # file_open (io): portable — bridges agnos's namelen + AO_* flag ABI.
+    var wfd = file_open(wal_path, O_RDWR | O_CREAT | O_TRUNC | O_NOFOLLOW, 420);
+    # file_open (io): portable — bridges agnos's namelen + AO_* flag ABI. The
+    # base flags were the x86_64 number 578 until 1.15.0, which on Darwin
+    # decodes without O_TRUNC; see the note above _pt_file_create.
     #
     # O_NOFOLLOW added in 1.14.0. The .patra create/open paths (file.cyr) and
     # the .jsonl append path took it at 1.5.2 for audit 2026-04-21 §2.8; the
@@ -428,7 +386,7 @@ fn wal_log_page(db_fd, page_num): i64 {
     # the modified pages to stable storage ahead of the log protecting them.
     # Bounded cost: at most one sync per distinct page per transaction, and
     # only when a transaction is open (_wal_fd < 0 outside one).
-    if (syscall(SYS_FDATASYNC, wfd) < 0) {
+    if (_pt_fdatasync(wfd) < 0) {
         _pt_free(buf);
         return PATRA_ERR_IO;
     }
@@ -457,11 +415,11 @@ fn wal_commit(db_fd, wal_path): i64 {
     if (slot == 0) { return 0; }
     var wfd = load64(slot + WS_WALFD);
     if (wfd >= 0) {
-        syscall(SYS_FDATASYNC, wfd);
+        _pt_fdatasync(wfd);
         sys_close(wfd);
     }
     if (db_fd >= 0) {
-        syscall(SYS_FDATASYNC, db_fd);
+        _pt_fdatasync(db_fd);
     }
     _wal_release(slot);
     xunlink(wal_path);
@@ -481,7 +439,7 @@ fn wal_commit(db_fd, wal_path): i64 {
 # own WALs concurrently cannot clobber each other's salts. WS_SALT1 / WS_SALT2 /
 # WS_DBID are laid out contiguously for exactly this call.
 fn _wal_hdr_verify(fd, out): i64 {
-    if (syscall(SYS_LSEEK, fd, 0, 0) < 0) { return 0 - PATRA_ERR_IO; }
+    if (xlseek(fd, 0, 0) < 0) { return 0 - PATRA_ERR_IO; }
     var hdr = _pt_alloc(WAL_HDR_SZ);
     var nr = sys_read(fd, hdr, WAL_HDR_SZ_V3);
     if (nr != WAL_HDR_SZ_V3) { _pt_free(hdr); return 0 - PATRA_ERR_MAGIC; }
@@ -535,7 +493,7 @@ fn wal_rollback(db_fd, wal_path): i64 {
         if (sys_write(db_fd, buf + 8, PAGE_SIZE) != PAGE_SIZE) { failed = 1; done = 1; continue; }
     }
     _pt_free(buf);
-    syscall(SYS_FDATASYNC, db_fd);
+    _pt_fdatasync(db_fd);
     sys_close(wfd);
     var overflowed = load64(slot + WS_OVERFLOW);
     _wal_release(slot);
@@ -585,7 +543,7 @@ fn wal_recover(db_fd, wal_path, dbid, pgcount): i64 {
     # feeds attacker-chosen pages to the replay and deletes the link. The
     # v4 dbid binding is the real defence against a foreign WAL; this closes
     # the path-level half.
-    var wfd = file_open(wal_path, O_NOFOLLOW, 0);
+    var wfd = file_open(wal_path, O_RDONLY | O_NOFOLLOW, 0);
     if (wfd < 0) { return 0; }
     # 1.14.0: recovery has no transaction slot, so it verifies into its own
     # 3-word scratch (salt1, salt2, dbid) rather than into module globals.
@@ -635,7 +593,7 @@ fn wal_recover(db_fd, wal_path, dbid, pgcount): i64 {
     }
     _pt_free(buf);
     _pt_free(vh);
-    syscall(SYS_FDATASYNC, db_fd);
+    _pt_fdatasync(db_fd);
     sys_close(wfd);
     # Same rule as wal_rollback (1.14.0): an incomplete replay must not unlink
     # the WAL, or the pages it still had to undo are unrecoverable. This return

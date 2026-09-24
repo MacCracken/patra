@@ -12,7 +12,7 @@ fn main() {
     patra_init();
 
     var dbpath = "/tmp/patra_vidya_test.patra";
-    syscall(SYS_UNLINK, dbpath);
+    xunlink(dbpath);
 
     test_group("vidya knowledge index");
 
@@ -98,10 +98,10 @@ fn main() {
     patra_result_free(rs);
 
     patra_close(db);
-    syscall(SYS_UNLINK, dbpath);
+    xunlink(dbpath);
 
     return assert_summary();
 }
 
 var r = main();
-syscall(SYS_EXIT, r);
+sys_exit(r);

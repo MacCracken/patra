@@ -48,9 +48,9 @@ fn _fz_run(): i64 {
         if (op < 4) {
             var hit = _pc_get(FZ_FD, page, out);
             if (hit != 0) {
-                if (load64(out + 4088) != page) { syscall(SYS_EXIT, 41); }
-                if (load64(out) != load64(_fz_lastval + page * 8)) { syscall(SYS_EXIT, 42); }
-                if (load64(_fz_live + page * 8) == 0) { syscall(SYS_EXIT, 43); }
+                if (load64(out + 4088) != page) { sys_exit(41); }
+                if (load64(out) != load64(_fz_lastval + page * 8)) { sys_exit(42); }
+                if (load64(_fz_live + page * 8) == 0) { sys_exit(43); }
             }
         }
         if (op == 4) {
@@ -91,4 +91,4 @@ patra_init();
 patra_cache_enable(1);
 pc_register(FZ_FD, 987654321);
 _fz_run();
-syscall(SYS_EXIT, 0);
+sys_exit(0);

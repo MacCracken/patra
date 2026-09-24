@@ -18,7 +18,7 @@ var fpath = "/tmp/patra_fuzz_bytes.patra";
 var _g_db = 0;
 var _g_fp = 0;
 
-fn _cleanup() { syscall(SYS_UNLINK, fpath); return 0; }
+fn _cleanup() { xunlink(fpath); return 0; }
 
 # Insert a single (hash STR, content BYTES) row with a deterministic
 # payload, return the first chain page of the content column.
@@ -125,4 +125,4 @@ patra_close(_g_db);
 
 fl_free(buf);
 _cleanup();
-syscall(SYS_EXIT, 0);
+sys_exit(0);

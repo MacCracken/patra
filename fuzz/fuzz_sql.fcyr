@@ -10,228 +10,228 @@ patra_init();
 # ── Incomplete / empty SQL ──
 
 sql_tokenize("");
-if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 1); }
+if (sql_parse() == PATRA_OK) { sys_exit(1); }
 
 sql_tokenize("CREATE");
-if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 2); }
+if (sql_parse() == PATRA_OK) { sys_exit(2); }
 
 sql_tokenize("CREATE TABLE");
-if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 3); }
+if (sql_parse() == PATRA_OK) { sys_exit(3); }
 
 sql_tokenize("INSERT");
-if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 4); }
+if (sql_parse() == PATRA_OK) { sys_exit(4); }
 
 sql_tokenize("INSERT INTO");
-if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 5); }
+if (sql_parse() == PATRA_OK) { sys_exit(5); }
 
 sql_tokenize("SELECT");
-if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 6); }
+if (sql_parse() == PATRA_OK) { sys_exit(6); }
 
 sql_tokenize("SELECT FROM t");
-if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 7); }
+if (sql_parse() == PATRA_OK) { sys_exit(7); }
 
 sql_tokenize("SELECT * FROM");
-if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 8); }
+if (sql_parse() == PATRA_OK) { sys_exit(8); }
 
 # ── Garbage ──
 
 sql_tokenize("!@#$%^&");
-if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 10); }
+if (sql_parse() == PATRA_OK) { sys_exit(10); }
 
 sql_tokenize("BANANA");
-if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 11); }
+if (sql_parse() == PATRA_OK) { sys_exit(11); }
 
 sql_tokenize("42 42 42");
-if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 12); }
+if (sql_parse() == PATRA_OK) { sys_exit(12); }
 
 # ── Malformed WHERE ──
 
 sql_tokenize("SELECT * FROM t WHERE");
-if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 20); }
+if (sql_parse() == PATRA_OK) { sys_exit(20); }
 
 sql_tokenize("SELECT * FROM t WHERE id");
-if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 21); }
+if (sql_parse() == PATRA_OK) { sys_exit(21); }
 
 sql_tokenize("SELECT * FROM t WHERE id =");
-if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 22); }
+if (sql_parse() == PATRA_OK) { sys_exit(22); }
 
 sql_tokenize("SELECT * FROM t WHERE = 1");
-if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 23); }
+if (sql_parse() == PATRA_OK) { sys_exit(23); }
 
 sql_tokenize("SELECT * FROM t WHERE id 1");
-if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 24); }
+if (sql_parse() == PATRA_OK) { sys_exit(24); }
 
 # ── Mixed AND/OR must fail ──
 
 sql_tokenize("SELECT * FROM t WHERE a = 1 AND b = 2 OR c = 3");
-if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 25); }
+if (sql_parse() == PATRA_OK) { sys_exit(25); }
 
 # ── Malformed UPDATE ──
 
 sql_tokenize("UPDATE");
-if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 30); }
+if (sql_parse() == PATRA_OK) { sys_exit(30); }
 
 sql_tokenize("UPDATE t");
-if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 31); }
+if (sql_parse() == PATRA_OK) { sys_exit(31); }
 
 sql_tokenize("UPDATE t SET");
-if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 32); }
+if (sql_parse() == PATRA_OK) { sys_exit(32); }
 
 sql_tokenize("UPDATE t SET x");
-if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 33); }
+if (sql_parse() == PATRA_OK) { sys_exit(33); }
 
 sql_tokenize("UPDATE t SET x =");
-if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 34); }
+if (sql_parse() == PATRA_OK) { sys_exit(34); }
 
 # ── Malformed DELETE ──
 
 sql_tokenize("DELETE");
-if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 40); }
+if (sql_parse() == PATRA_OK) { sys_exit(40); }
 
 sql_tokenize("DELETE t");
-if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 41); }
+if (sql_parse() == PATRA_OK) { sys_exit(41); }
 
 sql_tokenize("DELETE FROM");
-if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 42); }
+if (sql_parse() == PATRA_OK) { sys_exit(42); }
 
 # ── Valid edge cases ──
 
 sql_tokenize("create table t (x int)");
-if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 50); }
+if (sql_parse() != PATRA_OK) { sys_exit(50); }
 
 sql_tokenize("select * from t where id = 1");
-if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 51); }
+if (sql_parse() != PATRA_OK) { sys_exit(51); }
 
 sql_tokenize("update t set x = 1 where id = 1");
-if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 52); }
+if (sql_parse() != PATRA_OK) { sys_exit(52); }
 
 sql_tokenize("delete from t where id = 1");
-if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 53); }
+if (sql_parse() != PATRA_OK) { sys_exit(53); }
 
 sql_tokenize("SELECT * FROM t ORDER BY id LIMIT 5");
-if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 54); }
+if (sql_parse() != PATRA_OK) { sys_exit(54); }
 
 sql_tokenize("SELECT * FROM t WHERE id > 0 AND id < 100");
-if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 55); }
+if (sql_parse() != PATRA_OK) { sys_exit(55); }
 
 sql_tokenize("SELECT * FROM t WHERE id = 1 OR id = 2 OR id = 3");
-if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 56); }
+if (sql_parse() != PATRA_OK) { sys_exit(56); }
 
 # ── INSERT OR IGNORE: malformed must reject, valid must accept ──
 
 sql_tokenize("INSERT OR");
-if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 57); }
+if (sql_parse() == PATRA_OK) { sys_exit(57); }
 
 sql_tokenize("INSERT OR IGNORE");
-if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 58); }
+if (sql_parse() == PATRA_OK) { sys_exit(58); }
 
 sql_tokenize("INSERT OR REPLACE INTO t VALUES (1)");
-if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 59); }
+if (sql_parse() == PATRA_OK) { sys_exit(59); }
 
 sql_tokenize("INSERT OR IGNORE INTO t VALUES (1, 'x')");
-if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 67); }
-if (load64(_spr() + PR_INSERT_IGNORE) != 1) { syscall(SYS_EXIT, 68); }
+if (sql_parse() != PATRA_OK) { sys_exit(67); }
+if (load64(_spr() + PR_INSERT_IGNORE) != 1) { sys_exit(68); }
 
 sql_tokenize("INSERT INTO t VALUES (1, 'x')");
-if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 69); }
-if (load64(_spr() + PR_INSERT_IGNORE) != 0) { syscall(SYS_EXIT, 73); }
+if (sql_parse() != PATRA_OK) { sys_exit(69); }
+if (load64(_spr() + PR_INSERT_IGNORE) != 0) { sys_exit(73); }
 
 # ── INSERT column list (1.10.0): malformed reject, valid accept ──
 
 # Empty list, unterminated list, trailing comma, duplicate, missing comma,
 # missing VALUES — all must reject.
 sql_tokenize("INSERT INTO t () VALUES (1)");
-if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 100); }
+if (sql_parse() == PATRA_OK) { sys_exit(100); }
 sql_tokenize("INSERT INTO t (a");
-if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 101); }
+if (sql_parse() == PATRA_OK) { sys_exit(101); }
 sql_tokenize("INSERT INTO t (a, ) VALUES (1)");
-if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 102); }
+if (sql_parse() == PATRA_OK) { sys_exit(102); }
 sql_tokenize("INSERT INTO t (a, a) VALUES (1, 2)");
-if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 103); }
+if (sql_parse() == PATRA_OK) { sys_exit(103); }
 sql_tokenize("INSERT INTO t (a b) VALUES (1, 2)");
-if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 104); }
+if (sql_parse() == PATRA_OK) { sys_exit(104); }
 sql_tokenize("INSERT INTO t (a) (1)");
-if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 105); }
+if (sql_parse() == PATRA_OK) { sys_exit(105); }
 
 # Valid named list: parses, records count, leaves positional flag at 0.
 sql_tokenize("INSERT INTO t (a, b) VALUES (1, 2)");
-if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 106); }
-if (load64(_spr() + PR_INS_NCOLS) != 2) { syscall(SYS_EXIT, 107); }
+if (sql_parse() != PATRA_OK) { sys_exit(106); }
+if (load64(_spr() + PR_INS_NCOLS) != 2) { sys_exit(107); }
 # Positional INSERT must leave PR_INS_NCOLS at 0.
 sql_tokenize("INSERT INTO t VALUES (1, 2)");
-if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 108); }
-if (load64(_spr() + PR_INS_NCOLS) != 0) { syscall(SYS_EXIT, 109); }
+if (sql_parse() != PATRA_OK) { sys_exit(108); }
+if (load64(_spr() + PR_INS_NCOLS) != 0) { sys_exit(109); }
 # OR IGNORE composes with a column list.
 sql_tokenize("INSERT OR IGNORE INTO t (b, a) VALUES (2, 1)");
-if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 110); }
-if (load64(_spr() + PR_INS_NCOLS) != 2) { syscall(SYS_EXIT, 111); }
-if (load64(_spr() + PR_INSERT_IGNORE) != 1) { syscall(SYS_EXIT, 112); }
+if (sql_parse() != PATRA_OK) { sys_exit(110); }
+if (load64(_spr() + PR_INS_NCOLS) != 2) { sys_exit(111); }
+if (load64(_spr() + PR_INSERT_IGNORE) != 1) { sys_exit(112); }
 
 # Integration: reorder binds by name, omitted column defaults, error paths.
 var clpath = "/tmp/patra_fuzz_collist.patra";
-syscall(SYS_UNLINK, clpath);
+xunlink(clpath);
 var cldb = patra_open(clpath);
-if (cldb == 0) { syscall(SYS_EXIT, 113); }
+if (cldb == 0) { sys_exit(113); }
 patra_exec(cldb, "CREATE TABLE clt (id INT, name STR, age INT)");
-if (patra_exec(cldb, "INSERT INTO clt (name, age, id) VALUES ('alice', 30, 1)") != PATRA_OK) { syscall(SYS_EXIT, 114); }
-if (patra_exec(cldb, "INSERT INTO clt (id, name) VALUES (2, 'bob')") != PATRA_OK) { syscall(SYS_EXIT, 115); }
-if (patra_exec(cldb, "INSERT INTO clt (ghost) VALUES (1)") != PATRA_ERR_NOTFOUND) { syscall(SYS_EXIT, 116); }
-if (patra_exec(cldb, "INSERT INTO clt (id, name) VALUES (3)") != PATRA_ERR_COLCOUNT) { syscall(SYS_EXIT, 117); }
+if (patra_exec(cldb, "INSERT INTO clt (name, age, id) VALUES ('alice', 30, 1)") != PATRA_OK) { sys_exit(114); }
+if (patra_exec(cldb, "INSERT INTO clt (id, name) VALUES (2, 'bob')") != PATRA_OK) { sys_exit(115); }
+if (patra_exec(cldb, "INSERT INTO clt (ghost) VALUES (1)") != PATRA_ERR_NOTFOUND) { sys_exit(116); }
+if (patra_exec(cldb, "INSERT INTO clt (id, name) VALUES (3)") != PATRA_ERR_COLCOUNT) { sys_exit(117); }
 var clrs = patra_query(cldb, "SELECT * FROM clt WHERE id = 1");
-if (patra_result_get_int(clrs, 0, 2) != 30) { syscall(SYS_EXIT, 118); }
+if (patra_result_get_int(clrs, 0, 2) != 30) { sys_exit(118); }
 patra_result_free(clrs);
 var clrs2 = patra_query(cldb, "SELECT * FROM clt WHERE id = 2");
-if (patra_result_get_int(clrs2, 0, 2) != 0) { syscall(SYS_EXIT, 119); }
+if (patra_result_get_int(clrs2, 0, 2) != 0) { sys_exit(119); }
 patra_result_free(clrs2);
 patra_close(cldb);
-syscall(SYS_UNLINK, clpath);
+xunlink(clpath);
 
 # ── AUTOINCREMENT (1.10.1): parse guards + auto-assign ──
 
 # Valid on an INT column; records col_idx+1 in PR_AUTOINC.
 sql_tokenize("CREATE TABLE t (id INT AUTOINCREMENT, name STR)");
-if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 120); }
-if (load64(_spr() + PR_AUTOINC) != 1) { syscall(SYS_EXIT, 121); }
+if (sql_parse() != PATRA_OK) { sys_exit(120); }
+if (load64(_spr() + PR_AUTOINC) != 1) { sys_exit(121); }
 # Rejected on a non-INT column and when declared twice.
 sql_tokenize("CREATE TABLE t (name STR AUTOINCREMENT)");
-if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 122); }
+if (sql_parse() == PATRA_OK) { sys_exit(122); }
 sql_tokenize("CREATE TABLE t (a INT AUTOINCREMENT, b INT AUTOINCREMENT)");
-if (sql_parse() == PATRA_OK) { syscall(SYS_EXIT, 123); }
+if (sql_parse() == PATRA_OK) { sys_exit(123); }
 # Plain CREATE leaves PR_AUTOINC at 0.
 sql_tokenize("CREATE TABLE t (id INT, name STR)");
-if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 124); }
-if (load64(_spr() + PR_AUTOINC) != 0) { syscall(SYS_EXIT, 125); }
+if (sql_parse() != PATRA_OK) { sys_exit(124); }
+if (load64(_spr() + PR_AUTOINC) != 0) { sys_exit(125); }
 
 # Integration: omit auto-assigns sequentially; explicit honored; 0 => auto.
 var aipath = "/tmp/patra_fuzz_autoinc.patra";
-syscall(SYS_UNLINK, aipath);
+xunlink(aipath);
 var aidb = patra_open(aipath);
-if (aidb == 0) { syscall(SYS_EXIT, 126); }
+if (aidb == 0) { sys_exit(126); }
 patra_exec(aidb, "CREATE TABLE ai (id INT AUTOINCREMENT, name STR)");
-if (patra_exec(aidb, "INSERT INTO ai (name) VALUES ('a')") != PATRA_OK) { syscall(SYS_EXIT, 127); }
-if (patra_exec(aidb, "INSERT INTO ai VALUES (0, 'b')") != PATRA_OK) { syscall(SYS_EXIT, 128); }
-if (patra_exec(aidb, "INSERT INTO ai VALUES (50, 'c')") != PATRA_OK) { syscall(SYS_EXIT, 129); }
-if (patra_exec(aidb, "INSERT INTO ai (name) VALUES ('d')") != PATRA_OK) { syscall(SYS_EXIT, 130); }
+if (patra_exec(aidb, "INSERT INTO ai (name) VALUES ('a')") != PATRA_OK) { sys_exit(127); }
+if (patra_exec(aidb, "INSERT INTO ai VALUES (0, 'b')") != PATRA_OK) { sys_exit(128); }
+if (patra_exec(aidb, "INSERT INTO ai VALUES (50, 'c')") != PATRA_OK) { sys_exit(129); }
+if (patra_exec(aidb, "INSERT INTO ai (name) VALUES ('d')") != PATRA_OK) { sys_exit(130); }
 var airs = patra_query(aidb, "SELECT * FROM ai WHERE id = 2");
-if (patra_result_count(airs) != 1) { syscall(SYS_EXIT, 131); }
+if (patra_result_count(airs) != 1) { sys_exit(131); }
 patra_result_free(airs);
 var airs2 = patra_query(aidb, "SELECT * FROM ai WHERE id = 51");
-if (patra_result_count(airs2) != 1) { syscall(SYS_EXIT, 132); }
+if (patra_result_count(airs2) != 1) { sys_exit(132); }
 patra_result_free(airs2);
 patra_close(aidb);
-syscall(SYS_UNLINK, aipath);
+xunlink(aipath);
 
 # ── TEXT column (1.10.2): parse + variable-length round-trip ──
 
 sql_tokenize("CREATE TABLE t (id INT, body TEXT)");
-if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 140); }
+if (sql_parse() != PATRA_OK) { sys_exit(140); }
 sql_tokenize("ALTER TABLE t ADD COLUMN note TEXT");
-if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 141); }
+if (sql_parse() != PATRA_OK) { sys_exit(141); }
 
 var txpath = "/tmp/patra_fuzz_text.patra";
-syscall(SYS_UNLINK, txpath);
+xunlink(txpath);
 var txdb = patra_open(txpath);
-if (txdb == 0) { syscall(SYS_EXIT, 142); }
+if (txdb == 0) { sys_exit(142); }
 patra_exec(txdb, "CREATE TABLE tx (id INT, body TEXT)");
 # Text past the 256-byte STR cap: build a 600-char literal at runtime.
 var tbuf = fl_alloc(700);
@@ -242,94 +242,94 @@ for (var ti = 0; ti < 600; ti = ti + 1) { store8(tbuf + tpl + ti, 65); }
 store8(tbuf + tpl + 600, 39);
 store8(tbuf + tpl + 601, 41);
 store8(tbuf + tpl + 602, 0);
-if (patra_exec(txdb, tbuf) != PATRA_OK) { syscall(SYS_EXIT, 143); }
+if (patra_exec(txdb, tbuf) != PATRA_OK) { sys_exit(143); }
 fl_free(tbuf);
 var txrs = patra_query(txdb, "SELECT * FROM tx");
-if (patra_result_get_text_len(txrs, 0, 1) != 600) { syscall(SYS_EXIT, 144); }
+if (patra_result_get_text_len(txrs, 0, 1) != 600) { sys_exit(144); }
 var txout = fl_alloc(600);
-if (patra_result_read_text(txdb, txrs, 0, 1, txout) != PATRA_OK) { syscall(SYS_EXIT, 145); }
-if (load8(txout) != 65) { syscall(SYS_EXIT, 146); }
-if (load8(txout + 599) != 65) { syscall(SYS_EXIT, 147); }
+if (patra_result_read_text(txdb, txrs, 0, 1, txout) != PATRA_OK) { sys_exit(145); }
+if (load8(txout) != 65) { sys_exit(146); }
+if (load8(txout + 599) != 65) { sys_exit(147); }
 fl_free(txout);
 patra_result_free(txrs);
 # WHERE on TEXT never matches; index on TEXT is rejected.
 var txw = patra_query(txdb, "SELECT * FROM tx WHERE body = 'x'");
-if (patra_result_count(txw) != 0) { syscall(SYS_EXIT, 148); }
+if (patra_result_count(txw) != 0) { sys_exit(148); }
 patra_result_free(txw);
-if (patra_exec(txdb, "CREATE INDEX ON tx (body)") != PATRA_ERR_TYPE) { syscall(SYS_EXIT, 149); }
+if (patra_exec(txdb, "CREATE INDEX ON tx (body)") != PATRA_ERR_TYPE) { sys_exit(149); }
 patra_close(txdb);
-syscall(SYS_UNLINK, txpath);
+xunlink(txpath);
 
 # ── Bind parameters (1.10.3): parse, direct-exec rejection, safe bind ──
 
 # Placeholders parse and count; plain statements report zero.
 sql_tokenize("INSERT INTO t VALUES (?, ?)");
-if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 160); }
-if (load64(_spr() + PR_NPARAMS) != 2) { syscall(SYS_EXIT, 161); }
+if (sql_parse() != PATRA_OK) { sys_exit(160); }
+if (load64(_spr() + PR_NPARAMS) != 2) { sys_exit(161); }
 sql_tokenize("UPDATE t SET a = ? WHERE b = ?");
-if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 162); }
-if (load64(_spr() + PR_NPARAMS) != 2) { syscall(SYS_EXIT, 163); }
+if (sql_parse() != PATRA_OK) { sys_exit(162); }
+if (load64(_spr() + PR_NPARAMS) != 2) { sys_exit(163); }
 sql_tokenize("INSERT INTO t VALUES (1, 'x')");
-if (sql_parse() != PATRA_OK) { syscall(SYS_EXIT, 164); }
-if (load64(_spr() + PR_NPARAMS) != 0) { syscall(SYS_EXIT, 165); }
+if (sql_parse() != PATRA_OK) { sys_exit(164); }
+if (load64(_spr() + PR_NPARAMS) != 0) { sys_exit(165); }
 
 var bppath = "/tmp/patra_fuzz_bind.patra";
-syscall(SYS_UNLINK, bppath);
+xunlink(bppath);
 var bpdb = patra_open(bppath);
-if (bpdb == 0) { syscall(SYS_EXIT, 166); }
+if (bpdb == 0) { sys_exit(166); }
 patra_exec(bpdb, "CREATE TABLE bp (id INT, name STR)");
 # Direct exec of a parameterized statement must be refused.
-if (patra_exec(bpdb, "INSERT INTO bp VALUES (?, ?)") != PATRA_ERR_PARAM) { syscall(SYS_EXIT, 167); }
+if (patra_exec(bpdb, "INSERT INTO bp VALUES (?, ?)") != PATRA_ERR_PARAM) { sys_exit(167); }
 # Prepare + bind: a value with a quote + SQL must store verbatim (injection).
 var bpins = patra_prepare(bpdb, "INSERT INTO bp VALUES (?, ?)");
-if (bpins == 0) { syscall(SYS_EXIT, 168); }
-if (patra_bind_int(bpins, 2, 0) != PATRA_ERR_PARAM) { syscall(SYS_EXIT, 169); }
+if (bpins == 0) { sys_exit(168); }
+if (patra_bind_int(bpins, 2, 0) != PATRA_ERR_PARAM) { sys_exit(169); }
 patra_bind_int(bpins, 0, 7);
 var bpevil = "x'); DROP TABLE bp--";
 patra_bind_text(bpins, 1, bpevil, strlen(bpevil));
-if (patra_exec_prepared(bpdb, bpins) != PATRA_OK) { syscall(SYS_EXIT, 170); }
+if (patra_exec_prepared(bpdb, bpins) != PATRA_OK) { sys_exit(170); }
 patra_finalize(bpins);
 var bprs = patra_query(bpdb, "SELECT * FROM bp");
-if (patra_result_count(bprs) != 1) { syscall(SYS_EXIT, 171); }
-if (streq(patra_result_get_str(bprs, 0, 1), bpevil) != 1) { syscall(SYS_EXIT, 172); }
+if (patra_result_count(bprs) != 1) { sys_exit(171); }
+if (streq(patra_result_get_str(bprs, 0, 1), bpevil) != 1) { sys_exit(172); }
 patra_result_free(bprs);
 # Bound WHERE lookup returns the row.
 var bpsel = patra_prepare(bpdb, "SELECT * FROM bp WHERE id = ?");
 patra_bind_int(bpsel, 0, 7);
 var bpsrs = patra_query_prepared(bpdb, bpsel);
-if (patra_result_count(bpsrs) != 1) { syscall(SYS_EXIT, 173); }
+if (patra_result_count(bpsrs) != 1) { sys_exit(173); }
 patra_result_free(bpsrs);
 patra_finalize(bpsel);
 patra_close(bpdb);
-syscall(SYS_UNLINK, bppath);
+xunlink(bppath);
 
 # ── STR-keyed index (1.7.1): CREATE INDEX on STR + dedup probe ──
 
 var stpath = "/tmp/patra_fuzz_str.patra";
-syscall(SYS_UNLINK, stpath);
+xunlink(stpath);
 var sdb = patra_open(stpath);
-if (sdb == 0) { syscall(SYS_EXIT, 74); }
+if (sdb == 0) { sys_exit(74); }
 patra_exec(sdb, "CREATE TABLE so (hash STR, val INT)");
-if (patra_exec(sdb, "CREATE INDEX ON so (hash)") != PATRA_OK) { syscall(SYS_EXIT, 75); }
+if (patra_exec(sdb, "CREATE INDEX ON so (hash)") != PATRA_OK) { sys_exit(75); }
 patra_exec(sdb, "INSERT INTO so VALUES ('first', 1)");
 # Dedup hit on hashed STR — must return OK without inserting.
-if (patra_exec(sdb, "INSERT OR IGNORE INTO so VALUES ('first', 99)") != PATRA_OK) { syscall(SYS_EXIT, 76); }
+if (patra_exec(sdb, "INSERT OR IGNORE INTO so VALUES ('first', 99)") != PATRA_OK) { sys_exit(76); }
 var sors = patra_query(sdb, "SELECT * FROM so WHERE hash = 'first'");
-if (patra_result_count(sors) != 1) { syscall(SYS_EXIT, 77); }
-if (patra_result_get_int(sors, 0, 1) != 1) { syscall(SYS_EXIT, 78); }
+if (patra_result_count(sors) != 1) { sys_exit(77); }
+if (patra_result_get_int(sors, 0, 1) != 1) { sys_exit(78); }
 patra_result_free(sors);
 patra_close(sdb);
-syscall(SYS_UNLINK, stpath);
+xunlink(stpath);
 
 # ── Header verification ──
 
 var buf = fl_alloc(PAGE_SIZE);
 memset(buf, 0, PAGE_SIZE);
-if (patra_hdr_verify(buf) == PATRA_OK) { syscall(SYS_EXIT, 60); }
+if (patra_hdr_verify(buf) == PATRA_OK) { sys_exit(60); }
 store32(buf, 0xDEADBEEF);
-if (patra_hdr_verify(buf) == PATRA_OK) { syscall(SYS_EXIT, 61); }
+if (patra_hdr_verify(buf) == PATRA_OK) { sys_exit(61); }
 patra_hdr_init(buf);
-if (patra_hdr_verify(buf) != PATRA_OK) { syscall(SYS_EXIT, 62); }
+if (patra_hdr_verify(buf) != PATRA_OK) { sys_exit(62); }
 fl_free(buf);
 
 # ── Row string truncation ──
@@ -350,35 +350,35 @@ memcpy(ls + 62, "aaaaaaaaaaa", 11);
 store8(ls + 73, 0);
 row_write_str(row, 0, ls, 73);
 var rl = strlen(row_read_str(row, 0));
-if (rl != 73) { syscall(SYS_EXIT, 70); }
+if (rl != 73) { sys_exit(70); }
 row_write_str(row, 0, "", 0);
-if (strlen(row_read_str(row, 0)) != 0) { syscall(SYS_EXIT, 71); }
+if (strlen(row_read_str(row, 0)) != 0) { sys_exit(71); }
 fl_free(row);
 fl_free(schema);
 
 # ── Integration: error paths ──
 
 var tpath = "/tmp/patra_fuzz.patra";
-syscall(SYS_UNLINK, tpath);
+xunlink(tpath);
 var db = patra_open(tpath);
-if (db == 0) { syscall(SYS_EXIT, 80); }
+if (db == 0) { sys_exit(80); }
 
 patra_exec(db, "CREATE TABLE fuzz (id INT, name STR)");
 
 # Type mismatch
-if (patra_exec(db, "INSERT INTO fuzz VALUES ('bad', 42)") == PATRA_OK) { syscall(SYS_EXIT, 81); }
+if (patra_exec(db, "INSERT INTO fuzz VALUES ('bad', 42)") == PATRA_OK) { sys_exit(81); }
 # Wrong count
-if (patra_exec(db, "INSERT INTO fuzz VALUES (1)") == PATRA_OK) { syscall(SYS_EXIT, 82); }
+if (patra_exec(db, "INSERT INTO fuzz VALUES (1)") == PATRA_OK) { sys_exit(82); }
 # Missing table
 var gr = patra_exec(db, "INSERT INTO ghost VALUES (1, 'x')");
-if (gr != PATRA_ERR_NOTFOUND) { syscall(SYS_EXIT, 83); }
+if (gr != PATRA_ERR_NOTFOUND) { sys_exit(83); }
 # Duplicate table
-if (patra_exec(db, "CREATE TABLE fuzz (x INT)") != PATRA_ERR_EXISTS) { syscall(SYS_EXIT, 84); }
+if (patra_exec(db, "CREATE TABLE fuzz (x INT)") != PATRA_ERR_EXISTS) { sys_exit(84); }
 
 # UPDATE missing table
-if (patra_exec(db, "UPDATE ghost SET x = 1") != PATRA_ERR_NOTFOUND) { syscall(SYS_EXIT, 85); }
+if (patra_exec(db, "UPDATE ghost SET x = 1") != PATRA_ERR_NOTFOUND) { sys_exit(85); }
 # DELETE missing table
-if (patra_exec(db, "DELETE FROM ghost") != PATRA_ERR_NOTFOUND) { syscall(SYS_EXIT, 86); }
+if (patra_exec(db, "DELETE FROM ghost") != PATRA_ERR_NOTFOUND) { sys_exit(86); }
 
 # Valid round-trip with UPDATE and DELETE
 patra_exec(db, "INSERT INTO fuzz VALUES (1, 'one')");
@@ -387,22 +387,22 @@ patra_exec(db, "INSERT INTO fuzz VALUES (3, 'three')");
 
 patra_exec(db, "UPDATE fuzz SET name = 'ONE' WHERE id = 1");
 var rs = patra_query(db, "SELECT * FROM fuzz WHERE id = 1");
-if (rs == 0) { syscall(SYS_EXIT, 87); }
-if (streq(patra_result_get_str(rs, 0, 1), "ONE") != 1) { syscall(SYS_EXIT, 88); }
+if (rs == 0) { sys_exit(87); }
+if (streq(patra_result_get_str(rs, 0, 1), "ONE") != 1) { sys_exit(88); }
 patra_result_free(rs);
 
 patra_exec(db, "DELETE FROM fuzz WHERE id = 2");
 rs = patra_query(db, "SELECT * FROM fuzz");
-if (patra_result_count(rs) != 2) { syscall(SYS_EXIT, 89); }
+if (patra_result_count(rs) != 2) { sys_exit(89); }
 patra_result_free(rs);
 
 # ORDER BY + LIMIT
 rs = patra_query(db, "SELECT * FROM fuzz ORDER BY id LIMIT 1");
-if (patra_result_count(rs) != 1) { syscall(SYS_EXIT, 90); }
-if (patra_result_get_int(rs, 0, 0) != 1) { syscall(SYS_EXIT, 91); }
+if (patra_result_count(rs) != 1) { sys_exit(90); }
+if (patra_result_get_int(rs, 0, 0) != 1) { sys_exit(91); }
 patra_result_free(rs);
 
 patra_close(db);
-syscall(SYS_UNLINK, tpath);
+xunlink(tpath);
 
-syscall(SYS_EXIT, 0);
+sys_exit(0);

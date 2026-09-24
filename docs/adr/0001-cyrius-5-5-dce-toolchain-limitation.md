@@ -48,6 +48,15 @@ instead, and blocks when handed a source path. **Reinstalling 6.5.36 over
 `~/.cyrius/bin` would settle it**; that was not done, because it would disturb
 the host's toolchain to date a change patra does not need dated.
 
+> **Update 2026-09-23 (patra 1.15.0):** the dispatch caveat above no longer
+> holds. For installed 6.6.x pins, `cyrius` re-executes the pinned version's
+> driver: scratch manifests pinned to 6.6.0, 6.6.2 and 6.6.6 each run their own
+> compiler, with no drift warning, and `cyrius which` names the pinned `cycc`.
+> One limit remains: `cyrius build` re-syncs `lib/` from the pinned toolchain
+> before compiling, so compiler and stdlib snapshot can only be compared
+> together. 6.5.36 is not installed, so the dating above was not re-run. This
+> ADR's conclusion is unaffected.
+
 Two earlier updates in this file recorded confident readings that later proved
 partly wrong, so the limit of this one is stated rather than papered over: what
 is **measured** is that DCE strips under 6.6.0; *when* it started is **cited**.

@@ -12,7 +12,7 @@ patra_init();
 
 var fpath = "/tmp/patra_fuzz_btree.patra";
 
-fn _cleanup() { syscall(SYS_UNLINK, fpath); return 0; }
+fn _cleanup() { xunlink(fpath); return 0; }
 
 fn _root_pg(db) {
     var hdr = _db_hdr(db);
@@ -118,4 +118,4 @@ patra_close(db);
 
 fl_free(buf);
 _cleanup();
-syscall(SYS_EXIT, 0);
+sys_exit(0);

@@ -9,7 +9,7 @@ include "lib/thread.cyr"
 var _bpath = "/tmp/patra_bench.patra";
 var _bdb = 0;
 
-fn _bcleanup() { syscall(SYS_UNLINK, _bpath); return 0; }
+fn _bcleanup() { xunlink(_bpath); return 0; }
 
 # v1.12.0 P2 parallel-read benchmark. Each worker scans the `pread` table _prn
 # times on its OWN handle (connection-per-thread), lock-free as of S5. Per-op =
@@ -109,7 +109,7 @@ fn main() {
     bench_batch_stop(b7, 1000);
     vec_push(benches, b7);
     fl_free(hdr);
-    syscall(SYS_CLOSE, fd);
+    sys_close(fd);
     _bcleanup();
 
     # --- INSERT 1K ---
@@ -206,7 +206,7 @@ fn main() {
     # --- JSONL append ---
 
     var _jbpath = "/tmp/patra_bench.jsonl";
-    syscall(SYS_UNLINK, _jbpath);
+    xunlink(_jbpath);
     var b14 = bench_new("jsonl_append_1k");
     var jfd = jsonl_open(_jbpath);
     bench_batch_start(b14);
@@ -229,7 +229,7 @@ fn main() {
     }
     vec_push(benches, b15);
     jsonl_close(jfd);
-    syscall(SYS_UNLINK, _jbpath);
+    xunlink(_jbpath);
 
     # --- B-tree insert ---
 
@@ -262,7 +262,7 @@ fn main() {
     vec_push(benches, b17);
     fl_free(bout);
     fl_free(hdr);
-    syscall(SYS_CLOSE, fd);
+    sys_close(fd);
     _bcleanup();
 
     # --- Indexed SELECT vs full scan ---
@@ -671,7 +671,7 @@ fn main() {
     # NOTE: this bench uses a real-disk path (under the repo) rather than /tmp
     # (tmpfs), since fdatasync on tmpfs is a no-op and would hide the win.
     var _gcpath = "./bench_groupcommit.patra";
-    syscall(SYS_UNLINK, _gcpath);
+    xunlink(_gcpath);
     _bdb = patra_open(_gcpath);
     patra_exec(_bdb, "CREATE TABLE gc (val INT)");
     var b_full = bench_new("insert_500_sync_full");
@@ -682,7 +682,7 @@ fn main() {
     bench_batch_stop(b_full, 500);
     vec_push(benches, b_full);
     patra_close(_bdb);
-    syscall(SYS_UNLINK, _gcpath);
+    xunlink(_gcpath);
 
     _bdb = patra_open(_gcpath);
     patra_exec(_bdb, "CREATE TABLE gc (val INT)");
@@ -696,7 +696,7 @@ fn main() {
     bench_batch_stop(b_batch, 500);
     vec_push(benches, b_batch);
     patra_close(_bdb);
-    syscall(SYS_UNLINK, _gcpath);
+    xunlink(_gcpath);
 
     # --- Explicit transaction (1.14.0) ---
     # 2,000 INSERTs inside one BEGIN..COMMIT, on a REAL-DISK path so the
@@ -706,7 +706,7 @@ fn main() {
     # already holds the before-images and patra_commit syncs at the end — so a
     # transaction paid a full sync per statement and was slower than
     # autocommit, which is the opposite of what a transaction is for.
-    syscall(SYS_UNLINK, _gcpath);
+    xunlink(_gcpath);
     _bdb = patra_open(_gcpath);
     patra_exec(_bdb, "CREATE TABLE tx (val INT)");
     var b_tx = bench_new("insert_2k_in_txn");
@@ -719,7 +719,7 @@ fn main() {
     bench_batch_stop(b_tx, 2000);
     vec_push(benches, b_tx);
     patra_close(_bdb);
-    syscall(SYS_UNLINK, _gcpath);
+    xunlink(_gcpath);
 
     # --- Prepared statement (1.8.2): exec_prepared vs exec ---
     # Same INSERT, 1000 invocations. The prepared path skips tokenize+parse
@@ -830,4 +830,4 @@ fn main() {
 }
 
 var r = main();
-syscall(SYS_EXIT, r);
+sys_exit(r);

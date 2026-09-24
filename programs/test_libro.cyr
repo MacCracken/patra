@@ -13,7 +13,7 @@ fn main() {
     fl_init();
     patra_init();
 
-    syscall(SYS_UNLINK, _lpath);
+    xunlink(_lpath);
 
     test_group("libro audit log");
 
@@ -103,7 +103,7 @@ fn main() {
     test_group("libro + patra storage");
 
     var dbpath = "/tmp/patra_libro_test.patra";
-    syscall(SYS_UNLINK, dbpath);
+    xunlink(dbpath);
     var db = patra_open(dbpath);
     assert(db != 0, "open db");
 
@@ -124,11 +124,11 @@ fn main() {
     patra_result_free(rs);
 
     patra_close(db);
-    syscall(SYS_UNLINK, dbpath);
-    syscall(SYS_UNLINK, _lpath);
+    xunlink(dbpath);
+    xunlink(_lpath);
 
     return assert_summary();
 }
 
 var r = main();
-syscall(SYS_EXIT, r);
+sys_exit(r);

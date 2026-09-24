@@ -14,16 +14,16 @@ var fpath = "/tmp/patra_fuzz_wal.patra";
 var wpath = "/tmp/patra_fuzz_wal.patra.wal";
 
 fn _cleanup() {
-    syscall(SYS_UNLINK, fpath);
-    syscall(SYS_UNLINK, wpath);
+    xunlink(fpath);
+    xunlink(wpath);
     return 0;
 }
 
 fn _write_wal(bytes, n) {
-    syscall(SYS_UNLINK, wpath);
-    var fd = syscall(SYS_OPEN, wpath, 194, 420);
-    if (n > 0) { syscall(SYS_WRITE, fd, bytes, n); }
-    syscall(SYS_CLOSE, fd);
+    xunlink(wpath);
+    var fd = file_open(wpath, O_RDWR | O_CREAT | O_EXCL, 420);
+    if (n > 0) { sys_write(fd, bytes, n); }
+    sys_close(fd);
     return 0;
 }
 
@@ -39,10 +39,10 @@ patra_close(db);
 
 _write_wal(0, 0);
 db = patra_open(fpath);
-if (db == 0) { syscall(SYS_EXIT, 1); }
+if (db == 0) { sys_exit(1); }
 var rs = patra_query(db, "SELECT * FROM t");
-if (patra_result_count(rs) != 1) { syscall(SYS_EXIT, 2); }
-if (patra_result_get_int(rs, 0, 0) != 77) { syscall(SYS_EXIT, 3); }
+if (patra_result_count(rs) != 1) { sys_exit(2); }
+if (patra_result_get_int(rs, 0, 0) != 77) { sys_exit(3); }
 patra_result_free(rs);
 patra_close(db);
 
@@ -53,9 +53,9 @@ memset(short, 0, 4);
 _write_wal(short, 4);
 fl_free(short);
 db = patra_open(fpath);
-if (db == 0) { syscall(SYS_EXIT, 10); }
+if (db == 0) { sys_exit(10); }
 rs = patra_query(db, "SELECT * FROM t");
-if (patra_result_get_int(rs, 0, 0) != 77) { syscall(SYS_EXIT, 11); }
+if (patra_result_get_int(rs, 0, 0) != 77) { sys_exit(11); }
 patra_result_free(rs);
 patra_close(db);
 
@@ -66,9 +66,9 @@ memset(big, 170, 1048576);
 _write_wal(big, 1048576);
 fl_free(big);
 db = patra_open(fpath);
-if (db == 0) { syscall(SYS_EXIT, 20); }
+if (db == 0) { sys_exit(20); }
 rs = patra_query(db, "SELECT * FROM t");
-if (patra_result_get_int(rs, 0, 0) != 77) { syscall(SYS_EXIT, 21); }
+if (patra_result_get_int(rs, 0, 0) != 77) { sys_exit(21); }
 patra_result_free(rs);
 patra_close(db);
 
@@ -81,9 +81,9 @@ store32(hdr + 4, 1);
 _write_wal(hdr, WAL_HDR_SZ);
 fl_free(hdr);
 db = patra_open(fpath);
-if (db == 0) { syscall(SYS_EXIT, 30); }
+if (db == 0) { sys_exit(30); }
 rs = patra_query(db, "SELECT * FROM t");
-if (patra_result_get_int(rs, 0, 0) != 77) { syscall(SYS_EXIT, 31); }
+if (patra_result_get_int(rs, 0, 0) != 77) { sys_exit(31); }
 patra_result_free(rs);
 patra_close(db);
 
@@ -101,11 +101,11 @@ store64(rec_buf + WAL_HDR_SZ + WAL_REC_SZ * 2, 1);
 _write_wal(rec_buf, WAL_HDR_SZ + WAL_REC_SZ * 3);
 fl_free(rec_buf);
 db = patra_open(fpath);
-if (db == 0) { syscall(SYS_EXIT, 40); }
+if (db == 0) { sys_exit(40); }
 rs = patra_query(db, "SELECT * FROM t");
-if (patra_result_get_int(rs, 0, 0) != 77) { syscall(SYS_EXIT, 41); }
+if (patra_result_get_int(rs, 0, 0) != 77) { sys_exit(41); }
 patra_result_free(rs);
 patra_close(db);
 
 _cleanup();
-syscall(SYS_EXIT, 0);
+sys_exit(0);

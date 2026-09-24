@@ -126,35 +126,55 @@ enum DPOff {
 # Free page layout
 enum FPOff { FP_TYPE = 0; FP_NEXT = 8; }
 
-# flock + fsync syscalls. The LOCK_* operations are universal; the syscall
-# NUMBERS are per-target and come from the cyrius syscall peer where available.
-#ifdef CYRIUS_TARGET_AGNOS
-# agnos (1.46.x): flock is kernel #59 and lseek #58 — both supplied by the
-# syscall peer (SYS_FLOCK / SYS_LSEEK), so they are NOT redefined here (a
-# redefinition would shadow the peer). agnos has no per-fd fdatasync; map
-# durability to whole-FS sync #12 (over-syncs but is correct).
-enum Flock { LOCK_SH = 1; LOCK_EX = 2; LOCK_NB = 4; LOCK_UN = 8; }
-enum Sync { SYS_FDATASYNC = 12; }
-#endif
-#ifndef CYRIUS_TARGET_AGNOS
-# Linux/macos: SYS_FLOCK = 73 is supplied here for macos self-sufficiency (the
-# macOS peer does not define it; both Linux peers do since cyrius 6.6.4, with the
-# same value — a same-value redefinition is silent). The peer defines SYS_FDATASYNC
-# (#75) on Linux, matched here for macos.
-enum Flock { LOCK_SH = 1; LOCK_EX = 2; LOCK_NB = 4; LOCK_UN = 8; SYS_FLOCK = 73; }
-enum Sync { SYS_FDATASYNC = 75; }
-#endif
-
 # ── Low-level operations ────────────────────
+#
+# Every kernel touch goes through a stdlib wrapper — xlseek, xflock,
+# sys_fdatasync / xfsync, file_open — and patra defines no syscall number, O_*
+# flag or LOCK_* value of its own (LOCK_* come from lib/io.cyr). A raw
+# `syscall(N, …)`, or `syscall(SYS_NAME, …)`, which is the same mistake with a
+# nicer name, hard-codes one target's ABI at the call site; a private copy of a
+# stdlib constant does the same thing one step removed: until 1.14.3 it made the
+# WAL follow symlinks on aarch64. CI rejects raw syscalls and numeric open flags
+# (1.15.0); private constants are a CLAUDE.md rule.
 
 # Seek to byte offset in file
 fn _pt_seek(fd, off): i64 {
-    return syscall(SYS_LSEEK, fd, off, 0);
+    return xlseek(fd, off, 0);
 }
 
-# Apply flock operation to fd
+# Apply flock operation to fd. xflock owns the per-target dispatch (Linux
+# SYS_FLOCK, Darwin BSD flock via the x86 number, agnos #59); Windows has no
+# flock and returns -1.
 fn _pt_flock(fd, op): i64 {
-    return syscall(SYS_FLOCK, fd, op);
+    return xflock(fd, op);
+}
+
+# Flush a file's data to stable storage. fdatasync where the target has it
+# (Linux, macOS): the WAL hot path and group commit are priced on it, and fsync
+# would add a metadata sync to every commit. Elsewhere, the stdlib's xfsync:
+# agnos has no per-fd sync, so that is a whole-filesystem sync (over-syncs, but
+# correct); Windows has no flush wired (no FlushFileBuffers reroute), so it is a
+# no-op that reports success.
+#
+# ⚠ Windows, before 1.15.0: this was a raw syscall(75), which PE does not route,
+# so it returned -ENOSYS. Eleven call sites ignored that. wal_log_page's
+# write-ahead check did not, so every write inside an explicit transaction failed
+# with PATRA_ERR_IO there. Transactions now work on Windows, ROLLBACK included,
+# with the guarantees autocommit always had there: no durability, and no crash
+# atomicity. Without flock, recovery never runs on open, and the next BEGIN's
+# O_TRUNC discards a crashed transaction's WAL, so its writes stay applied.
+fn _pt_fdatasync(fd): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return xfsync(fd);
+    #endif
+    #ifdef CYRIUS_TARGET_WIN
+    return xfsync(fd);
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    #ifndef CYRIUS_TARGET_WIN
+    return sys_fdatasync(fd);
+    #endif
+    #endif
 }
 
 # Acquire exclusive (write) lock
@@ -194,7 +214,7 @@ fn patra_hdr_write_nosync(fd, buf): i64 {
 fn patra_hdr_write(fd, buf): i64 {
     var r = patra_hdr_write_nosync(fd, buf);
     if (r != PATRA_OK) { return r; }
-    syscall(SYS_FDATASYNC, fd);
+    _pt_fdatasync(fd);
     return PATRA_OK;
 }
 
@@ -276,17 +296,25 @@ fn _sch_ncols_clamped(schema): i64 {
 # the WAL open FOLLOWED a symlink and truncated its target, and _pt_sync_dir's
 # directory open got EINVAL (cyrius issue 2026-09-12, traced on aarch64 at 6.6.3).
 # On Darwin they are 0x100 / 0x100000. Never hardcode an O_* value.
+#
+# ⚠ 1.15.0: that rule was written at 1.14.3 and not applied to the two
+# functions below or to wal_start, which still spelled their base flags as
+# x86_64 numbers — 194 (O_RDWR|O_CREAT|O_EXCL) and 578 (O_RDWR|O_CREAT|O_TRUNC).
+# Those happen to be right on Linux, where asm-generic keeps the x86 values for
+# these four bits, and wrong on Darwin, where O_CREAT is 0x200, O_TRUNC 0x400
+# and O_EXCL 0x800: there 194 decodes to O_RDWR|O_ASYNC|O_FSYNC, so a new
+# database was never created, and 578 to O_RDWR|O_ASYNC|O_CREAT, so a WAL
+# was never truncated. Every flag is spelled symbolically now.
 
 # Create new .patra file (O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW,
 # mode 0644 = 420). O_EXCL already refuses an existing target; O_NOFOLLOW
 # additionally refuses a symlink pointed at the target path.
 # Routed through file_open (io) not raw sys_open: agnos's sys_open is
 # length-carrying (name, namelen, flags) and uses its own AO_* flag bits,
-# so file_open bridges the ABI (Linux: verbatim passthrough). O_EXCL /
-# O_NOFOLLOW hardening is preserved on Linux; on agnos those bits are
-# dropped (create is already guarded by the prior open-fail path).
+# so file_open bridges the ABI, including O_EXCL and O_NOFOLLOW since
+# cyrius 6.6.4 (Linux: verbatim passthrough).
 fn _pt_file_create(path): i64 {
-    var fd = file_open(path, 194 + O_NOFOLLOW, 420);
+    var fd = file_open(path, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, 420);
     if (fd < 0) { return 0 - 1; }
     var buf = pg_alloc();
     patra_hdr_init(buf);
@@ -300,7 +328,7 @@ fn _pt_file_create(path): i64 {
 # Open existing .patra file (O_RDWR | O_NOFOLLOW). Refuses symlinked targets
 # on Linux. file_open bridges the agnos ABI (namelen + AO_* flags).
 fn _pt_file_open(path): i64 {
-    return file_open(path, 2 + O_NOFOLLOW, 0);
+    return file_open(path, O_RDWR | O_NOFOLLOW, 0);
 }
 
 # fsync the DIRECTORY containing `path` (1.14.0).
@@ -339,9 +367,9 @@ fn _pt_sync_dir(path): i64 {
         store8(d + dl, 0);
         dir = d;
     }
-    var dfd = file_open(dir, O_DIRECTORY, 0);
+    var dfd = file_open(dir, O_RDONLY | O_DIRECTORY, 0);
     if (dfd >= 0) {
-        syscall(SYS_FDATASYNC, dfd);
+        _pt_fdatasync(dfd);
         sys_close(dfd);
     }
     if (cut >= 0) { _pt_free(dir); }

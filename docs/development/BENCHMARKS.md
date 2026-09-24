@@ -11,9 +11,22 @@ Benches under `/tmp` (tmpfs, fdatasync is a no-op) are noted explicitly.
 The group-commit comparison uses a real-disk path (`./bench_groupcommit.patra`,
 btrfs/NVMe under the repo) to avoid hiding the win.
 
-> **Currency note (updated 2026-09-07, v1.13.12).** The bulk of this table is
-> still the v1.9.5 / cyrius 6.0.1 baseline. Patra is now at **v1.13.12** (cyrius
-> pin **6.6.0**) and the suite stands at **40 benchmarks**.
+> **Currency note (updated 2026-09-23, v1.15.0).** The bulk of this table is
+> still the v1.9.5 / cyrius 6.0.1 baseline. Patra is now at **v1.15.0** (cyrius
+> pin **6.6.6**) and the suite stands at **41 benchmarks** (`insert_2k_in_txn`
+> added at v1.14.0).
+>
+> - **v1.15.0: flat, with one lesson about this suite.** Four interleaved rounds
+>   of 1.14.3 on 6.6.4, 1.14.3 on 6.6.6, and 1.15.0, on a host shared with other
+>   test load: no benchmark moved past its own spread at either step (medians in
+>   `state.md`). But the five `parse_*` benchmarks (7–10 µs) read +2 % to +5 %
+>   in that run and **+16 % to +22 %** in an earlier build of the same change
+>   whose only difference was the bench harness's spelling of `close`. Counted
+>   with `perf_event_open`, the parser retires exactly the same instructions
+>   before and after (799,726 per five-parse iteration). **Sub-10 µs rows here
+>   move ±20 % with code placement alone.** Read deltas there as noise unless an
+>   instruction count agrees. Also: `lib/bench.cyr` was rewritten in cyrius 6.6.5
+>   and its `min` / `max` changed meaning; compare `avg` across that boundary.
 >
 > - **v1.13.12 full run under cyrius 6.6.0: no regression.** The four
 >   regression-sensitive benchmarks against their recorded figures —

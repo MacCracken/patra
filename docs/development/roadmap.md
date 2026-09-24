@@ -1,6 +1,6 @@
 # Patra Development Roadmap
 
-> **Last refreshed**: 2026-09-07 (v1.14.1)
+> **Last refreshed**: 2026-09-23 (v1.15.0)
 >
 > Thin **backlog index**, **forward-looking only**. Nothing shipped belongs here —
 > per-release detail lives in [`../../CHANGELOG.md`](../../CHANGELOG.md), the
@@ -8,18 +8,22 @@
 > in [`state.md`](state.md). Open consumer requests live one-file-each in
 > [`requests/`](requests/); upstream cyrius bugs in [`issues/`](issues/).
 
-> **Current**: **v1.14.1**, cyrius pin **6.6.0**, zero `[deps.*]` git blocks.
-> Gates green: **1288 tests**, **8/8 fuzz**, 41 benchmarks, lint 0-warn, fmt
-> clean, vet/deny clean, libro 15/15, vidya 19/19, `dist/` in sync (12 sidecar
-> leaves). Binary **225,312 B** DCE-on / 319,520 B DCE-off.
+> **Current**: **v1.15.0**, cyrius pin **6.6.6**, zero `[deps.*]` git blocks.
+> Gates green: **1301 tests**, **8/8 fuzz**, 41 benchmarks, lint 0-warn, fmt
+> clean, libro 15/15, vidya 19/19, `dist/` in sync (**14** sidecar leaves), and
+> a new **"No raw syscalls or numeric open flags"** gate. Binary
+> **225,496 B** DCE-on / 340,184 B DCE-off. The whole suite also runs on
+> **aarch64** now — 1301/1301, 8/8 fuzz, 3/3 programs under `qemu-aarch64` —
+> where before 1.15.0 most of the harnesses did not compile.
 >
-> **v1.14.0 was a P(-1) hardening sweep**: 23 defects, seven of them silent
-> wrong answers reachable from plain SQL, every one of them living in a tree
-> whose gates all passed. All fixes mutation-verified (15 mutations). See
-> [`../../CHANGELOG.md`](../../CHANGELOG.md) and
-> [`../adr/0004-per-database-wal-and-cache-identity.md`](../adr/0004-per-database-wal-and-cache-identity.md).
+> **v1.15.0 closed the raw-syscall issue** and fixed three platform defects on
+> the way (two macOS, one Windows), all by inspection, none run on the affected
+> OS. It filed one agnos kernel gap with agnos. **Its review also found a
+> pre-existing multi-process crash-recovery bug**, now patra's one open issue
+> (below). See *Platforms* for the per-target picture.
 >
-> **The upstream-issue queue is empty**; one patra-owned issue is open (below).
+> **Nothing patra filed upstream is open.** Five requests are written up but
+> **not filed** — see *To file upstream*.
 >
 > The **1.13.x repair arc is complete**. It is recorded in
 > [`completed-phases.md`](completed-phases.md) and
@@ -37,9 +41,12 @@ sovereignty"*.
 ## Open backlog
 
 **Consumer requests**: none open — one shipped in 1.13.10, see below.
-**Consumer-filed bugs**: none open. **Upstream cyrius issues**: **none open** —
-the last filing was archived at v1.13.12 (fixed upstream in cyrius 6.5.28), see
-below. Two cross-build warnings are open but **unfiled**, pending a decision.
+**Consumer-filed bugs**: none open. **Upstream cyrius issues filed by patra**: **none open** —
+the last filing was archived at v1.13.12 (fixed upstream in cyrius 6.5.28). The
+two cross-build warnings carried "open but unfiled" since v1.13.12 were fixed
+upstream without a filing (see *To file upstream*). **Upstream agnos issues**:
+**one filed** at v1.15.0, `agnos/docs/development/issues/2026-09-23-flock-never-waits-and-no-caller-spins.md` (contended `flock` never waits; see
+*Platforms*).
 
 ### Recently shipped
 
@@ -51,22 +58,32 @@ below. Two cross-build warnings are open but **unfiled**, pending a decision.
   nothing of patra's own (its whole sakshi surface is one `sakshi_error`, which
   passes at WARN anyway). Regression-guarded and mutation-verified.
 
+- **[`issues/archive/2026-09-21-raw-syscall-sweep-and-gate.md`](issues/archive/2026-09-21-raw-syscall-sweep-and-gate.md)**
+  — filed 2026-09-21 from libro 2.10.3, **shipped v1.15.0.** 345 raw
+  `syscall(…)` sites replaced by stdlib wrappers, fdatasync through one
+  `_pt_fdatasync`, `file.cyr`'s private `SYS_*` / `LOCK_*` tables deleted, a CI
+  gate that also rejects numeric open flags. Found three platform defects the
+  filing did not list (see *Platforms*).
+
 ### Open — patra's own
 
-- **[`issues/2026-09-21-raw-syscall-sweep-and-gate.md`](issues/2026-09-21-raw-syscall-sweep-and-gate.md)**
-  — filed 2026-09-21 from libro 2.10.3, which did the same sweep. **345 raw
-  `syscall(…)` sites** (24 in `src/`, the rest harness exits, unlinks, opens),
-  every one with a stdlib wrapper; two of them re-implement `clock_epoch_secs`
-  by hand (`src/wal.cyr:82,92`, x86_64 `228`). Replace with `x*` / `sys_*` /
-  `random_bytes` / `clock_epoch_secs`, add `chrono` + `random` to `[deps]
-  stdlib` (sidecar 12 → 14), drop `file.cyr`'s private `SYS_*` tables, and add
-  libro's "No raw syscalls" CI gate. One decision inside it: fdatasync on the
-  WAL path (local `_pt_fdatasync` now, `xfdatasync` upstream). **Scheduled with
-  the 6.6.6 pin bump below** — the user's call, 2026-09-21.
+- 🔴 **[`issues/2026-09-23-wal-recovery-runs-only-at-open.md`](issues/2026-09-23-wal-recovery-runs-only-at-open.md)**
+  — found 2026-09-23 by the code review of the 1.15.0 cut, **pre-existing**
+  (identical on 1.14.3), reproduced with two processes. When one process dies
+  mid-transaction while another holds the database open, the survivor reads the
+  dead transaction's uncommitted rows. A `BEGIN` of its own then truncates the
+  orphaned WAL and makes those rows permanent, while an autocommit write of its
+  own is **lost** at the next open, when the WAL is replayed over it. The fix
+  (recover under `LOCK_EX` before any write, and escalate a reader that finds a
+  WAL) changes the lock protocol. *Effort: large.* Not a feature: it does not
+  wait for a consumer.
+- **`_pc_alloc` never checks `alloc()`** (`src/pcache.cyr`) when it builds the
+  opt-in page cache's three tables and 1,024 page buffers, so a refused mapping
+  becomes a store through null instead of an error from `patra_cache_enable`.
+  Pre-existing; needs the cache enabled and memory exhausted. *Effort: small.*
 
-The previous filing — `2026-09-07-schema-load-prologue-cloned-ten-times` —
-shipped as v1.14.1 and is
-[archived](issues/archive/2026-09-07-schema-load-prologue-cloned-ten-times.md).
+The previous two filings shipped as v1.14.1 and v1.15.0 and are in
+[`issues/archive/`](issues/archive/).
 
 ### Deliberately not fixed at v1.14.0 — wrong answers, not corruption
 
@@ -97,30 +114,56 @@ breakage at a minor bump.
 
 ### To file upstream (cyrius)
 
-**Empty as of v1.13.12.** The one filing here —
+**Nothing filed and open.** The last filing —
 `2026-08-18-cyrius-distlib-named-deps-unanchored-scan` — was fixed upstream in
-cyrius **6.5.28**, mutation-verified under 6.6.0, and moved to
-[`issues/archive/`](issues/archive/2026-08-18-cyrius-distlib-named-deps-unanchored-scan.md).
-It had been stale for three shipped cuts.
+cyrius **6.5.28** and is [archived](issues/archive/2026-08-18-cyrius-distlib-named-deps-unanchored-scan.md).
 
-⚠ **Two cross-build warnings are open but unfiled** (found at the v1.13.12 pin
-bump, both cyrius stdlib, neither patra's and neither gated by CI, which does not
-cross-build): `--aarch64` emits `lib/io.cyr:442:31: raw syscall 32 is x86_64 dup`,
-a false positive — the call is inside `#ifdef CYRIUS_ARCH_AARCH64`, where 32 *is*
-`flock`; `--agnos` emits `undefined function '_agnos_getenv'`, defined in
-`lib/args_agnos.cyr` but not pulled into the closure. Both reproduce against the **pre-refresh lib
-snapshot** under this compiler, so the snapshot refresh did not cause them;
-whether the 6.6.0 *compiler* did is **undetermined** — the old-vs-new A/B could
-not be run on this host (see the toolchain note in `state.md`). So they do not
-falsify the "cross-builds warning-free" line archived with the 2026-06-18 agnos
-ABI issue, which was accurate when written under 6.2.44; they establish only
-that it does not hold under 6.6.0.
-**Decide at the next cut**: file them upstream, or record them as accepted noise.
+**The two cross-build warnings carried here since v1.13.12 are gone**, fixed
+upstream without a filing (measured at the v1.15.0 cut). `cyrius build
+--aarch64 src/lib.cyr` has been warning-free since **6.6.4**, when `xflock`'s
+aarch64 arm stopped spelling the native 32 (the `raw syscall 32 is x86_64 dup`
+false positive). `--agnos` has been warning-free only since **6.6.6**, when
+`io.cyr` began including `args_agnos.cyr` (the undefined `_agnos_getenv`). Under
+6.6.4, and so in 1.14.3, that warning was still there.
+
+**Five requests written up, not filed**, all from the v1.15.0 cut. Items 2–4
+are Windows-shaped. Each names what patra does today without it.
+
+1. **`xfdatasync(fd)` in `lib/io.cyr`** — `sys_fdatasync` on Linux / macOS,
+   `sys_sync` on agnos, a flush on Windows. patra carries all of that dispatch
+   except the Windows flush (its Windows arm is `xfsync`'s no-op) as
+   `_pt_fdatasync` in `src/file.cyr`, and would delete it; libro and sigil sync
+   too. (Option 2 of the archived raw-syscall issue.)
+2. **A `FlushFileBuffers` PE reroute**, so `xfsync` (and 1.) can flush on
+   Windows. Today both are no-ops there that report success: **no patra write on
+   Windows is ever flushed**, transaction or not.
+3. **`xflock` on Windows via `LockFileEx`.** It returns -1 today, which costs
+   patra more than cross-process locking: `patra_open` runs WAL recovery and
+   assigns the database identity only under a non-blocking exclusive flock, so
+   on Windows **neither ever runs** — a crashed transaction's WAL is never
+   replayed.
+4. **`O_NOFOLLOW` on Windows** — defined so portable source compiles, but not
+   enforced (see *Platforms*).
+5. **`cyrius deps` does not re-lock when `[deps] stdlib` gains a leaf.** At
+   1.15.0 it vendored `chrono` and `random` but left `cyrius.lock` at 29 of 31
+   entries, and `deps --verify` still passed. `--relock` fixed it, but that flag is
+   missing from `cyrius help`.
+
+**Filed by another consumer, open, and it reaches patra:**
+`cyrius/docs/development/issues/2026-09-23-kybernet-fl-alloc-unchecked-fl-mmap-faults-at-minus-12.md`.
+`fl_alloc` sends every request over 4,096 bytes to a direct `mmap` and writes its
+block header through the result unchecked, so a refused mapping is a SIGSEGV at
+address -12, not a 0. patra's `_pt_alloc` allocations (result sets, WAL and row
+buffers) go through `fl_alloc`, so their `== 0` checks on requests over 4 KB
+cannot fire under address-space pressure. The page-cache pool and the TLS slab
+stack use `alloc()`, which does return 0, but `_pc_alloc` never checks it (see
+*Open — patra's own*). Nothing to do in patra for `fl_alloc`; re-check at each
+pin bump.
 
 ### Release tooling — one decision left
 
 - **Build `scripts/release-doc-sync.sh`, or delete the promise.** CLAUDE.md
-  (§31, §198) has asserted a release post-hook that bumps `state.md` since that
+  (its *Current State* note and *CI / Release → State sync*) has asserted a release post-hook that bumps `state.md` since that
   file was created. **There is no `scripts/` directory at all** — its only
   occupant, `version-bump.sh`, was removed after v1.13.8 (it carried a `sed` that
   had been dead since `cyrius.cyml`'s `version` field became `${file:VERSION}`),
@@ -130,7 +173,9 @@ that it does not hold under 6.6.0.
   narrative, `doc-health.md`'s header. Either automate those or strike the claim
   — **a documented mechanism that does not exist is worse than none**, because
   each miss gets attributed to human error rather than to a missing gate.
-  *Effort: medium.*
+  **Evidence since:** 1.14.2 and 1.14.3 shipped without touching `state.md`,
+  this file or `doc-health.md` at all; the 1.15.0 cut found all three still
+  describing 1.14.1 on cyrius 6.6.0. *Effort: medium.*
 
 ## Deferred — genuinely open, no consumer yet
 
@@ -181,9 +226,9 @@ are **not scheduled**. Each states the trigger that would move it.
   invariants in the suite are probed from a second open file description — exact
   for `flock`, but it does not exercise a second process's cache. *Trigger*: a
   consumer adopting the opt-in cache across processes. *Medium.*
-- **`programs/` aarch64 cross-build.** The three harnesses still use raw
-  `syscall(SYS_UNLINK, …)`; `src/lib.cyr` itself cross-builds clean. *Trigger*:
-  an aarch64-CI consumer. *Medium.*
+- **aarch64 in CI.** Every harness builds and passes on aarch64 since 1.15.0,
+  checked by hand under `qemu-aarch64`; CI does not run it. See *Platforms*.
+  *Trigger*: an aarch64 consumer. *Low.*
 - **`docs/guides/` scaffolding.** `programs/` satisfies the examples half, which
   the standard permits. *Trigger*: a consumer asking for an integration
   walkthrough. *Low.*
@@ -204,86 +249,78 @@ are **not scheduled**. Each states the trigger that would move it.
 Patra crossed v1.0 at 1.0.0 (2026-04-17). No v2.0 criteria are queued — the
 surface is intentionally small, and no new SQL surface is planned.
 
-## Moving the cyrius pin to 6.6.6
+## Platforms — what patra guarantees where
 
-**Current pin: `cyrius = "6.6.4"` (cyrius.cyml:7).**
+**Primary target: Linux x86_64, the only one CI builds or runs.** Every other
+row below is a hand-run cross-build, and at most an emulated run. Each gap names
+what would close it; the Windows ones are in *To file upstream*. Refreshed at
+v1.15.0 (cyrius 6.6.6).
 
-### ⛔ Windows data corruption in the JSONL journal and the WAL — fixed by the pin, no source change
+| Target | Built | Run | Flush | Writers serialized | WAL recovery on open | `O_NOFOLLOW` |
+|---|---|---|---|---|---|---|
+| Linux x86_64 | CI | CI, full suite | fdatasync | yes (blocking `flock`) | yes | enforced |
+| Linux aarch64 | by hand | full suite under `qemu-aarch64` (1.15.0) | fdatasync | yes | yes | enforced |
+| macOS x86_64 / arm64 | by hand (`CYRIUS_MACHO=1` / `CYRIUS_MACHO_ARM=1` to `cycc` / `cycc_aarch64`) | **not run** | fdatasync (BSD 187) | yes (BSD `flock`) | yes | enforced |
+| agnos x86_64 | by hand (`--agnos`) | **not run** | whole-filesystem sync | ⚠ **no** — see below | yes | bridged to `AO_NOFOLLOW` (cyrius 6.6.4) |
+| Windows (PE) | by hand (`--win`) | **not run** | ⛔ **none** | ⛔ **no** | ⛔ **never** | ⛔ **not enforced** |
 
-patra opens its JSONL journal **`O_RDWR | O_CREAT | O_APPEND | O_NOFOLLOW`**
-(`src/jsonl.cyr:14`, `jsonl_open`) and its WAL **`O_RDWR | O_CREAT | O_TRUNC |
-O_NOFOLLOW`** (`src/wal.cyr:286`), and patra already carries live
-`#ifdef CYRIUS_TARGET_WIN` branches (`src/wal.cyr:208`, `:234`). Before 6.6.6,
-`EOPEN_PE` decoded only `O_CREAT` and `O_EXCL` — the access mode, `O_TRUNC` and
-`O_APPEND` were all ignored. On a PE build that means:
+Two notes apply across the table. **Recovery runs only at `patra_open`** on every
+target that has it: a process dying mid-transaction while another holds the
+database open is not recovered until the next open (*Open — patra's own*).
+**On macOS, the fsync family does not flush the drive's write cache**; Apple
+documents `fcntl(F_FULLFSYNC)` for that, and patra does not issue it. Durability
+there is weaker than on Linux.
 
-- **`jsonl_append` did not append.** Every record wrote from offset 0 and
-  overwrote the one before it. An append-only journal is the worst case named in
-  the 6.6.6 changelog, and this is exactly it.
-- **The WAL's `O_TRUNC` did not truncate.** A rewritten `<db>.wal` kept the old
-  tail of the previous file beyond the new content.
+- **Windows.** The 6.6.6 compiler fixed PE `open(2)` flag translation, which
+  patra depends on: before it, `jsonl_append` wrote every record at offset 0 over
+  the previous one, and a rewritten `<db>.wal` kept the old file's tail. cyrius
+  verified the fix on real Windows hardware, but **patra has not been run on
+  Windows**. The check is two `jsonl_append` calls
+  (the file must hold two lines) and one WAL rewritten over a longer one (no tail
+  may survive). What remains:
+  - **No flush.** `xfsync` is a no-op there, so nothing patra writes is ever
+    flushed. Since 1.15.0 transactions *work* on Windows (before, their first
+    write failed with `PATRA_ERR_IO`), `ROLLBACK` included, but they carry no
+    durability guarantee and no crash atomicity: a transaction interrupted by a
+    crash stays partly applied, because recovery never runs (next bullet) and
+    the next `BEGIN`'s `O_TRUNC` discards its WAL. Keeping transactions failing
+    until a flush is wired would be the alternative: one line in
+    `_pt_fdatasync`.
+  - **No `flock`** (`xflock` returns -1). No cross-process locking at all, and
+    `patra_open`'s WAL recovery and database-identity assignment, which run only
+    under a non-blocking exclusive flock, **never run**: a crashed transaction's
+    WAL is never replayed.
+  - **`O_NOFOLLOW` is defined but not enforced** (the nearest Win32 flag *opens*
+    a reparse point rather than refusing it). A symlink planted at a
+    db / wal / jsonl path redirects the open, and cyrius measured on real `cass`
+    (2026-09-19) that `CREATE_NEW` over a dangling symlink **creates the target**.
+    ⚠ This file used to say that case "does not apply" because "patra does not
+    use `O_EXCL`". **It does**: `_pt_file_create` opens
+    `O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW`, so a dangling symlink planted at a
+    not-yet-existing database path makes patra create the file the link names and
+    write a 4 KB header into it.
 
-6.6.6 rewires `EOPEN_PE` through `_pe_open_flags` (`src/backend/x86/emit.cyr`),
-which now decodes the access mode, `O_CREAT`, `O_EXCL`, `O_TRUNC` and
-`O_APPEND`, pinned on real Windows hardware by
-`tests/tcyr/crossos/open_flag_translation.tcyr`. **The fix is in the compiler,
-not in `lib/`** — so it arrives with the pin bump alone and needs nothing from
-patra. `file_open` is the stdlib `lib/io.cyr` entry point, which routes to the
-same PE open path.
-
-Also gained on PE: opens honour the access mode (`O_RDONLY` now refuses a
-write), and `file_exists` / `file_read_all` no longer request write access, so
-they succeed on read-only files and read-only volumes.
-
-### ⚠ What you still do NOT get on Windows — `O_NOFOLLOW`
-
-Both opens pass `O_NOFOLLOW` (added at 1.5.2, audit §2.8). **6.6.6 deliberately
-does not map it**: the nearest Win32 flag, `FILE_FLAG_OPEN_REPARSE_POINT`,
-*opens* the symlink instead of *refusing* like `O_NOFOLLOW` does, so mapping it
-would be a semantic change rather than a port. The constant is defined so
-portable source compiles, and that is all. Two consequences for patra on PE:
-
-- the symlink refusal that `O_NOFOLLOW` buys on Linux **is not enforced**; a
-  pre-planted symlink at the db/wal/jsonl path redirects the open to its target;
-- cyrius measured the related case on real `cass` (2026-09-19): `CREATE_NEW`
-  over a dangling symlink **succeeds and creates the target**, where the same
-  flags on Linux fail.
-
-patra does not use `O_EXCL`, so the sharper keyfile variant does not apply — but
-if the WAL/db path can be attacker-influenced on a Windows deployment, the
-Linux-side guarantee is not there. Worth an issue against cyrius rather than a
-workaround here.
-
-### Everything else on the 6.6.6 list is absent
-
-Grepped `src/`, `programs/` and `tests/` (excluding vendored `lib/`): zero
-`struct` declarations, zero `async` fns, zero `operator` fns, zero
-`ret2`/`rethi` pair returns, zero SIMD-typed returns, zero top-level `{ }`
-blocks, zero `: cstring` parameters, zero duplicate global `var` declarations,
-zero locally defined `vec_*`. `lib/regression.cyr` is not vendored and no
-`regression_*` helper is called, so the new exec deadline is irrelevant.
-`[deps] stdlib` names `vec` (not `assert`), so assert.cyr's new transitive
-`include "lib/vec.cyr"` cannot collide either.
-
-**Measured:** `cyrius build` under 6.6.4 and under 6.6.6 both exit 0 with an
-identical (empty) diagnostic set.
-
-### Do in the same pass — the raw syscall sweep
-
-[`issues/2026-09-21-raw-syscall-sweep-and-gate.md`](issues/2026-09-21-raw-syscall-sweep-and-gate.md)
-is scheduled with this bump: the pin move is the stdlib-update moment, the
-sweep adds `chrono` + `random` to `[deps] stdlib`, and its CI gate should land
-before the next cut so the tree is measured clean at 6.6.6. `src/wal.cyr:82,92`
-(`syscall(228, …)`) is the site to do first — it is 1.14.3's own repair of the
-`syscall(201)` timestamp bug, still spelled by number.
-
-### Verify after bumping
-
-1. `cyrius deps` — re-vendor so `lib/io.cyr` picks up 6.6.6 (now
-   self-sufficient; `xrmdir` routes to `RemoveDirectoryW` on PE).
-2. `cyrius build` + `cyrius test` + `cyrius lint` + `cyrius distlib` on Linux.
-3. **The one that matters:** cross-compile for PE (`CYRIUS_TARGET_WIN=1`) and,
-   on real Windows, call `jsonl_open` + `jsonl_append` twice and confirm the
-   file holds **two** lines, not one. Then rewrite a WAL over a longer one and
-   confirm no tail survives. That is the regression this pin exists to close,
-   and it cannot be verified on Linux.
+  **Treat patra on Windows as single-process, non-durable, and unsafe in a
+  directory an attacker can write to.**
+- **agnos: locks are not held across processes when contended — filed with
+  agnos** (`agnos/docs/development/issues/2026-09-23-flock-never-waits-and-no-caller-spins.md`). agnos `flock`#59 **never waits**: by design a contended
+  `LOCK_SH` / `LOCK_EX` returns -1 and "the ring-3 caller poll-spins" (the `#59`
+  arm in `kernel/core/syscall.cyr`), but no ring-3 layer does. cyrius's `xflock`
+  calls `#59` once, and patra ignores the result at all 14 `LOCK_EX` and 3
+  `LOCK_SH` sites, as it may where `flock` waits. So two agnos processes can
+  write one database at the same time, and a reader can run in the middle of
+  another process's write. (Threads are not affected: agnos runs a process's
+  threads serially.) Found at v1.15.0 by reading the kernel, **not reproduced**
+  (agnos is not run here). **patra does not work around kernel lock
+  semantics**: the fix belongs in agnos, or in cyrius's `xflock` if agnos keeps
+  `#59` non-blocking, and the filing asks for one or the other.
+- **macOS.** Both Mach-O targets compile with only stdlib-sourced "not routed"
+  warnings (`thread_local.cyr`'s 158 on x86; five on arm64 that
+  `lib/syscalls.cyr` alone reproduces). 1.15.0 fixed two macOS defects by
+  inspection: a new database could not be created, and a WAL was not truncated.
+  It also moved database identity and WAL salts onto the CSPRNG. **None of it
+  has been run on a Mac**, so "macOS works" is an inference until someone does.
+- **aarch64 is verified by hand, not gated.** Before 1.15.0 most of the
+  harnesses did not compile for it; now all pass under `qemu-aarch64`, but CI
+  runs x86_64 only. A CI step doing the same under qemu-user is cheap.
+  *Trigger*: an aarch64 consumer, or the next aarch64-only defect.
