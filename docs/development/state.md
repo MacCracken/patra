@@ -9,6 +9,14 @@
 
 ## Current
 
+> **v1.15.1 (2026-09-28)** — **the CSPRNG-failure fallback separates two processes in one second, and
+> cyrius 6.6.6 → 6.6.9.** `_pt_rand64` / `_wal_gen_salts`' fallback (for a restricted container, seccomp or an
+> old kernel) had one-second resolution, so two processes falling back in the same second drew the same
+> database id and WAL salts; it is now `_pt_time_mix()` (wall-clock ns XOR monotonic × golden ratio XOR a
+> stack address, plus the counter — cyrius 6.6.10 `lib/hashseed.cyr`'s mix), proven by a two-child fork test.
+> A refused `_pt_alloc(8)` now branches to the fallback explicitly. **1305 assertions** (was 1301). From
+> cyrius 6.6.10 bite 14.
+>
 > **v1.15.0 (2026-09-23)** — **no raw syscalls: every kernel touch goes through
 > the stdlib, and cyrius 6.6.4 → 6.6.6.** All 346 raw `syscall(…)` calls (345
 > lines: 24 in `src/`, the rest harness exits, unlinks and opens) replaced by
@@ -326,7 +334,8 @@
   carries 5 unrouted-syscall warnings, all reproduced by a stdlib-only build;
   patra's own count went 13 → 0 at v1.15.0. Both Mach-O targets compile with
   only stdlib-sourced "not routed" warnings. **CI cross-builds none of these.**
-- **Status**: **v1.15.0 — raw-syscall sweep + cyrius `6.6.4` → `6.6.6`.** Every
+- **Status**: **v1.15.1 — the CSPRNG-failure fallback's resolution + cyrius `6.6.6` → `6.6.9`.** Before it:
+  **v1.15.0 — raw-syscall sweep + cyrius `6.6.4` → `6.6.6`.** Every
   kernel touch goes through a stdlib wrapper, CI-gated; three platform defects
   fixed on the way (two macOS, one Windows); the suite runs on aarch64 under
   qemu for the first time. The pin is the latest released cyrius. Before it:
@@ -412,9 +421,10 @@ the tree stood at 8,111 at v1.14.3, and the sweep removed 16 lines net.
 
 ## Tests / Fuzz / Bench
 
-- **Unit**: `tests/tcyr/patra.tcyr` — **1301 / 1301** assertions pass under
-  cyrius 6.6.6, and the same 1301 pass on **aarch64** under `qemu-aarch64`
-  (v1.15.0; checked by hand, not in CI). (+13 at v1.15.0: the *seeds and syncs go
+- **Unit**: `tests/tcyr/patra.tcyr` — **1305 / 1305** assertions pass under
+  cyrius 6.6.9 (+4 at v1.15.1: `test_time_mix_fallback` — two forked children with the same counter
+  and address-space layout must draw different fallback values). At v1.15.0 the same suite (then 1301) passed
+  on **aarch64** under `qemu-aarch64` (checked by hand, not in CI). (+13 at v1.15.0: the *seeds and syncs go
   through the stdlib wrappers* group (CSPRNG path taken, salts differ,
   `_pt_fdatasync`'s error sign, compiled out on agnos and Windows), the *create
   refuses an existing file; wal_start truncates* group (`O_EXCL`, `O_TRUNC`), and
@@ -584,6 +594,7 @@ payload at `BY_DATA_MAX = 4072`.
 
 | Version | Date | Summary |
 |---------|------|---------|
+| 1.15.1 | 2026-09-28 | **The CSPRNG-failure fallback separates two processes in one second; cyrius 6.6.6 → 6.6.9.** `_pt_rand64` / `_wal_gen_salts` fell back to `clock_epoch_secs() * k + counter`, so two processes falling back in the same second drew the same database id and WAL salts; now `_pt_time_mix()` (ns wall clock XOR monotonic × golden ratio XOR a stack address + counter), proven by a two-child fork test that fails on the old formula. A refused `_pt_alloc(8)` branches to the fallback explicitly. Gates: **1305 tests** (+4), 8/8 fuzz, fmt+lint 0-warn, no raw syscalls, `dist/` regenerated and reproducible. From cyrius 6.6.10 bite 14. |
 | 1.15.0 | 2026-09-23 | **No raw syscalls: every kernel touch through the stdlib; cyrius 6.6.4 → 6.6.6.** 346 raw `syscall(…)` calls (345 lines — 24 in `src/`) replaced by stdlib wrappers; fdatasync through one `_pt_fdatasync`; `file.cyr`'s private `SYS_*` / `LOCK_*` tables deleted; `[deps] stdlib` + `chrono`, `random` (12 → 14 leaves); CI gate against raw syscalls and numeric open flags, mutation-verified (345 + 14 hits pre-sweep). ⚠ Found and fixed three platform defects by inspection: macOS could not create a database or truncate a WAL (`194` / `578` flags), macOS ids and WAL salts never used the CSPRNG, Windows failed every write in a transaction (unrouted fdatasync). ⭐ Suite runs on aarch64 for the first time (qemu: 1301/1301, 8/8, 3/3). 🔴 Review found a pre-existing multi-process crash-recovery bug, filed, not fixed. Gates: **1301 tests** (+13), 8/8 fuzz, 41 benchmarks, libro 15/15, vidya 19/19, fmt+lint 0-warn, vet/deny clean. Binary 225,496 B DCE-on. Closes [the 2026-09-21 issue](issues/archive/2026-09-21-raw-syscall-sweep-and-gate.md). |
 | 1.14.3 | 2026-09-13 | **The WAL's `O_NOFOLLOW` followed symlinks on aarch64.** A private `enum OpenFlag` carried x86_64 values (`O_LARGEFILE` / `O_DIRECT` on aarch64), so `wal_start` followed and truncated a planted symlink's target and `_pt_sync_dir` got EINVAL; values now from the stdlib. WAL timestamps used raw `syscall(201, 0)` (LISTEN(2) on aarch64 — every timestamp -22). Toolchain 6.6.2 → 6.6.4. *Backfilled at v1.15.0: this cut did not refresh state.md.* |
 | 1.14.2 | 2026-09-12 | Toolchain 6.6.0 → 6.6.2, source-change-free. *Backfilled at v1.15.0.* |
@@ -642,7 +653,7 @@ Full history in [`../../CHANGELOG.md`](../../CHANGELOG.md). Pre-1.6 narrative in
 
 ## CI / verification hosts
 
-- **CI**: x86_64 Linux only — `cyrius build` + **format check** (per-file loop, added v1.13.7) + lint (**hard gate** since v1.10.1 — any `warn` fails) + **no raw syscalls / numeric open flags** (v1.15.0; comment-stripped scan of `src/`, `tests/`, `fuzz/`, `programs/`, mutation-verified) + 1301 tests + **test-count-vs-state.md assertion** + 8 fuzz + 41 benchmarks + libro + vidya integration + **`dist/` sync and sidecar-leaf check** + **version consistency** across VERSION / cyrius.cyml / CHANGELOG top entry / README `[deps.patra]` tag / dist header (the last four added v1.13.7, each verified to fail when it should). Toolchain installed via the upstream `install.sh`, version sourced from the `cyrius.cyml` pin; deps resolved via `cyrius deps`.
+- **CI**: x86_64 Linux only — `cyrius build` + **format check** (per-file loop, added v1.13.7) + lint (**hard gate** since v1.10.1 — any `warn` fails) + **no raw syscalls / numeric open flags** (v1.15.0; comment-stripped scan of `src/`, `tests/`, `fuzz/`, `programs/`, mutation-verified) + 1305 tests + **test-count-vs-state.md assertion** + 8 fuzz + 41 benchmarks + libro + vidya integration + **`dist/` sync and sidecar-leaf check** + **version consistency** across VERSION / cyrius.cyml / CHANGELOG top entry / README `[deps.patra]` tag / dist header (the last four added v1.13.7, each verified to fail when it should). Toolchain installed via the upstream `install.sh`, version sourced from the `cyrius.cyml` pin; deps resolved via `cyrius deps`.
 - **Release**: tag-driven on `[0-9]*`; verifies `VERSION == cyrius.cyml package.version == git tag`; ships source tarball + `dist/patra.cyr` bundle + DCE demo binary + SHA256SUMS. Same `install.sh` toolchain step as CI.
 - **aarch64**: verified by hand, not in CI. Since v1.15.0 the unit suite, all 8 fuzz harnesses and the 3 programs build warning-free for aarch64 and run green under `qemu-aarch64` on the verification host; the bench builds but was not run there. Before 1.15.0 most of them did not compile there.
 - **agnos, macOS (x86_64 + arm64 Mach-O), Windows PE**: cross-built by hand, never run. Per-target gaps: [`roadmap.md` *Platforms*](roadmap.md#platforms--what-patra-guarantees-where).
