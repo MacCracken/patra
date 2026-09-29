@@ -5,6 +5,33 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.15.1] - 2026-09-28 — the CSPRNG-failure fallback separates two processes in one second
+
+Patch release, from cyrius 6.6.10 bite 14 (the hash-seed fallback item, whose patra sibling this is).
+Moves the toolchain pin to cyrius **6.6.9**.
+
+Gates: **1,305 assertions** (was 1,301) · 8 / 8 fuzz · fmt + lint 0-warn · no raw syscalls ·
+`dist/` regenerated and reproducible.
+
+### Fixed
+
+- **`_pt_rand64` / `_wal_gen_salts`' CSPRNG-failure fallback had ONE-SECOND resolution.** It was
+  `clock_epoch_secs() * 2654435761 + counter`, and `_wal_tx_counter` starts at 0 in every process,
+  so two processes that fell back in the same second (a restricted container, seccomp, a very old
+  kernel) drew the **same** database id and the same WAL salts — the collision the old comment
+  admitted. The fallback is now `_pt_time_mix()`: wall-clock nanoseconds XOR the monotonic clock
+  times the golden ratio XOR a stack address, plus the counter — the same mix as cyrius 6.6.10's
+  `lib/hashseed.cyr`. Both salts come from it (they were `t * k + n` and `t + n * k`). **Proof:**
+  `test_time_mix_fallback` forks two children (same counter, same address-space layout) and
+  requires different fallback values — restoring the seconds formula turns that row red.
+- **`_pt_rand64` handed a refused `_pt_alloc(8)` to `random_bytes`.** Harmless in practice (EFAULT,
+  then the fallback by accident), but it is now an explicit branch to the fallback, and the free is
+  skipped for a buffer that was never allocated.
+
+### Changed
+
+- Toolchain pin **6.6.6 → 6.6.9**, verified before the source change: 1,301 / 1,301, 8 / 8 fuzz.
+
 ## [1.15.0] - 2026-09-23 — no raw syscalls: every kernel touch goes through the stdlib
 
 Closes [`docs/development/issues/archive/2026-09-21-raw-syscall-sweep-and-gate.md`](docs/development/issues/archive/2026-09-21-raw-syscall-sweep-and-gate.md),

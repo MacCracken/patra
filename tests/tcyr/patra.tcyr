@@ -6557,6 +6557,53 @@ fn test_stdlib_seed_and_sync() {
     cleanup();
 }
 
+# -- v1.15.1: the CSPRNG-failure fallback separates two processes in one second --
+
+# `_pt_time_mix` replaced `clock_epoch_secs() * k + counter`: the counter starts
+# at 0 in every process, so two processes that fell back in the same second drew
+# the SAME salt and database id. Two forked children (same counter, same
+# address-space layout) must still draw different values — only the nanosecond
+# clocks can separate them. Linux forks here; every host checks two draws.
+#ifdef CYRIUS_TARGET_LINUX
+fn _tm_child(wfd) {
+    var out[8];
+    store64(&out, _pt_time_mix());
+    sys_write(wfd, &out, 8);
+    sys_exit(0);
+    return 0;
+}
+
+fn _tm_run() {
+    var pf[8];
+    if (sys_pipe(&pf) != 0) { return 0; }
+    var pid = sys_fork();
+    if (pid == 0) { _tm_child(load32(&pf + 4)); }
+    sys_close(load32(&pf + 4));
+    var got[8];
+    store64(&got, 0);
+    sys_read(load32(&pf), &got, 8);
+    sys_close(load32(&pf));
+    var st[8];
+    sys_waitpid(pid, &st, 0);
+    return load64(&got);
+}
+#endif
+
+fn test_time_mix_fallback() {
+    test_group("the CSPRNG-failure fallback has ns resolution (1.15.1)");
+    var c0 = _wal_tx_counter;
+    var a = _pt_time_mix();
+    var b = _pt_time_mix();
+    assert(a != b, "two fallback draws differ");
+    assert_eq(_wal_tx_counter, c0 + 2, "each fallback draw advances the counter");
+    #ifdef CYRIUS_TARGET_LINUX
+    var p1 = _tm_run();
+    var p2 = _tm_run();
+    assert(p1 != 0, "child 1 reported its fallback value");
+    assert(p1 != p2, "two processes falling back in the same second draw different values (it was seconds + counter)");
+    #endif
+}
+
 # -- v1.13.8: a WAL is bound to its database (audit S1-8) ----
 
 fn _wpath(): i64 { return "/tmp/patra_test.patra.wal"; }
@@ -7092,6 +7139,7 @@ fn main() {
     test_wal_incomplete_restore_keeps_wal();
     test_tx_refuses_without_wal();
     test_stdlib_seed_and_sync();
+    test_time_mix_fallback();
     test_open_flags();
     # v1.11.0 thread-safety (P1)
     test_concurrency();
