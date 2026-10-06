@@ -1,0 +1,46 @@
+# patra_raw_include.tcyr -- dist/patra.cyr compiles when included ALONE (1.15.2)
+#
+# The bundle is what a consumer vendors. Since cyrius 6.6.18's `distlib` it
+# opens with a compile-verified "# Requires" block (one `include "lib/<leaf>.cyr"`
+# per dist/patra.deps leaf), so `include "dist/patra.cyr"` needs nothing in
+# front of it. (patra's pre-1.15.2 bundle also compiled alone, by accident of
+# layout: src/lib.cyr, the last bundled module, kept its own stdlib includes,
+# which landed at the bundle's TAIL and resolved forward. This file guards the
+# property, not a 1.15.2 behaviour change.)
+#
+# CI runs it from a staging dir with NO cyrius.cyml: in-repo, `cyrius test`
+# auto-prepends the manifest's [deps] stdlib, which would hide a bundle that
+# does not compile alone. Deliberately NOT `include "src/lib.cyr"` either.
+
+include "dist/patra.cyr"
+include "lib/assert.cyr"
+
+var _rpath = "/tmp/patra_raw_include_test.patra";
+
+fn main() {
+    alloc_init();
+    fl_init();
+    patra_init();
+
+    xunlink(_rpath);
+
+    test_group("dist/patra.cyr included alone");
+
+    var db = patra_open(_rpath);
+    assert(db != 0, "open db through the bundle");
+    assert_eq(patra_exec(db, "CREATE TABLE t (id INT, name STR)"), PATRA_OK, "create");
+    assert_eq(patra_exec(db, "INSERT INTO t VALUES (7, 'leaf')"), PATRA_OK, "insert");
+
+    var rs = patra_query(db, "SELECT * FROM t WHERE id = 7");
+    assert(rs != 0, "query");
+    assert_eq(patra_result_count(rs), 1, "one row");
+    assert_eq(patra_result_get_int(rs, 0, 0), 7, "id round-trips");
+    patra_result_free(rs);
+
+    patra_close(db);
+    xunlink(_rpath);
+    return assert_summary();
+}
+
+var r = main();
+sys_exit(r);

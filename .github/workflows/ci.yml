@@ -114,6 +114,20 @@ jobs:
           set -o pipefail
           cyrius test tests/tcyr/patra.tcyr 2>&1 | tee build/test.out
 
+      - name: dist/patra.cyr compiles when included alone
+        # A consumer that vendors the bundle writes `include "dist/patra.cyr"`
+        # and nothing else. Run from a staging dir with NO cyrius.cyml: in the
+        # repo, `cyrius test` auto-prepends the manifest's [deps] stdlib, which
+        # would mask a bundle that does not compile alone. Without a manifest
+        # nothing is prepended (a missing leaf is a named compile error) and
+        # `lib/` includes resolve from the toolchain's stdlib.
+        run: |
+          T=$(mktemp -d)
+          mkdir -p "$T/dist" "$T/tests/tcyr"
+          cp dist/patra.cyr "$T/dist/"
+          cp tests/tcyr/patra_raw_include.tcyr "$T/tests/tcyr/"
+          (cd "$T" && cyrius test tests/tcyr/patra_raw_include.tcyr)
+
       - name: Assert test count matches the documented count
         # Every release has hand-copied this number into several files, and it
         # has disagreed with reality before (CHANGELOG said 894 while the suite
