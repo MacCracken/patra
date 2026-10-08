@@ -6347,6 +6347,51 @@ fn test_no_mutex_flock_deadlock() {
     xunlink(_dl_path);
 }
 
+# -- 1.16.0: a refused page-cache allocation is an error ----------
+#
+# _pc_alloc built the opt-in cache's three tables and 1,024 page buffers with
+# alloc() and checked none of them, so a refusal stored through null instead
+# of failing patra_cache_enable; _pc_reg_init, run by every patra_open, had
+# the same two unchecked allocs. alloc() refuses anything over ALLOC_MAX, so
+# the test lowers that cap around one call, on a pool / registry made to look
+# unbuilt, and puts everything back afterwards.
+fn test_pcache_alloc_refused() {
+    test_group("a refused page-cache allocation is an error, not a store through null (1.16.0)");
+    var keys0 = _pc_keys;
+    var owns0 = _pc_owns;
+    var bufs0 = _pc_bufs;
+    var on0 = _pc_on;
+    var cap0 = ALLOC_MAX;
+
+    _pc_keys = 0;
+    _pc_owns = 0;
+    _pc_bufs = 0;
+    _pc_on = 0;
+    ALLOC_MAX = 8;
+    var er = patra_cache_enable(1);
+    ALLOC_MAX = cap0;
+    assert_eq(er, PATRA_ERR_IO, "patra_cache_enable reports the refused pool");
+    assert_eq(patra_cache_enabled(), 0, "and the cache stays off");
+    assert_eq(_pc_keys, 0, "and no half-built pool is published");
+    _pc_keys = keys0;
+    _pc_owns = owns0;
+    _pc_bufs = bufs0;
+    _pc_on = on0;
+
+    var rfd0 = _pc_reg_fd;
+    var rid0 = _pc_reg_id;
+    _pc_reg_fd = 0;
+    _pc_reg_id = 0;
+    ALLOC_MAX = 8;
+    var rr = pc_register(_PCFD, 77);
+    ALLOC_MAX = cap0;
+    assert_eq(rr, 0, "pc_register leaves the fd unregistered when the registry cannot be built");
+    assert_eq(_pc_reg_fd, 0, "and publishes no registry");
+    assert_eq(_pc_dbid(_PCFD), 0, "an unregistered fd has no identity, which the cache treats as safe");
+    _pc_reg_fd = rfd0;
+    _pc_reg_id = rid0;
+}
+
 fn test_pcache_evict_fails_open() {
     test_group("an unidentified handle still invalidates (1.14.0)");
     cleanup();
@@ -7287,6 +7332,7 @@ fn main() {
     test_two_databases_dont_share_a_wal();
     test_pcache_isolates_databases();
     test_pcache_evict_fails_open();
+    test_pcache_alloc_refused();
     test_close_rolls_back_open_transaction();
     test_tbl_open_contract();
     test_tbl_open_propagates();

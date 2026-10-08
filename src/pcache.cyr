@@ -84,22 +84,29 @@ enum PcReg { PCR_MAX = 256; }
 var _pc_reg_fd = 0;
 var _pc_reg_id = 0;
 
+# 1.16.0: both allocations are checked, and nothing is published unless both
+# succeed. They were not, so a refused alloc() stored through null on the first
+# patra_open of the process — with the cache off, since every open registers.
+# Unbuilt, the registry leaves every fd unregistered, which the cache already
+# treats as safe (no reads, evictions fail open).
 fn _pc_reg_init(): i64 {
-    if (_pc_reg_fd != 0) { return 0; }
+    if (_pc_reg_fd != 0) { return PATRA_OK; }
     var f = alloc(PCR_MAX * 8);
     var d = alloc(PCR_MAX * 8);
+    if (f == 0) { return PATRA_ERR_IO; }
+    if (d == 0) { return PATRA_ERR_IO; }
     for (var i = 0; i < PCR_MAX; i = i + 1) {
         store64(f + i * 8, 0 - 1);
         store64(d + i * 8, 0);
     }
     _pc_reg_id = d;
     _pc_reg_fd = f;
-    return 0;
+    return PATRA_OK;
 }
 
 # Associate an open database fd with its HDR_DBID. Called from patra_open.
 fn pc_register(fd, dbid): i64 {
-    _pc_reg_init();
+    if (_pc_reg_init() != PATRA_OK) { return 0; }
     if (fd < 0) { return 0; }
     if (dbid == 0) { return 0; }
     # Under _pc_mtx: patra_open / patra_close run on worker threads in the
@@ -179,8 +186,14 @@ fn _pc_init(): i64 {
 # Lazily allocate the slot metadata + 1024 PAGE_SIZE buffers (4MB), once. alloc()
 # (bump, thread-safe, never freed) gives stable buffer addresses for the process
 # lifetime, so the cache never touches the freelist at runtime.
+#
+# Returns PATRA_OK, or PATRA_ERR_IO when alloc() refuses any of the 1,027
+# allocations (1.16.0). None was checked, so a refusal was a store through null
+# rather than an error from patra_cache_enable. On failure nothing is published,
+# so the cache stays unbuilt and off and a later enable starts over; what the
+# bump allocator already handed out is not reclaimable and is left behind.
 fn _pc_alloc(): i64 {
-    if (_pc_keys != 0) { return 0; }
+    if (_pc_keys != 0) { return PATRA_OK; }
     # Build both tables COMPLETELY, then publish — and publish `_pc_keys` LAST,
     # because it is the global the guard above tests. Assigning it first (as
     # this did before v1.13.11) meant a concurrent caller could see a non-zero
@@ -190,25 +203,33 @@ fn _pc_alloc(): i64 {
     # ordering makes the function correct even standalone, which matters on the
     # agnos build where mutex_lock is a no-op.
     var keys = alloc(PC_CAP * 8);
+    if (keys == 0) { return PATRA_ERR_IO; }
     var owns = alloc(PC_CAP * 8);
+    if (owns == 0) { return PATRA_ERR_IO; }
     var bufs = alloc(PC_CAP * 8);
+    if (bufs == 0) { return PATRA_ERR_IO; }
     var i = 0;
+    var failed = 0;
     while (i < PC_CAP) {
+        var pb = alloc(PAGE_SIZE);
+        if (pb == 0) { failed = 1; i = PC_CAP; continue; }
         store64(keys + i * 8, 0);
         store64(owns + i * 8, 0);
-        store64(bufs + i * 8, alloc(PAGE_SIZE));
+        store64(bufs + i * 8, pb);
         i = i + 1;
     }
+    if (failed != 0) { return PATRA_ERR_IO; }
     _pc_bufs = bufs;
     _pc_owns = owns;
     _pc_keys = keys;
-    return 0;
+    return PATRA_OK;
 }
 
 # Public: turn the shared page cache on/off (process-global — affects ALL
 # handles). Call once at startup before spawning worker threads. Enabling
 # allocates the pool on first use and flushes any stale entries; the generation
-# gate re-syncs on the next op. Returns PATRA_OK.
+# gate re-syncs on the next op. Returns PATRA_OK, or PATRA_ERR_IO when the 4 MB
+# pool cannot be allocated (1.16.0), in which case the cache stays off.
 fn patra_cache_enable(on): i64 {
     if (on == 0) { _pc_on = 0; return PATRA_OK; }
     # The pool allocation is INSIDE the lock. It used to sit outside, so two
@@ -216,7 +237,11 @@ fn patra_cache_enable(on): i64 {
     # half-published pool and then set `_pc_on = 1` over it, arming every cache
     # entry point against unbuilt slots.
     mutex_lock(_pc_mtx);
-    _pc_alloc();
+    var ar = _pc_alloc();
+    if (ar != PATRA_OK) {
+        mutex_unlock(_pc_mtx);
+        return ar;
+    }
     memset(_pc_keys, 0, PC_CAP * 8);
     _pc_gen = 0;
     _pc_on = 1;
