@@ -1832,6 +1832,23 @@ fn _exec_parsed(db, sql): i64 {
 
 # ── Sorting for ORDER BY ────────────────────
 
+# Check every ORDER BY column against the schema (1.16.0). PATRA_ERR_NOTFOUND
+# for a name the table does not have.
+#
+# ⚠ An unknown ORDER BY column used to return the rows UNSORTED, as if the
+# clause were absent, while the projection path refused the same unknown name
+# — so a typo looked like a sort that silently did nothing. (v1.14.0 removed the
+# out-of-bounds read it also performed and kept the permissive result.)
+fn _ob_validate(schema, ncols): i64 {
+    var obn = load64(_spr() + PR_ORDERBY_N);
+    for (var oi = 0; oi < obn; oi = oi + 1) {
+        var ob = _spr() + PR_ORDERBY_COLS + oi * OB_SZ;
+        var ci = _wh_resolve_col(schema, ncols, load64(ob + OB_PTR), load64(ob + OB_LEN));
+        if (ci < 0) { return PATRA_ERR_NOTFOUND; }
+    }
+    return PATRA_OK;
+}
+
 fn _strcmp_nn(a, b): i64 {
     var i = 0;
     while (1) {
@@ -2239,6 +2256,14 @@ fn _patra_query_exec(db): i64 {
         return 0;
     }
 
+    # ORDER BY must name columns of the table, checked before the scan for
+    # aggregate and row queries alike (1.16.0).
+    if (_ob_validate(schema, ncols) != PATRA_OK) {
+        pg_free(schema);
+        _tx_unlock(db, fd);
+        return 0;
+    }
+
     # Check for aggregate query
     var agg = load64(_spr() + PR_AGG_TYPE);
     if (agg != AGG_NONE) {
@@ -2423,9 +2448,9 @@ fn _patra_query_exec(db): i64 {
             # 1.14.0: an unresolved ORDER BY column left ci at -1 and then
             # indexed the type array with it — `types_ptr + (-1) * 8` reads the
             # 8 bytes BEFORE the allocation, on a plain
-            # `ORDER BY typo_column`. The sort is still skipped rather than
-            # refused (ob_valid = 0), which is the existing permissive
-            # behaviour; only the out-of-bounds read is removed.
+            # `ORDER BY typo_column`. 1.16.0: _ob_validate refuses that query
+            # before the scan, so ci is always resolved here; ob_valid stays
+            # as the guard against the read.
             if (ci < 0) { ob_valid = 0; }
             store64(ob_idxs + oi * 8, ci);
             if (ci >= 0) {

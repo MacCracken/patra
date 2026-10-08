@@ -421,6 +421,29 @@ fn test_order_by() {
 
 # -- v0.2: LIMIT ----------------------------------------------
 
+# 1.16.0: an ORDER BY column the table does not have is an error. The rows
+# came back UNSORTED, as if the clause were absent, while the projection path
+# refused the same name.
+fn test_order_by_unknown_column() {
+    test_group("ORDER BY an unknown column is an error, not an unsorted result (1.16.0)");
+    cleanup();
+    var db = patra_open(_tpath);
+    _setup_people(db);
+    assert_eq(patra_query(db, "SELECT * FROM people ORDER BY agee"), 0,
+      "a misspelt ORDER BY column is refused (rows came back unsorted)");
+    assert_eq(patra_query(db, "SELECT name FROM people ORDER BY age, nme DESC"), 0,
+      "an unknown column anywhere in a multi-column ORDER BY is refused");
+    assert_eq(patra_query(db, "SELECT * FROM people WHERE id > 1 ORDER BY nope LIMIT 2"), 0,
+      "with WHERE and LIMIT too");
+    assert_eq(patra_query(db, "SELECT COUNT(*) FROM people ORDER BY nope"), 0,
+      "and on an aggregate");
+    var rs = patra_query(db, "SELECT name FROM people ORDER BY age DESC");
+    assert(rs != 0, "a known column not in the projection still sorts");
+    assert_streq(patra_result_get_str(rs, 0, 0), "eve", "oldest first");
+    patra_result_free(rs);
+    patra_close(db);
+}
+
 fn test_limit() {
     test_group("limit");
     cleanup();
@@ -7205,6 +7228,7 @@ fn main() {
     test_where_no_match();
     test_order_by();
     test_limit();
+    test_order_by_unknown_column();
     test_where_order_limit();
 
     # v0.2 mutations
