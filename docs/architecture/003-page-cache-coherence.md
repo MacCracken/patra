@@ -47,6 +47,15 @@ bump (which can't reach our `_pc_gen`) trips `_pc_check`'s `!=` flush.
 evicted those pages, so this is belt-and-suspenders — but a stale page here
 would be a silent correctness hole, so it flushes unconditionally.
 
+**(4b) Recovery replay (v1.16.0).** WAL recovery replays before-images with
+raw writes too, and since 1.16.0 it runs before any locked statement, not only
+at `patra_open` (`_pt_recover_held`, `src/lib.cyr`). After a replay it flushes
+the cache and writes `HDR_COMMITGEN` as one past the larger of the restored
+value and the dead transaction's last one, so neither this process's cache nor
+another's — nor a handle's tail-page cache (`DB_LP_GEN`) — can keep labelling
+the dead transaction's pages current. The restore alone would rewind the
+generation, which (2)'s `!=` catches only if the cache had seen the newer value.
+
 **(5) Batch / group-commit visibility.** In `PATRA_SYNC_BATCH`, the gen is
 bumped on a **nosync** header write (`_db_hdr_commit`, the BATCH branch), so a
 commit is **gen-VISIBLE before it is DURABLE**. Visibility is correct;

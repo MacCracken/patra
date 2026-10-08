@@ -11,10 +11,22 @@ Benches under `/tmp` (tmpfs, fdatasync is a no-op) are noted explicitly.
 The group-commit comparison uses a real-disk path (`./bench_groupcommit.patra`,
 btrfs/NVMe under the repo) to avoid hiding the win.
 
-> **Currency note (updated 2026-09-23, v1.15.0).** The bulk of this table is
-> still the v1.9.5 / cyrius 6.0.1 baseline. Patra is now at **v1.15.0** (cyrius
-> pin **6.6.6**) and the suite stands at **41 benchmarks** (`insert_2k_in_txn`
-> added at v1.14.0).
+> **Currency note (updated 2026-10-08, v1.16.0).** The bulk of this table is
+> still the v1.9.5 / cyrius 6.0.1 baseline. Patra is now at **v1.16.0** (cyrius
+> pin **6.7.5**) and the suite stands at **43 benchmarks** (`insert_2k_in_txn`
+> added at v1.14.0; `select_point_10k` and `update_point_10k` at v1.16.0).
+>
+> - **v1.16.0: one failed `open(2)` per locked statement, about 2.5 us here.**
+>   WAL recovery now runs before every statement, which probes for an orphaned
+>   `<db>.wal`. Three runs each of the 6.7.5-pinned tree before the fix and the
+>   release, medians, tmpfs: `select_point_10k` 22.8 → 25.5 us (+12 %),
+>   `update_point_10k` 18.0 → 20.7 us (+15 %), `insert_1k_prepared`
+>   17.3 → 20.0 us, `dedup_insert_row_or_ignore_500` 8.9 → 11.2 us (+26 %, the
+>   smallest statement in the suite), `insert_1k` 23.9 → 25.0 us, `select_1k`
+>   997 → 1,008 us; `read_scan_4t_par` 143.8 → 142.3 us and the `parse_*` rows
+>   within 0.5 %. The two new rows exist to price exactly this. One clock read
+>   costs 1.3 us on this host, so syscalls are dear here; the roadmap records
+>   how the probe could be made free.
 >
 > - **v1.15.0: flat, with one lesson about this suite.** Four interleaved rounds
 >   of 1.14.3 on 6.6.4, 1.14.3 on 6.6.6, and 1.15.0, on a host shared with other

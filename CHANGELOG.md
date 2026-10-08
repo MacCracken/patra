@@ -5,6 +5,132 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.16.0] - 2026-10-08 — WAL recovery before every statement; five silent wrong answers become errors
+
+Minor release: the cyrius **6.7.5** pin, the fix for patra's one open high-severity bug, and
+the five wrong answers v1.14.0 deliberately left alone "for an explicit decision to take the
+breakage at a minor" — taken here. Each fix landed with a regression test that fails without it.
+
+Gates: **1,389 assertions** (was 1,305) · raw-include 6 / 6 · 8 / 8 fuzz · **43** benchmarks
+(was 41) · libro 15/15 · vidya 19/19 · fmt + lint 0-warn · vet 0 untrusted / deny 0 violations ·
+no raw syscalls · `dist/` in sync, sidecar **14** leaves == 14 declared. The unit suite, all
+8 fuzz harnesses and the 3 programs also pass on aarch64 under `qemu-aarch64` (1,389 / 1,389).
+Binary **247,600 B** DCE-on / 382,768 B DCE-off — 1.15.2 on 6.6.18 was 242,600 / 365,480; the
+pin move alone made it 243,472 / 378,640, and this release's code adds 4,128 to each.
+
+### Breaking
+
+Five statements that used to succeed with a wrong answer now fail or return the right one. No
+consumer in the tree (yukti, libro, vidya, sit, agnostic, daimon, agnoshi, mela, hoosh, argonaut,
+vani) uses any of the five shapes: their sources have no `LIMIT`, no `ORDER BY`, no aggregate but
+`COUNT(*)`, and no table or column name over 22 bytes.
+
+- **`LIMIT 0` returns no rows.** It returned every row. An aggregate's single row is removed by
+  `LIMIT 0` too.
+- **`SUM` / `MIN` / `MAX` over a column that is not `INT` fail the query** (it returns 0). They
+  returned the first 8 bytes of the field: a `STR`'s leading characters, and for `TEXT` /
+  `BYTES` the chain's page number.
+- **An identifier over 31 bytes is a syntax error where a statement defines it** — `CREATE
+  TABLE`'s table and column names, `ALTER TABLE`'s `ADD COLUMN` / `RENAME TO` / `RENAME COLUMN
+  … TO` — returning `PATRA_ERR_SYNTAX`. It was cut to 31 bytes on the way to disk, so the table
+  could never be reached by name, each repeat of the `CREATE` took another of the 63 directory
+  entries, and two long column names sharing 31 bytes became duplicates. `tbl_create` refuses
+  it too. A name that only refers to something is unchanged (it matches nothing).
+- **`ORDER BY` a column the table does not have fails the query.** The rows came back unsorted,
+  as if the clause were absent, while the projection path refused the same name.
+- **`ORDER BY` a `TEXT` / `BYTES` column fails the query.** It sorted by the 16-byte chain
+  reference — where the payload sits on disk — not by the payload. `WHERE` and `CREATE INDEX`
+  already refused chain columns.
+
+**Migration:** a query that relied on any of these now returns 0 (a failed query) or
+`PATRA_ERR_SYNTAX` (a `CREATE` / `ALTER`). Drop `LIMIT 0` where every row was wanted; aggregate
+an `INT` column; keep names to 31 bytes; sort by an `INT` or `STR` column. No on-disk format
+change: a database written by 1.15.x opens unchanged, and one written by 1.16.0 opens in 1.15.x.
+
+Two internal return values changed, for anyone calling them directly: `wal_recover` returns
+`WAL_RECOVER_REFUSED` (2) for a WAL it refuses and leaves on disk (it returned 1, the same as a
+replay, now `WAL_RECOVER_DONE`), and `0 - 1` rather than 0 when a scratch allocation is refused;
+`patra_cache_enable` can now return `PATRA_ERR_IO`.
+
+### Fixed
+
+- **WAL recovery ran only at `patra_open`** ([the 2026-09-23 issue](docs/development/issues/archive/2026-09-23-wal-recovery-runs-only-at-open.md),
+  high). When a process died mid-transaction while another held the database open, the survivor
+  read the dead transaction's uncommitted rows, made them permanent with a `BEGIN` of its own
+  (`wal_start`'s `O_TRUNC` destroyed the orphaned WAL), or lost its own autocommit write at the
+  next open, when the WAL was replayed over it — every call returning `PATRA_OK`. While a
+  process holds `LOCK_EX` outside its own transaction, any WAL on disk is an orphan (a live
+  transaction holds `LOCK_EX` for its whole span), so now:
+  - every statement enters through `_db_lock_ex` / `_db_lock_sh`, which take the lock, replay
+    an orphaned WAL, and re-read the header — the twelve write paths and `patra_begin` (before
+    `wal_start`) under `LOCK_EX`; a reader probes with the new `wal_exists` and, on finding a
+    WAL, converts to `LOCK_EX`, replays, and finishes the query under it;
+  - `_pt_recover_held`, shared with `patra_open`, flushes the page cache after a replay and
+    moves `HDR_COMMITGEN` past both the restored value and the dead transaction's, so no page
+    cache or tail-page cache keeps the dead transaction's pages;
+  - the v1.13.8 `HDR_DBID` binding and every refusal are unchanged;
+  - a replay that cannot complete fails the statement (`PATRA_ERR_IO`; a query returns 0) and
+    keeps the WAL for the next one, and `wal_recover`'s two scratch allocations, which a refusal
+    turned into "no WAL" or into an unlink with nothing replayed, now fail the same way;
+  - a replay runs only when the flock call returned 0, so Windows (no flock) and an agnos before
+    1.57.7 (contended flock did not wait) do not replay a WAL that may belong to a live
+    transaction; inside a handle's own transaction nothing is replayed.
+
+  **Test:** `test_wal_recovery_outside_open` (31 assertions) is the issue's reproduction with
+  process B a forked child: in all three modes rows 1 and 2 survive and row 99 does not, on A's
+  handle and after a fresh open; plus a transaction that must not replay its own WAL, and an
+  unappliable WAL that must fail reads, writes and `BEGIN` and stay on disk. Against the 1.15.2
+  sources it fails 12 assertions, the issue's three wrong outcomes among them (A counted 2 rows;
+  row 99 made permanent; row 2 lost). Mutation-verified: without the statement-side recovery call
+  12 fail, without the generation bump 1, without the in-transaction guard 16.
+
+  **Cost:** one failed `open(2)` of `<db>.wal` per locked statement; a replay costs more only
+  when there is one. Medians of three runs on the same box (where one clock read costs 1.3 us),
+  before → after, tmpfs: `select_point_10k` 22.8 → 25.5 us (+12 %), `update_point_10k`
+  18.0 → 20.7 us (+15 %), `insert_1k_prepared` 17.3 → 20.0 us, `dedup_insert_row_or_ignore_500`
+  8.9 → 11.2 us (+26 %, the smallest statement in the suite); `insert_1k` 23.9 → 25.0 us,
+  `select_1k` 997 → 1,008 us, `read_scan_4t_par` 143.8 → 142.3 us, `insert_2k_in_txn` 104 →
+  100 us; the `parse_*` rows within 0.5 %. Making the probe free (a header flag) is in the
+  roadmap.
+- **The opt-in page cache stored through null when `alloc()` refused it.** `_pc_alloc` checked
+  none of its 1,027 allocations (three slot tables, 1,024 page buffers); it now returns
+  `PATRA_ERR_IO`, publishes nothing, and `patra_cache_enable` returns the error with the cache
+  left off. `_pc_reg_init`, the fd → database-id registry that every `patra_open` fills even with
+  the cache off, had the same two unchecked allocations; it now publishes only when both succeed,
+  and `pc_register` leaves the fd unregistered, which the cache already treats as safe. **Test:**
+  `test_pcache_alloc_refused` lowers `ALLOC_MAX` around one enable and one register (6
+  assertions); with the 1.15.2 `pcache.cyr`, or with only the registry half reverted, the suite
+  dies there with SIGSEGV.
+- **The five wrong answers above** (see *Breaking*), each with its test: `test_limit` +8 and the
+  layout invariant +3 (the four `LIMIT 0` cases fail on 1.15.2), `test_aggregates` +9 (six
+  refusals fail on 1.15.2), `test_identifier_length` 16 (11 fail on 1.15.2; with only
+  `tbl_create`'s guard left, the five `ALTER` ones), `test_order_by_unknown_column` 11 (four
+  unknown-column and three chain-column refusals fail on the code before each fix).
+
+### Added
+
+- `wal_exists(wal_path)` — the reader's WAL probe; `enum WalRecover { WAL_RECOVER_NONE;
+  WAL_RECOVER_DONE; WAL_RECOVER_REFUSED; }`.
+- `PR_HAS_LIMIT` (parse result offset 3352, in the free tail; carried by prepared statements).
+- Benchmarks `select_point_10k` and `update_point_10k`: the smallest locked statements, where a
+  per-statement cost shows at its largest share (41 → 43).
+
+### Changed
+
+- Toolchain pin **6.6.18 → 6.7.5** (tag `efa15103`); `cyrius deps` re-vendored `lib/` and
+  rewrote 16 of the lock's 32 rows; `deps --verify` 32 / 32. The suite was unchanged at the new
+  pin (1,305 / 1,305) before any source change.
+- `dist/` regenerated by the 6.7.5 `cyrius distlib`: 8,382 lines (its count; 8,438 by `wc -l`),
+  `dist/patra.deps` 14 leaves, unchanged.
+- Docs: the roadmap refreshed to 1.16.0 — three of the five cyrius requests written up at
+  1.15.0 shipped in cyrius 6.6.9 without a filing (Windows `FlushFileBuffers`, Windows
+  `O_NOFOLLOW`, `deps` locking every vendored leaf) and kybernet's `fl_alloc` defect was fixed in
+  6.6.7; `xfdatasync` and `xflock` on Windows remain. `SECURITY.md`'s WAL, symlink,
+  multi-process and targets rows, the README feature list and a new note on the five behaviours,
+  and `_pt_fdatasync`'s comment (Windows does flush now) say the same. `state.md`, `doc-health.md`
+  (a targeted refresh; the four known-stale docs are still listed there), the `BENCHMARKS.md`
+  currency note and architecture note 003 (a replay's cache flush and generation bump) refreshed.
+
 ## [1.15.2] - 2026-10-06 — cyrius 6.6.18 pin; dist/ regenerated (option-2 sidecars + requires block)
 
 Patch release for the cyrius 6.6.18 sibling regeneration wave. No `src/` change.

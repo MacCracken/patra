@@ -5,8 +5,8 @@
 ## What It Does
 
 - **SQL subset** — CREATE TABLE, CREATE INDEX, ALTER TABLE (ADD / DROP COLUMN + RENAMEs), DROP TABLE, INSERT (with `OR IGNORE`), SELECT (*, column list, aggregates), WHERE (including LIKE), UPDATE, DELETE, ORDER BY, LIMIT, VACUUM
-- **Aggregates** — COUNT(*), SUM, MIN, MAX with WHERE support
-- **B-tree storage** — pages in a single `.patra` file, crash-safe with WAL + flock on Linux (other targets, and one open multi-process recovery gap: [SECURITY.md](SECURITY.md#supported-deployments))
+- **Aggregates** — COUNT(*), and SUM, MIN, MAX over INT columns, with WHERE support
+- **B-tree storage** — pages in a single `.patra` file, crash-safe with WAL + flock on Linux; a process that dies mid-transaction is recovered before the next statement on any other handle (since 1.16.0; other targets: [SECURITY.md](SECURITY.md#supported-deployments))
 - **Indexes** — B-tree indexes on INT *and* STR columns (STR keys via djb2-64 hash + verify-on-hit)
 - **Transactions** — BEGIN/COMMIT/ROLLBACK with write-ahead logging
 - **Durability modes** — per-write fsync (default) or opt-in group-commit / batched fsync (`patra_set_sync_mode`)
@@ -83,7 +83,7 @@ from the version-pinned snapshot.
 ```toml
 [deps.patra]
 git = "https://github.com/MacCracken/patra.git"
-tag = "1.15.2"
+tag = "1.16.0"
 ```
 
 > ⚠ **If you are carrying a `[deps.sakshi]` block "required alongside patra",
@@ -220,6 +220,15 @@ CREATE TABLE notes (id INT AUTOINCREMENT, body TEXT)
 ```
 
 Column types are `INT` (i64), `STR` (256-byte fixed), `TEXT` (variable-length text), and `BYTES` (variable-length binary; `BLOB` accepted as alias). No floating point. `TEXT` and `BYTES` share the same chain-page storage (the row holds a 16-byte ref; the payload spills across pages) and neither is comparable in `WHERE` or indexable. They differ at the SQL surface: `TEXT` is written from a string literal in `INSERT`/`UPDATE` and read via `patra_result_get_text_len` / `patra_result_read_text`; `BYTES` is binary and write/read only via the `patra_insert_row` / `patra_result_read_bytes` programmatic API. (Mirrors SQLite's TEXT vs BLOB.) For idempotent BYTES writes, `patra_insert_row_or_ignore` (same arguments as `patra_insert_row`) skips a row whose indexed key already exists — `patra_rows_affected(db)` then reads `0` (ignored) or `1` (inserted), the same split as SQL `INSERT OR IGNORE`. It probes the key *before* allocating the content chain, so a duplicate costs one index probe and no chain work; it needs an index on the conflict column (no index ⇒ always inserts).
+
+**Errors, not quiet answers (1.16.0).** `LIMIT 0` returns no rows (it returned
+every row). `SUM` / `MIN` / `MAX` take an `INT` column; any other column fails
+the query. `ORDER BY` must name a column of the table, and not a `TEXT` / `BYTES`
+one: an unknown name used to return the rows unsorted, and a chain column sorted
+by where its payload sat on disk. Table and column names are at most 31 bytes; a
+`CREATE TABLE` or `ALTER TABLE` that defines a longer one returns
+`PATRA_ERR_SYNTAX` (the name used to be cut to 31 bytes, leaving a table no
+statement could reach). A failed query returns `0`.
 
 An `INSERT` may name its columns — `INSERT INTO t (b, a) VALUES (...)` — to bind values by name in any order; columns left unnamed take their zero/empty default. Without a column list, values are positional in `CREATE TABLE` order.
 
