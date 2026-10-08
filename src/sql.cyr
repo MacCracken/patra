@@ -106,6 +106,9 @@ enum PROff {
     PR_INS_COLS = 2824;
     PR_AUTOINC = 3336;
     PR_NPARAMS = 3344;
+    # 1.16.0: 1 when the SELECT has a LIMIT clause. PR_LIMIT alone could not
+    # tell "no LIMIT" from "LIMIT 0" (both 0), so LIMIT 0 returned every row.
+    PR_HAS_LIMIT = 3352;
 }
 
 # CREATE column item: 24 bytes
@@ -864,6 +867,7 @@ fn _parse_select(): i64 {
         pos = pos + 1;
         if (_tok_type(pos) != SQLT_INT_LIT) { return PATRA_ERR_SYNTAX; }
         store64(_spr() + PR_LIMIT, _pt_atoi(_tok_ptr(pos), _tok_len(pos)));
+        store64(_spr() + PR_HAS_LIMIT, 1);
         pos = pos + 1;
     }
 

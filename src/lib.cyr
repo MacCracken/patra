@@ -2006,6 +2006,18 @@ fn _sort_result_multi(rs, ob_idxs, ob_types, ob_dirs, obn): i64 {
     return 0;
 }
 
+# The SELECT's LIMIT, or -1 when it has none (1.16.0). The literal is never
+# negative: the tokenizer has no signed integer literal.
+#
+# ⚠ Until 1.16.0 the query path tested `PR_LIMIT > 0`, so LIMIT 0 — which the
+# parser stored as 0, exactly like no LIMIT at all — returned EVERY row, the
+# one answer it must not give. The parser now records the clause's presence in
+# PR_HAS_LIMIT.
+fn _pr_limit(): i64 {
+    if (load64(_spr() + PR_HAS_LIMIT) == 0) { return 0 - 1; }
+    return load64(_spr() + PR_LIMIT);
+}
+
 # ── patra_query (SELECT with WHERE, ORDER BY, LIMIT) ────────
 
 # Execute a SELECT query, returns result set
@@ -2291,6 +2303,8 @@ fn _patra_query_exec(db): i64 {
         elif (agg == AGG_MIN) { memcpy(aname, "min", 3); }
         elif (agg == AGG_MAX) { memcpy(aname, "max", 3); }
         store64(ars + RS_HDR_SZ + 8 + 32, agg_val);
+        # An aggregate is one row, which a LIMIT 0 removes like any other.
+        if (_pr_limit() == 0) { store64(ars + RS_NROWS, 0); }
         return ars;
     }
 
@@ -2424,8 +2438,8 @@ fn _patra_query_exec(db): i64 {
     }
 
     # LIMIT
-    var lim = load64(_spr() + PR_LIMIT);
-    if (lim > 0) {
+    var lim = _pr_limit();
+    if (lim >= 0) {
         if (actual > lim) {
             store64(rs + RS_NROWS, lim);
         }

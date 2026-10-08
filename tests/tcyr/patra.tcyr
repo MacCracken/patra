@@ -434,6 +434,32 @@ fn test_limit() {
     rs = patra_query(db, "SELECT * FROM people LIMIT 100");
     assert_eq(patra_result_count(rs), 5, "limit > rows");
     patra_result_free(rs);
+
+    # 1.16.0: LIMIT 0 is zero rows. PR_LIMIT stored 0 for both "LIMIT 0" and no
+    # LIMIT, and the query path tested `> 0`, so it returned all five.
+    rs = patra_query(db, "SELECT * FROM people LIMIT 0");
+    assert(rs != 0, "limit 0 is a valid query");
+    assert_eq(patra_result_count(rs), 0, "limit 0 returns no rows (it returned every row)");
+    patra_result_free(rs);
+    rs = patra_query(db, "SELECT name FROM people WHERE age > 20 ORDER BY age DESC LIMIT 0");
+    assert_eq(patra_result_count(rs), 0, "limit 0 with WHERE / ORDER BY / projection");
+    patra_result_free(rs);
+    rs = patra_query(db, "SELECT COUNT(*) FROM people LIMIT 0");
+    assert_eq(patra_result_count(rs), 0, "an aggregate's one row is removed by limit 0");
+    patra_result_free(rs);
+    rs = patra_query(db, "SELECT COUNT(*) FROM people LIMIT 1");
+    assert_eq(patra_result_count(rs), 1, "and kept by limit 1");
+    assert_eq(patra_result_get_int(rs, 0, 0), 5, "with its value");
+    patra_result_free(rs);
+    var st = patra_prepare(db, "SELECT * FROM people WHERE id > ? LIMIT 0");
+    patra_bind_int(st, 0, 0);
+    rs = patra_query_prepared(db, st);
+    assert_eq(patra_result_count(rs), 0, "limit 0 through a prepared statement");
+    patra_result_free(rs);
+    patra_finalize(st);
+    rs = patra_query(db, "SELECT * FROM people");
+    assert_eq(patra_result_count(rs), 5, "no limit still returns every row");
+    patra_result_free(rs);
     patra_close(db);
 }
 
@@ -1362,6 +1388,11 @@ fn test_parse_result_layout_invariant() {
     # WHERE condition zone holds WH_MAX × WH_ENTRY_SZ entries within 4096
     assert(PR_WHERE + WH_MAX * WH_ENTRY_SZ <= 4096,
       "PR_WHERE * WH_MAX fits in 4096");
+
+    # 1.16.0: the LIMIT-presence flag sits in the free tail, past every region.
+    assert(PR_NPARAMS + 8 <= PR_HAS_LIMIT, "PR_HAS_LIMIT after PR_NPARAMS");
+    assert(PR_INS_COLS + MAX_COLS * INSCOL_SZ <= PR_HAS_LIMIT, "PR_HAS_LIMIT past the INSERT column list");
+    assert(PR_HAS_LIMIT + 8 <= 4096, "PR_HAS_LIMIT fits in 4096");
 }
 
 # -- v1.5.2: audit P1 hardening -------------------------------
