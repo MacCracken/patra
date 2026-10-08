@@ -6417,6 +6417,58 @@ fn test_no_mutex_flock_deadlock() {
     xunlink(_dl_path);
 }
 
+# -- 1.16.0: identifiers over 31 bytes are refused, not truncated --
+#
+# Table and column names live in 32-byte slots, and a longer name was clamped
+# to 31 bytes on the way to disk, silently. Lookups compare the full name, so
+# the table could never be reached; every repeat of the CREATE "succeeded" and
+# took another of the 63 directory entries; and two long column names sharing
+# 31 bytes became duplicates. A name a statement DEFINES is now a syntax error
+# if it does not fit; 31 bytes is still accepted.
+fn test_identifier_length() {
+    test_group("identifiers over 31 bytes are refused, not truncated (1.16.0)");
+    cleanup();
+    var db = patra_open(_tpath);
+
+    assert_eq(patra_exec(db, "CREATE TABLE tbl_aaaaaaaaaaaaaaaaaaaaaaaaaaaa (id INT)"), PATRA_ERR_SYNTAX,
+      "a 32-byte table name is refused");
+    var i = 0;
+    while (i < 3) { patra_exec(db, "CREATE TABLE tbl_aaaaaaaaaaaaaaaaaaaaaaaaaaaa (id INT)"); i = i + 1; }
+    assert_eq(patra_exec(db, "CREATE TABLE tbl_aaaaaaaaaaaaaaaaaaaaaaaaaaa (id INT)"), PATRA_OK, "31 bytes is accepted");
+    assert_eq(patra_exec(db, "INSERT INTO tbl_aaaaaaaaaaaaaaaaaaaaaaaaaaa VALUES (7)"), PATRA_OK, "and reachable");
+    assert_eq(load64(_db_hdr(db) + HDR_TBLCOUNT), 1, "the refused CREATEs took no directory entry");
+    var rs = patra_query(db, "SELECT id FROM tbl_aaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    assert_eq(patra_result_count(rs), 1, "the 31-byte table reads back");
+    patra_result_free(rs);
+
+    assert_eq(patra_exec(db, "CREATE TABLE c (id INT, col_bbbbbbbbbbbbbbbbbbbbbbbbbbbb INT)"), PATRA_ERR_SYNTAX,
+      "a 32-byte column name is refused");
+    assert_eq(patra_exec(db, "CREATE TABLE c (id INT, col_bbbbbbbbbbbbbbbbbbbbbbbbbbbb INT, col_bbbbbbbbbbbbbbbbbbbbbbbbbbbz INT)"), PATRA_ERR_SYNTAX,
+      "two long names sharing 31 bytes are refused, not merged into duplicates");
+    assert_eq(patra_exec(db, "CREATE TABLE c (id INT, col_bbbbbbbbbbbbbbbbbbbbbbbbbbb INT)"), PATRA_OK, "a 31-byte column name is accepted");
+    patra_exec(db, "INSERT INTO c VALUES (1, 2)");
+    rs = patra_query(db, "SELECT col_bbbbbbbbbbbbbbbbbbbbbbbbbbb FROM c");
+    assert(rs != 0, "and selectable by its full name");
+    assert_eq(patra_result_get_int(rs, 0, 0), 2, "with its value");
+    patra_result_free(rs);
+
+    assert_eq(patra_exec(db, "ALTER TABLE c ADD COLUMN col_bbbbbbbbbbbbbbbbbbbbbbbbbbbb INT"), PATRA_ERR_SYNTAX,
+      "ADD COLUMN refuses a 32-byte name");
+    assert_eq(patra_exec(db, "ALTER TABLE c RENAME COLUMN col_bbbbbbbbbbbbbbbbbbbbbbbbbbb TO col_bbbbbbbbbbbbbbbbbbbbbbbbbbbb"), PATRA_ERR_SYNTAX,
+      "RENAME COLUMN refuses a 32-byte target");
+    assert_eq(patra_exec(db, "ALTER TABLE c RENAME TO tbl_aaaaaaaaaaaaaaaaaaaaaaaaaaaa"), PATRA_ERR_SYNTAX,
+      "RENAME TO refuses a 32-byte target");
+    rs = patra_query(db, "SELECT col_bbbbbbbbbbbbbbbbbbbbbbbbbbb FROM c");
+    assert(rs != 0, "the refused ALTERs left table c and its column as they were");
+    patra_result_free(rs);
+    assert_eq(patra_exec(db, "ALTER TABLE c RENAME TO tbl_aaaaaaaaaaaaaaaaaaaaaaaaaac"), PATRA_OK, "RENAME TO a 31-byte name");
+
+    # A name that only REFERS is not refused: it matches nothing, as before.
+    assert_eq(patra_exec(db, "DELETE FROM tbl_aaaaaaaaaaaaaaaaaaaaaaaaaaaa"), PATRA_ERR_NOTFOUND, "a long name in DELETE is just not found");
+    patra_close(db);
+    cleanup();
+}
+
 # -- 1.16.0: a refused page-cache allocation is an error ----------
 #
 # _pc_alloc built the opt-in cache's three tables and 1,024 page buffers with
@@ -7403,6 +7455,7 @@ fn main() {
     test_pcache_isolates_databases();
     test_pcache_evict_fails_open();
     test_pcache_alloc_refused();
+    test_identifier_length();
     test_close_rolls_back_open_transaction();
     test_tbl_open_contract();
     test_tbl_open_propagates();

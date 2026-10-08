@@ -72,6 +72,14 @@ fn tbl_find(hdr, name, nlen): i64 {
 fn tbl_create(fd, hdr, name, nlen, col_names, col_types, ncols, autoinc): i64 {
     if (load64(hdr + HDR_TBLCOUNT) >= MAX_TABLES) { return PATRA_ERR_FULL; }
     if (ncols > MAX_COLS) { return PATRA_ERR_COLCOUNT; }
+    # 1.16.0: a name that does not fit its slot is refused, before anything is
+    # allocated, rather than clamped to 31 bytes below — the parser refuses it
+    # first (sql.cyr _ident_fits); this keeps a direct caller honest too. A
+    # clamped table name could never be looked up again.
+    if (nlen > TBL_NAME_MAX - 1) { return PATRA_ERR_SYNTAX; }
+    for (var cl_i = 0; cl_i < ncols; cl_i = cl_i + 1) {
+        if (load64(col_names + cl_i * 16 + 8) > SCH_CNAME_MAX - 1) { return PATRA_ERR_SYNTAX; }
+    }
     if (tbl_find(hdr, name, nlen) >= 0) { return PATRA_ERR_EXISTS; }
 
     # A row must fit inside ONE data page. MAX_COLS caps the column COUNT, but

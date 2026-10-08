@@ -599,6 +599,22 @@ fn _parse_where(pos): i64 {
 
 # ── Parsers ────────────────────
 
+# 1 if the identifier token at `pos` fits a name slot of `cap` bytes (one is
+# the NUL), else 0. Checked wherever a statement DEFINES a name — CREATE TABLE's
+# table and column names, ALTER TABLE's ADD COLUMN / RENAME TO / RENAME COLUMN
+# ... TO targets — and a name that does not fit is PATRA_ERR_SYNTAX (1.16.0).
+#
+# ⚠ It used to be clamped to 31 bytes on the way to disk, silently. Lookups
+# compare the FULL name, so a table created under a long name could never be
+# reached by any statement, and repeating the CREATE (each one "succeeding")
+# filled the 63-entry directory; two long column names sharing 31 bytes became
+# duplicates. Names that only REFER to something stay unchecked: one that is
+# too long matches nothing, which every statement already reports.
+fn _ident_fits(pos, cap): i64 {
+    if (_tok_len(pos) > cap - 1) { return 0; }
+    return 1;
+}
+
 fn _parse_create(): i64 {
     var pos = 0;
     if (_tok_type(pos) != SQLT_CREATE) { return PATRA_ERR_SYNTAX; }
@@ -606,6 +622,7 @@ fn _parse_create(): i64 {
     if (_tok_type(pos) != SQLT_TABLE)  { return PATRA_ERR_SYNTAX; }
     pos = pos + 1;
     if (_tok_type(pos) != SQLT_IDENT)  { return PATRA_ERR_SYNTAX; }
+    if (_ident_fits(pos, TBL_NAME_MAX) == 0) { return PATRA_ERR_SYNTAX; }
 
     store64(_spr() + PR_STMT, STMT_CREATE);
     store64(_spr() + PR_TNAME, _tok_ptr(pos));
@@ -623,6 +640,7 @@ fn _parse_create(): i64 {
         if (ncols >= MAX_COLS) { return PATRA_ERR_COLCOUNT; }
 
         if (_tok_type(pos) != SQLT_IDENT) { return PATRA_ERR_SYNTAX; }
+        if (_ident_fits(pos, SCH_CNAME_MAX) == 0) { return PATRA_ERR_SYNTAX; }
         var item = _spr() + PR_ITEMS + ncols * CR_SZ;
         store64(item + CR_NPTR, _tok_ptr(pos));
         store64(item + CR_NLEN, _tok_len(pos));
@@ -1016,6 +1034,7 @@ fn _parse_alter(): i64 {
         if (_tok_type(pos) != SQLT_COLUMN) { return PATRA_ERR_SYNTAX; }
         pos = pos + 1;
         if (_tok_type(pos) != SQLT_IDENT) { return PATRA_ERR_SYNTAX; }
+        if (_ident_fits(pos, SCH_CNAME_MAX) == 0) { return PATRA_ERR_SYNTAX; }
         var item = _spr() + PR_ITEMS;
         store64(item + CR_NPTR, _tok_ptr(pos));
         store64(item + CR_NLEN, _tok_len(pos));
@@ -1046,6 +1065,7 @@ fn _parse_alter(): i64 {
         if (rt == SQLT_TO) {
             pos = pos + 1;
             if (_tok_type(pos) != SQLT_IDENT) { return PATRA_ERR_SYNTAX; }
+            if (_ident_fits(pos, TBL_NAME_MAX) == 0) { return PATRA_ERR_SYNTAX; }
             var item2 = _spr() + PR_ITEMS;
             store64(item2 + CR_NPTR, _tok_ptr(pos));
             store64(item2 + CR_NLEN, _tok_len(pos));
@@ -1062,6 +1082,7 @@ fn _parse_alter(): i64 {
             if (_tok_type(pos) != SQLT_TO) { return PATRA_ERR_SYNTAX; }
             pos = pos + 1;
             if (_tok_type(pos) != SQLT_IDENT) { return PATRA_ERR_SYNTAX; }
+            if (_ident_fits(pos, SCH_CNAME_MAX) == 0) { return PATRA_ERR_SYNTAX; }
             var item4 = _spr() + PR_ITEMS + CR_SZ;
             store64(item4 + CR_NPTR, _tok_ptr(pos));
             store64(item4 + CR_NLEN, _tok_len(pos));
