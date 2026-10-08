@@ -425,7 +425,7 @@ fn test_order_by() {
 # came back UNSORTED, as if the clause were absent, while the projection path
 # refused the same name.
 fn test_order_by_unknown_column() {
-    test_group("ORDER BY an unknown column is an error, not an unsorted result (1.16.0)");
+    test_group("ORDER BY an unknown or a TEXT / BYTES column is an error (1.16.0)");
     cleanup();
     var db = patra_open(_tpath);
     _setup_people(db);
@@ -440,6 +440,39 @@ fn test_order_by_unknown_column() {
     var rs = patra_query(db, "SELECT name FROM people ORDER BY age DESC");
     assert(rs != 0, "a known column not in the projection still sorts");
     assert_streq(patra_result_get_str(rs, 0, 0), "eve", "oldest first");
+    patra_result_free(rs);
+
+    # 1.16.0: a TEXT / BYTES column is refused too. It was "sorted" by its row
+    # reference (the chain's page number), i.e. by where the payload sits on
+    # disk. Inserted so that page order and payload order disagree.
+    patra_exec(db, "CREATE TABLE notes (id INT, body TEXT)");
+    patra_exec(db, "INSERT INTO notes VALUES (1, 'zebra')");
+    patra_exec(db, "INSERT INTO notes VALUES (2, 'apple')");
+    assert_eq(patra_query(db, "SELECT * FROM notes ORDER BY body"), 0,
+      "ORDER BY a TEXT column is refused (it sorted by page number)");
+    assert_eq(patra_query(db, "SELECT id FROM notes ORDER BY id, body DESC"), 0,
+      "a TEXT column anywhere in the ORDER BY is refused");
+    var obt[16];
+    store64(&obt, COL_INT);
+    store64(&obt + 8, COL_BYTES);
+    patra_exec(db, "CREATE TABLE bl (id INT, content BYTES)");
+    var obv[16];
+    memset(&obv, 0, 16);
+    var obsp[16];
+    memset(&obsp, 0, 16);
+    var obsl[16];
+    memset(&obsl, 0, 16);
+    var obbp[16];
+    store64(&obbp, 0);
+    store64(&obbp + 8, "xyz");
+    var obbl[16];
+    store64(&obbl, 0);
+    store64(&obbl + 8, 3);
+    patra_insert_row(db, "bl", 2, 2, &obt, &obv, &obsp, &obsl, &obbp, &obbl);
+    assert_eq(patra_query(db, "SELECT id FROM bl ORDER BY content"), 0, "ORDER BY a BYTES column is refused");
+    rs = patra_query(db, "SELECT body FROM notes ORDER BY id DESC");
+    assert(rs != 0, "a TEXT column can still be SELECTed under an INT sort");
+    assert_eq(patra_result_count(rs), 2, "both rows");
     patra_result_free(rs);
     patra_close(db);
 }
