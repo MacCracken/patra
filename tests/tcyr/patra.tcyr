@@ -6725,6 +6725,165 @@ fn test_wal_bound_to_database() {
     xunlink(_wpath());
 }
 
+# -- 1.16.0: WAL recovery outside patra_open ----------------------
+#
+# issues/archive/2026-09-23-wal-recovery-runs-only-at-open.md. Process B dies
+# mid-transaction while process A holds the database open. Recovery ran only in
+# patra_open, so A read B's uncommitted row, made it permanent with a BEGIN of
+# its own (wal_start's O_TRUNC destroyed B's WAL), or lost its own autocommit
+# write at the next open, when B's WAL was replayed over it. B here is a forked
+# child that opens the database, begins, inserts row 99 and exits without
+# commit, rollback or close. Linux forks here.
+#ifdef CYRIUS_TARGET_LINUX
+fn _wr_crash_child(): i64 {
+    var b = patra_open(_tpath);
+    patra_begin(b);
+    patra_exec(b, "INSERT INTO t VALUES (99, 99)");
+    sys_exit(0);
+    return 0;
+}
+
+# Fork B and wait for it to die. Returns 1 if it left a WAL behind.
+fn _wr_crash(): i64 {
+    var pid = sys_fork();
+    if (pid == 0) { _wr_crash_child(); }
+    var st[8];
+    sys_waitpid(pid, &st, 0);
+    return wal_exists(_wpath());
+}
+#endif
+
+# One committed row (1, 1); returns handle A, opened before B starts.
+fn _wr_setup(): i64 {
+    cleanup();
+    xunlink(_wpath());
+    var s = patra_open(_tpath);
+    patra_exec(s, "CREATE TABLE t (id INT, v INT)");
+    patra_exec(s, "INSERT INTO t VALUES (1, 1)");
+    patra_close(s);
+    return patra_open(_tpath);
+}
+
+# The single integer a COUNT(*) query returns, or -1 if the query failed.
+fn _wr_n(db, sql): i64 {
+    var rs = patra_query(db, sql);
+    if (rs == 0) { return 0 - 1; }
+    var n = patra_result_get_int(rs, 0, 0);
+    patra_result_free(rs);
+    return n;
+}
+
+# HDR_COMMITGEN as it is on disk right now, read past every handle.
+fn _wr_disk_gen(): i64 {
+    var fd = _pt_file_open(_tpath);
+    if (fd < 0) { return 0 - 1; }
+    var h = pg_alloc();
+    var g = 0 - 1;
+    if (patra_hdr_read(fd, h) == PATRA_OK) { g = load64(h + HDR_COMMITGEN); }
+    pg_free(h);
+    sys_close(fd);
+    return g;
+}
+
+fn test_wal_recovery_outside_open() {
+    test_group("a crashed writer's WAL is replayed before the next statement, not only at open (1.16.0)");
+    var a = 0;
+    var f = 0;
+    #ifdef CYRIUS_TARGET_LINUX
+    # A only reads.
+    a = _wr_setup();
+    assert_eq(_wr_crash(), 1, "read: B died mid-transaction and left its WAL");
+    var dead_gen = _wr_disk_gen();
+    assert_eq(_wr_n(a, "SELECT COUNT(*) FROM t"), 1, "read: A does not see B's uncommitted row (it read 2)");
+    assert_eq(_wr_n(a, "SELECT COUNT(*) FROM t WHERE id = 99"), 0, "read: row 99 is not visible to A");
+    assert_eq(wal_exists(_wpath()), 0, "read: the reader replayed and removed the orphaned WAL");
+    assert(load64(_db_hdr(a) + HDR_COMMITGEN) > dead_gen,
+      "read: the replay moved HDR_COMMITGEN past the dead transaction's, so no cache keeps its pages");
+    patra_close(a);
+    f = patra_open(_tpath);
+    assert_eq(_wr_n(f, "SELECT COUNT(*) FROM t WHERE id = 1"), 1, "read: fresh open keeps row 1");
+    assert_eq(_wr_n(f, "SELECT COUNT(*) FROM t WHERE id = 99"), 0, "read: fresh open has no row 99");
+    patra_close(f);
+
+    # A runs a transaction of its own.
+    a = _wr_setup();
+    assert_eq(_wr_crash(), 1, "txn: B left its WAL");
+    assert_eq(patra_begin(a), PATRA_OK, "txn: A begins");
+    assert_eq(patra_exec(a, "INSERT INTO t VALUES (2, 2)"), PATRA_OK, "txn: A inserts row 2");
+    assert_eq(patra_commit(a), PATRA_OK, "txn: A commits");
+    assert_eq(_wr_n(a, "SELECT COUNT(*) FROM t WHERE id = 99"), 0, "txn: A never sees row 99");
+    patra_close(a);
+    f = patra_open(_tpath);
+    assert_eq(_wr_n(f, "SELECT COUNT(*) FROM t WHERE id = 99"), 0,
+      "txn: B's uncommitted row was not made permanent by A's BEGIN");
+    assert_eq(_wr_n(f, "SELECT COUNT(*) FROM t WHERE id = 2"), 1, "txn: A's committed row 2 is there");
+    assert_eq(_wr_n(f, "SELECT COUNT(*) FROM t WHERE id = 1"), 1, "txn: row 1 is there");
+    patra_close(f);
+
+    # A writes in autocommit.
+    a = _wr_setup();
+    assert_eq(_wr_crash(), 1, "autocommit: B left its WAL");
+    assert_eq(patra_exec(a, "INSERT INTO t VALUES (2, 2)"), PATRA_OK, "autocommit: A inserts row 2");
+    assert_eq(wal_exists(_wpath()), 0, "autocommit: the writer replayed B's WAL before writing");
+    patra_close(a);
+    f = patra_open(_tpath);
+    assert_eq(_wr_n(f, "SELECT COUNT(*) FROM t WHERE id = 2"), 1,
+      "autocommit: A's committed row survives the next open (it was lost)");
+    assert_eq(_wr_n(f, "SELECT COUNT(*) FROM t WHERE id = 99"), 0, "autocommit: no row 99");
+    assert_eq(_wr_n(f, "SELECT COUNT(*) FROM t WHERE id = 1"), 1, "autocommit: row 1 is there");
+    patra_close(f);
+    #endif
+
+    # A transaction's own statements must NOT replay its own WAL.
+    a = _wr_setup();
+    patra_begin(a);
+    patra_exec(a, "INSERT INTO t VALUES (2, 2)");
+    patra_exec(a, "INSERT INTO t VALUES (3, 3)");
+    assert_eq(_wr_n(a, "SELECT COUNT(*) FROM t"), 3, "own txn: its statements see its own rows");
+    assert_eq(wal_exists(_wpath()), 1, "own txn: its WAL is still there");
+    assert_eq(patra_rollback(a), PATRA_OK, "own txn: rollback");
+    assert_eq(_wr_n(a, "SELECT COUNT(*) FROM t"), 1, "own txn: rollback undid both rows");
+    patra_close(a);
+
+    # A replay that cannot complete fails the statement and keeps the WAL. The
+    # WAL is bound to this database and names an unseekable page (2^51), as in
+    # test_wal_incomplete_restore_keeps_wal.
+    a = _wr_setup();
+    var dbid = load64(_db_hdr(a) + HDR_DBID);
+    var s1 = 0x5A5A5A5A5A5A5A5A;
+    var s2 = 0x3C3C3C3C3C3C3C3C;
+    var wfd = file_open(_wpath(), O_RDWR | O_CREAT | O_TRUNC, 420);
+    var wh = fl_alloc(WAL_HDR_SZ);
+    memset(wh, 0, WAL_HDR_SZ);
+    store32(wh, WAL_MAGIC);
+    store32(wh + 4, WAL_VER);
+    store64(wh + 8, s1);
+    store64(wh + 16, s2);
+    store64(wh + 24, dbid);
+    sys_write(wfd, wh, WAL_HDR_SZ);
+    fl_free(wh);
+    var rec = fl_alloc(WAL_REC_SZ);
+    memset(rec, 0, WAL_REC_SZ);
+    var badpg = 2251799813685248;
+    store64(rec, badpg);
+    store64(rec + 8 + PAGE_SIZE, _wal_hash(badpg, rec + 8, s1, s2));
+    sys_write(wfd, rec, WAL_REC_SZ);
+    fl_free(rec);
+    sys_close(wfd);
+    assert_eq(patra_exec(a, "INSERT INTO t VALUES (2, 2)"), PATRA_ERR_IO,
+      "incomplete: a write over a half-restored file is refused");
+    assert_eq(patra_query(a, "SELECT * FROM t"), 0, "incomplete: and so is a read");
+    assert_eq(patra_begin(a), PATRA_ERR_IO, "incomplete: and a BEGIN");
+    assert_eq(wal_exists(_wpath()), 1, "incomplete: the WAL is kept for the retry");
+    xunlink(_wpath());
+    assert_eq(patra_exec(a, "INSERT INTO t VALUES (2, 2)"), PATRA_OK, "incomplete: with the WAL gone, writes resume");
+    assert_eq(_wr_n(a, "SELECT COUNT(*) FROM t"), 2, "incomplete: and reads");
+    patra_close(a);
+
+    cleanup();
+    xunlink(_wpath());
+}
+
 # -- v1.13.8: WHERE type mismatch is an error (audit S2-7) ---
 
 fn test_where_type_mismatch() {
@@ -7114,6 +7273,7 @@ fn main() {
     test_str_overlong_rejected();
     test_row_geometry_property();
     test_wal_bound_to_database();
+    test_wal_recovery_outside_open();
     test_where_type_mismatch();
     test_bind_where();
     test_bind_update();

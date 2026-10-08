@@ -163,6 +163,69 @@ fn patra_init(): i64 {
 
 # ── Open / Close ────────────────────
 
+# Replay an orphaned WAL, if there is one (1.16.0). Shared by patra_open and
+# every locked statement.
+#
+# The caller holds LOCK_EX on `fd` — the flock call RETURNED 0, it was not
+# merely issued — and has no transaction of its own open on the file. Under
+# that lock any `<db>.wal` belongs to a transaction that is no longer running:
+# a live transaction holds LOCK_EX from patra_begin to commit / rollback
+# (v1.13.3), and wal_start, the only writer of the file, runs inside that span.
+# Where the call fails (Windows, which has no flock; a contended agnos flock,
+# which never waits) the caller skips this: replaying a WAL without the lock
+# could undo a transaction that is still running.
+#
+# `hdr` is a PAGE_SIZE buffer holding the current on-disk header. On return it
+# holds the post-recovery header whenever a replay ran.
+#
+# Returns WAL_RECOVER_NONE when nothing was replayed (no WAL, or a refused WAL,
+# left on disk for inspection as patra_open always has), WAL_RECOVER_DONE after
+# a completed replay, or `0 - PATRA_ERR_IO` when the replay could not complete.
+# The WAL is then kept, and the caller must not write over the half-restored
+# pages — the next statement retries.
+#
+# A replay rewrites pages with raw writes, behind page_write's cache eviction,
+# so it flushes the page cache, as patra_rollback does. It also moves
+# HDR_COMMITGEN past both the restored value and the dead transaction's last
+# one: the restore rewinds the generation, and a handle or process that had
+# seen the dead transaction's value must not find its cached pages labelled
+# current. Every page cache (_pc_check) and tail-page cache (DB_LP_GEN) then
+# misses.
+fn _pt_recover_held(fd, wpath, hdr): i64 {
+    var pre_gen = load64(hdr + HDR_COMMITGEN);
+    var rr = wal_recover(fd, wpath, load64(hdr + HDR_DBID), load64(hdr + HDR_PGCOUNT));
+    if (rr == WAL_RECOVER_NONE) { return WAL_RECOVER_NONE; }
+    if (rr == WAL_RECOVER_REFUSED) { return WAL_RECOVER_NONE; }
+    # Replayed, completely or in part: pages changed underneath every cache.
+    _pc_flush();
+    if (patra_hdr_read(fd, hdr) != PATRA_OK) { return 0 - PATRA_ERR_IO; }
+    if (rr != WAL_RECOVER_DONE) { return 0 - PATRA_ERR_IO; }
+    var gen = load64(hdr + HDR_COMMITGEN);
+    if (pre_gen > gen) { gen = pre_gen; }
+    store64(hdr + HDR_COMMITGEN, gen + 1);
+    if (patra_hdr_write(fd, hdr) != PATRA_OK) { return 0 - PATRA_ERR_IO; }
+    return WAL_RECOVER_DONE;
+}
+
+# The statement-side tail of a recovery: called with LOCK_EX held and the
+# header just refreshed. Returns PATRA_OK, or the error after releasing the
+# lock. Only a replay costs anything beyond wal_recover's one failed open.
+fn _db_recover_held(db, fd, hdr): i64 {
+    var rc = _pt_recover_held(fd, load64(db + DB_PATH), hdr);
+    if (rc < 0) {
+        patra_unlock(fd);
+        return 0 - rc;
+    }
+    if (rc == WAL_RECOVER_DONE) {
+        # The replay rewrote the header: re-read it through the generation
+        # gate, and drop the tail-page cache, which may name a page the replay
+        # changed.
+        store64(db + DB_LP_IDX, 0 - 1);
+        _pc_refresh(fd, hdr);
+    }
+    return PATRA_OK;
+}
+
 # Open or create a .patra database file
 fn patra_open(path): i64 {
     var fd = _pt_file_open(path);
@@ -206,10 +269,15 @@ fn patra_open(path): i64 {
     # needed nor safe here — skip it and let whoever opens next do it. Blocking
     # instead would self-deadlock a consumer that opens a second handle while
     # holding a transaction on the first. (audit 2026-08-18 S1-4)
+    #
+    # 1.16.0: this is no longer the only place recovery runs — every locked
+    # statement and every patra_begin repeats it (_db_lock_ex / _db_lock_sh) —
+    # but it is the same helper, so a replay here bumps HDR_COMMITGEN and
+    # flushes the page cache exactly as one there does.
     if (_pt_flock(fd, LOCK_EX + LOCK_NB) == 0) {
         var ohdr = pg_alloc();
         if (patra_hdr_read(fd, ohdr) == PATRA_OK) {
-            wal_recover(fd, wpath, load64(ohdr + HDR_DBID), load64(ohdr + HDR_PGCOUNT));
+            _pt_recover_held(fd, wpath, ohdr);
             # Assign this database its identity if it does not have one — a
             # freshly created file, or any file written before v1.13.8. Done
             # once, under the same exclusive lock, and re-read afterwards so
@@ -432,8 +500,8 @@ fn _exec_create(db): i64 {
     var fd = _db_fd(db);
     var hdr = _db_hdr(db);
 
-    patra_lock_ex(fd);
-    _pc_refresh(fd, hdr);
+    var lk = _db_lock_ex(db);
+    if (lk != PATRA_OK) { return lk; }
 
     var ncols = load64(_spr() + PR_COUNT);
     var names = _pt_alloc(ncols * 16);
@@ -535,8 +603,8 @@ fn _exec_insert(db): i64 {
     var fd = _db_fd(db);
     var hdr = _db_hdr(db);
 
-    patra_lock_ex(fd);
-    _pc_refresh(fd, hdr);
+    var lk = _db_lock_ex(db);
+    if (lk != PATRA_OK) { return lk; }
 
     var tname = load64(_spr() + PR_TNAME);
     var tnlen = load64(_spr() + PR_TNLEN);
@@ -798,8 +866,8 @@ fn _exec_update(db): i64 {
     var fd = _db_fd(db);
     var hdr = _db_hdr(db);
 
-    patra_lock_ex(fd);
-    _pc_refresh(fd, hdr);
+    var lk = _db_lock_ex(db);
+    if (lk != PATRA_OK) { return lk; }
 
     var tname = load64(_spr() + PR_TNAME);
     var tnlen = load64(_spr() + PR_TNLEN);
@@ -833,8 +901,8 @@ fn _exec_delete(db): i64 {
     var fd = _db_fd(db);
     var hdr = _db_hdr(db);
 
-    patra_lock_ex(fd);
-    _pc_refresh(fd, hdr);
+    var lk = _db_lock_ex(db);
+    if (lk != PATRA_OK) { return lk; }
 
     var tname = load64(_spr() + PR_TNAME);
     var tnlen = load64(_spr() + PR_TNLEN);
@@ -866,8 +934,8 @@ fn _exec_drop(db): i64 {
     var fd = _db_fd(db);
     var hdr = _db_hdr(db);
 
-    patra_lock_ex(fd);
-    _pc_refresh(fd, hdr);
+    var lk = _db_lock_ex(db);
+    if (lk != PATRA_OK) { return lk; }
 
     var tname = load64(_spr() + PR_TNAME);
     var tnlen = load64(_spr() + PR_TNLEN);
@@ -893,8 +961,8 @@ fn _exec_alter_rename_tbl(db): i64 {
     var fd = _db_fd(db);
     var hdr = _db_hdr(db);
 
-    patra_lock_ex(fd);
-    _pc_refresh(fd, hdr);
+    var lk = _db_lock_ex(db);
+    if (lk != PATRA_OK) { return lk; }
 
     var tname = load64(_spr() + PR_TNAME);
     var tnlen = load64(_spr() + PR_TNLEN);
@@ -928,8 +996,8 @@ fn _exec_alter_rename_col(db): i64 {
     var fd = _db_fd(db);
     var hdr = _db_hdr(db);
 
-    patra_lock_ex(fd);
-    _pc_refresh(fd, hdr);
+    var lk = _db_lock_ex(db);
+    if (lk != PATRA_OK) { return lk; }
 
     var tname = load64(_spr() + PR_TNAME);
     var tnlen = load64(_spr() + PR_TNLEN);
@@ -981,8 +1049,8 @@ fn _exec_alter_add(db): i64 {
     var fd = _db_fd(db);
     var hdr = _db_hdr(db);
 
-    patra_lock_ex(fd);
-    _pc_refresh(fd, hdr);
+    var lk = _db_lock_ex(db);
+    if (lk != PATRA_OK) { return lk; }
 
     var tname = load64(_spr() + PR_TNAME);
     var tnlen = load64(_spr() + PR_TNLEN);
@@ -1160,8 +1228,8 @@ fn _exec_alter_drop_col(db): i64 {
     var fd = _db_fd(db);
     var hdr = _db_hdr(db);
 
-    patra_lock_ex(fd);
-    _pc_refresh(fd, hdr);
+    var lk = _db_lock_ex(db);
+    if (lk != PATRA_OK) { return lk; }
 
     var tname = load64(_spr() + PR_TNAME);
     var tnlen = load64(_spr() + PR_TNLEN);
@@ -1334,8 +1402,8 @@ fn _exec_vacuum(db): i64 {
     var fd = _db_fd(db);
     var hdr = _db_hdr(db);
 
-    patra_lock_ex(fd);
-    _pc_refresh(fd, hdr);
+    var lk = _db_lock_ex(db);
+    if (lk != PATRA_OK) { return lk; }
 
     var tname = load64(_spr() + PR_TNAME);
     var tnlen = load64(_spr() + PR_TNLEN);
@@ -1363,8 +1431,8 @@ fn _exec_create_index(db): i64 {
     var fd = _db_fd(db);
     var hdr = _db_hdr(db);
 
-    patra_lock_ex(fd);
-    _pc_refresh(fd, hdr);
+    var lk = _db_lock_ex(db);
+    if (lk != PATRA_OK) { return lk; }
 
     var tname = load64(_spr() + PR_TNAME);
     var tnlen = load64(_spr() + PR_TNLEN);
@@ -1456,9 +1524,69 @@ fn _tx_unlock(db, fd): i64 {
     return patra_unlock(fd);
 }
 
-fn _tx_lock_sh(db, fd): i64 {
-    if (load64(db + DB_TX)) { return 0; }
-    return patra_lock_sh(fd);
+# ── Statement entry: lock, recover, refresh (1.16.0) ────────────────────
+#
+# WAL recovery used to run only in patra_open, so a process that died
+# mid-transaction while another held the database open left the survivor
+# reading the dead transaction's uncommitted rows, making them permanent with a
+# BEGIN of its own (wal_start's O_TRUNC destroyed the only record of how to
+# undo them), or losing its own autocommit writes at the next open, when the
+# orphaned WAL was replayed over them. (issues/archive/2026-09-23-wal-recovery-
+# runs-only-at-open.md)
+#
+# Every statement that touches the file now enters through one of these two,
+# which take the lock, replay any orphaned WAL while holding LOCK_EX, and re-read
+# the header (_pc_refresh), in that order. Inside the handle's own transaction
+# they take no lock and replay nothing: the lock is already held, and the WAL on
+# disk is this transaction's own.
+#
+# The cost on the path with no WAL is one failed open(2) of `<db>.wal` per
+# statement (tests/bcyr: select_point_10k, update_point_10k).
+
+# Writers. On failure the lock is released and the error returned; the caller
+# returns it as is.
+fn _db_lock_ex(db): i64 {
+    var fd = _db_fd(db);
+    var hdr = _db_hdr(db);
+    var lk = patra_lock_ex(fd);
+    _pc_refresh(fd, hdr);
+    if (load64(db + DB_TX) != 0) { return PATRA_OK; }
+    if (lk != 0) { return PATRA_OK; }
+    return _db_recover_held(db, fd, hdr);
+}
+
+# Readers. A reader holds LOCK_SH, under which it may not write, so it only
+# probes; finding a WAL, it converts to LOCK_EX, replays, and finishes its
+# statement under the exclusive lock (the caller's _tx_unlock releases either).
+# flock does not convert atomically — the shared lock is dropped first — and
+# nothing needs it to: whatever another process does in that window, any WAL
+# still on disk once LOCK_EX is held is orphaned, and wal_recover finds none if
+# that process already replayed it. Converting back to LOCK_SH would reopen the
+# same window for no benefit.
+fn _db_lock_sh(db): i64 {
+    var fd = _db_fd(db);
+    var hdr = _db_hdr(db);
+    if (load64(db + DB_TX) != 0) {
+        _pc_refresh(fd, hdr);
+        return PATRA_OK;
+    }
+    if (patra_lock_sh(fd) != 0) {
+        _pc_refresh(fd, hdr);
+        return PATRA_OK;
+    }
+    if (wal_exists(load64(db + DB_PATH)) == 0) {
+        _pc_refresh(fd, hdr);
+        return PATRA_OK;
+    }
+    if (patra_lock_ex(fd) != 0) {
+        # The conversion failed, and flock may have dropped the shared lock on
+        # the way. Hold nothing and report it, rather than read the dead
+        # transaction's pages.
+        patra_unlock(fd);
+        return PATRA_ERR_IO;
+    }
+    _pc_refresh(fd, hdr);
+    return _db_recover_held(db, fd, hdr);
 }
 
 # ── Transactions ────────────────────
@@ -1468,8 +1596,10 @@ fn patra_begin(db): i64 {
     if (load64(db + DB_TX)) { return PATRA_OK; }
     var fd = _db_fd(db);
     var wpath = load64(db + DB_PATH);
-    patra_lock_ex(fd);
-    _pc_refresh(fd, _db_hdr(db));
+    # 1.16.0: recover an orphaned WAL BEFORE wal_start, whose O_TRUNC would
+    # otherwise destroy it and make the dead transaction's pages permanent.
+    var lk = _db_lock_ex(db);
+    if (lk != PATRA_OK) { return lk; }
     # 1.14.0: PROPAGATE wal_start's failure. This return was discarded and
     # patra_begin unconditionally reported PATRA_OK, which made a WAL that
     # could not be opened (symlink refused, EACCES, ENOSPC, fd exhaustion,
@@ -2060,14 +2190,13 @@ fn _patra_query_exec(db): i64 {
     var fd = _db_fd(db);
     var hdr = _db_hdr(db);
 
-    _tx_lock_sh(db, fd);
-    _pc_refresh(fd, hdr);
+    # The query path returns a RESULT SET, so its failure value is 0 rather
+    # than an error code — the one place the shared prologue's status cannot be
+    # returned verbatim. That includes a WAL replay that could not complete.
+    if (_db_lock_sh(db) != PATRA_OK) { return 0; }
 
     var tname = load64(_spr() + PR_TNAME);
     var tnlen = load64(_spr() + PR_TNLEN);
-    # The query path returns a RESULT SET, so its failure value is 0 rather
-    # than an error code — the one place the shared prologue's status cannot be
-    # returned verbatim.
     var idx = 0;
     var spg = 0;             # out-param only; this path never rewrites the schema
     var schema = 0;
@@ -2871,8 +3000,8 @@ fn _patra_insert_row_impl(db, tname, tnlen, ncols, types, ivals, sptrs, slens, b
     var fd = _db_fd(db);
     var hdr = _db_hdr(db);
 
-    patra_lock_ex(fd);
-    _pc_refresh(fd, hdr);
+    var lk = _db_lock_ex(db);
+    if (lk != PATRA_OK) { return lk; }
 
     var idx = 0;
     var spg = 0;

@@ -528,10 +528,42 @@ fn wal_rollback(db_fd, wal_path): i64 {
     return 0;
 }
 
-# Recover from crash: if WAL file exists, replay it. Returns 1 on replay
-# attempt (even if bad magic — the file is then left for inspection).
-# Recover from a crash: if a WAL exists, replay it. Returns 1 on a replay
-# attempt (even when refused — the file is then left on disk for inspection).
+# What wal_recover found. A failed replay is `0 - 1` (the WAL is kept).
+#
+# 1.16.0 split REFUSED out of DONE: both used to be 1 ("a replay attempt"),
+# which was all patra_open needed, since it discards the result. Recovery now
+# also runs before statements (_pt_recover_held, src/lib.cyr), and those must
+# know whether pages actually changed underneath them: only a replay bumps
+# HDR_COMMITGEN and flushes the page cache, and a refused WAL, which stays on
+# disk, must not cost a header write on every statement.
+enum WalRecover {
+    WAL_RECOVER_NONE = 0;
+    WAL_RECOVER_DONE = 1;
+    WAL_RECOVER_REFUSED = 2;
+}
+
+# 1 if a WAL file exists at `wal_path`, else 0. The reader path's probe
+# (1.16.0): a reader holds only LOCK_SH, so it cannot replay what it finds; it
+# asks first, and escalates to LOCK_EX only when there is something to replay.
+# Same O_NOFOLLOW open as wal_recover, so a symlink planted at the path reads
+# as "no WAL" here exactly as it does there.
+fn wal_exists(wal_path): i64 {
+    var wfd = file_open(wal_path, O_RDONLY | O_NOFOLLOW, 0);
+    if (wfd < 0) { return 0; }
+    sys_close(wfd);
+    return 1;
+}
+
+# Recover from a crash: if a WAL exists, replay it. Returns WAL_RECOVER_NONE
+# when there is no WAL, WAL_RECOVER_DONE when it was replayed and removed,
+# WAL_RECOVER_REFUSED when it was refused (bad magic, an old format, another
+# database's id) and left on disk for inspection, or `0 - 1` when the replay
+# could not complete and the WAL is kept for the next attempt.
+#
+# The caller must hold LOCK_EX on `db_fd` — ACQUIRED, not merely requested —
+# and have no transaction of its own open on the file: while LOCK_EX is held,
+# any WAL on disk belongs to a transaction that is no longer running, because a
+# live one holds LOCK_EX for its whole span (v1.13.3).
 #
 # `dbid` is the opening database's HDR_DBID and `pgcount` its HDR_PGCOUNT.
 #
@@ -557,33 +589,41 @@ fn wal_recover(db_fd, wal_path, dbid, pgcount): i64 {
     # v4 dbid binding is the real defence against a foreign WAL; this closes
     # the path-level half.
     var wfd = file_open(wal_path, O_RDONLY | O_NOFOLLOW, 0);
-    if (wfd < 0) { return 0; }
+    if (wfd < 0) { return WAL_RECOVER_NONE; }
     # 1.14.0: recovery has no transaction slot, so it verifies into its own
     # 3-word scratch (salt1, salt2, dbid) rather than into module globals.
+    # 1.16.0: a refused scratch allocation is a FAILED recovery (WAL kept), not
+    # "no WAL". It returned 0 here, which a statement would read as leave to
+    # write over the dead transaction's pages.
     var vh = _pt_alloc(24);
-    if (vh == 0) { sys_close(wfd); return 0; }
+    if (vh == 0) { sys_close(wfd); return 0 - 1; }
     var wv = _wal_hdr_verify(wfd, vh);
     if (wv < 0) {
         # Bad magic / stale format: refuse to replay. Leave the file on disk
         # so an operator can inspect it; we will not silently corrupt the DB.
         _pt_free(vh);
         sys_close(wfd);
-        return 1;
+        return WAL_RECOVER_REFUSED;
     }
     if (wv >= 4) {
-        if (dbid == 0) { _pt_free(vh); sys_close(wfd); return 1; }
+        if (dbid == 0) { _pt_free(vh); sys_close(wfd); return WAL_RECOVER_REFUSED; }
         if (load64(vh + 16) != dbid) {
             # This WAL belongs to a different database. Leave it for inspection.
             _pt_free(vh);
             sys_close(wfd);
-            return 1;
+            return WAL_RECOVER_REFUSED;
         }
     }
 
     var legacy = 0;
     if (wv < 4) { legacy = 1; }
 
+    # 1.16.0: checked. A 0 buffer made the first read fail with EFAULT, which
+    # ended the loop as a clean end-of-log, and the WAL was then UNLINKED with
+    # nothing replayed: the before-images gone, the dead transaction's pages
+    # left in place.
     var buf = _pt_alloc(WAL_REC_SZ);
+    if (buf == 0) { _pt_free(vh); sys_close(wfd); return 0 - 1; }
     var done = 0;
     var failed = 0;
     while (done == 0) {
@@ -609,15 +649,17 @@ fn wal_recover(db_fd, wal_path, dbid, pgcount): i64 {
     _pt_fdatasync(db_fd);
     sys_close(wfd);
     # Same rule as wal_rollback (1.14.0): an incomplete replay must not unlink
-    # the WAL, or the pages it still had to undo are unrecoverable. This return
-    # is currently discarded by patra_open — deliberately, since there is
-    # nothing useful it could do differently — so the retained WAL, plus the
-    # logged error, is the actual protection: the next open recovers again.
+    # the WAL, or the pages it still had to undo are unrecoverable. patra_open
+    # discards this return, since there is nothing useful it could do
+    # differently; the retained WAL, plus the logged error, is the protection
+    # there, and the next open recovers again. A statement (1.16.0) fails
+    # instead: writing over a half-restored file is the defect recovery exists
+    # to prevent, and the next statement retries.
     if (failed != 0) {
         _pt_err("patra: WAL recovery incomplete — WAL kept for retry");
         return 0 - 1;
     }
     xunlink(wal_path);
     _pt_sync_dir(wal_path);
-    return 1;
+    return WAL_RECOVER_DONE;
 }

@@ -1,3 +1,29 @@
+> **ARCHIVED 2026-10-08 — RESOLVED in patra 1.16.0** (cyrius 6.7.5). Recovery runs before every
+> locked statement and every `patra_begin`, not only in `patra_open`:
+>
+> - writers (`_db_lock_ex`, the twelve statement paths and `patra_begin`) replay an orphaned WAL
+>   under `LOCK_EX`, `patra_begin` before `wal_start`'s `O_TRUNC`;
+> - a reader (`_db_lock_sh`) probes with `wal_exists`, and on finding a WAL converts to `LOCK_EX`,
+>   replays it, and finishes the query under the exclusive lock;
+> - a replay flushes the page cache and moves `HDR_COMMITGEN` past both the restored value and the
+>   dead transaction's (`_pt_recover_held`, shared with `patra_open`), and the handle drops its
+>   tail-page cache;
+> - the v1.13.8 `HDR_DBID` binding and `wal_recover`'s refusals are unchanged; `wal_recover` now
+>   returns `WAL_RECOVER_REFUSED` for them, apart from `WAL_RECOVER_DONE`;
+> - a replay that cannot complete fails the statement with `PATRA_ERR_IO` (a query returns 0) and
+>   keeps the WAL; the next statement retries;
+> - replay runs only when the flock call returned 0, so Windows (no flock) and a contended agnos
+>   flock (which never waits) keep the old behaviour rather than replay a live transaction's WAL.
+>
+> **Acceptance:** `test_wal_recovery_outside_open` is the reproduction above, with B a forked
+> child. All three modes end with rows 1 and 2 and no row 99, on A's handle and after a fresh
+> open. Run against the 1.15.2 sources it fails 12 assertions, the table's three wrong outcomes
+> among them. Mutation-verified: without the statement-side recovery call it fails 12; without
+> the generation bump, 1; without the in-transaction guard, 16. **Cost:** one failed `open(2)` of
+> `<db>.wal` per statement, about 3 us on the box measured (where one clock read costs 1.3 us)
+> (`select_point_10k` 22.8 -> 25.9 us, `update_point_10k` 18.0 -> 20.8 us; medians of three
+> runs). Only a replay pays more.
+
 # WAL recovery runs only at `patra_open` — a crashed writer's WAL is read through, truncated, or replayed over later commits — OPEN
 
 **Status:** 🔴 **OPEN.** Found 2026-09-23 by the adversarial code review of the 1.15.0 cut.
