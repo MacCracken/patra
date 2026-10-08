@@ -907,6 +907,45 @@ fn test_aggregates() {
     assert_eq(patra_result_get_int(rs, 0, 0), 5, "max id=5");
     patra_result_free(rs);
 
+    # 1.16.0: SUM / MIN / MAX over a column that is not INT is an error. They
+    # read the first 8 bytes of the field: a STR's leading characters, and for
+    # TEXT / BYTES the chain's page number, returned as if it were data.
+    patra_exec(db, "CREATE TABLE docs (id INT, title STR, body TEXT)");
+    patra_exec(db, "INSERT INTO docs VALUES (1, 'a', 'first body')");
+    patra_exec(db, "INSERT INTO docs VALUES (2, 'b', 'second body')");
+    assert_eq(patra_query(db, "SELECT SUM(body) FROM docs"), 0, "SUM over TEXT is refused (it returned page numbers)");
+    assert_eq(patra_query(db, "SELECT MIN(body) FROM docs"), 0, "MIN over TEXT is refused");
+    assert_eq(patra_query(db, "SELECT MAX(body) FROM docs"), 0, "MAX over TEXT is refused");
+    assert_eq(patra_query(db, "SELECT SUM(title) FROM docs"), 0, "SUM over STR is refused");
+    assert_eq(patra_query(db, "SELECT MAX(title) FROM docs WHERE id > 0"), 0, "MAX over STR is refused");
+    var cbs[16];
+    store64(&cbs, COL_INT);
+    store64(&cbs + 8, COL_BYTES);
+    patra_exec(db, "CREATE TABLE blobs (id INT, content BYTES)");
+    var bvals[16];
+    store64(&bvals, 7);
+    store64(&bvals + 8, 0);
+    var bsp[16];
+    memset(&bsp, 0, 16);
+    var bsl[16];
+    memset(&bsl, 0, 16);
+    var bptrs[16];
+    store64(&bptrs, 0);
+    store64(&bptrs + 8, "payload");
+    var blens[16];
+    store64(&blens, 0);
+    store64(&blens + 8, 7);
+    assert_eq(patra_insert_row(db, "blobs", 5, 2, &cbs, &bvals, &bsp, &bsl, &bptrs, &blens), PATRA_OK,
+      "a BYTES row to aggregate over");
+    assert_eq(patra_query(db, "SELECT SUM(content) FROM blobs"), 0, "SUM over BYTES is refused");
+    # COUNT(*) and the INT aggregates on the same tables still answer.
+    rs = patra_query(db, "SELECT SUM(id) FROM docs");
+    assert_eq(patra_result_get_int(rs, 0, 0), 3, "SUM over the INT column still works");
+    patra_result_free(rs);
+    rs = patra_query(db, "SELECT COUNT(*) FROM blobs");
+    assert_eq(patra_result_get_int(rs, 0, 0), 1, "COUNT(*) over a BYTES table still works");
+    patra_result_free(rs);
+
     patra_close(db);
 }
 

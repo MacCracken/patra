@@ -2251,6 +2251,12 @@ fn _patra_query_exec(db): i64 {
             var aci = _wh_resolve_col(schema, ncols,
               load64(_spr() + PR_AGG_COL_PTR), load64(_spr() + PR_AGG_COL_LEN));
             if (aci < 0) { pg_free(schema); _tx_unlock(db, fd); return 0; }
+            # 1.16.0: SUM / MIN / MAX are integer aggregates, so the column must
+            # be INT. Any other column was summed as the first 8 bytes of its
+            # field: a STR's leading characters, and for TEXT / BYTES the
+            # chain's PAGE NUMBER — internal storage handed back as a result.
+            var act = load64(schema + SCH_START + aci * SCH_ENTRY_SZ + SCH_CTYPE);
+            if (act != COL_INT) { pg_free(schema); _tx_unlock(db, fd); return 0; }
             agg_off = row_field_offset(schema, ncols, aci);
         }
 
