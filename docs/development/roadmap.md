@@ -1,6 +1,6 @@
 # Patra Development Roadmap
 
-> **Last refreshed**: 2026-09-23 (v1.15.0)
+> **Last refreshed**: 2026-10-08 (v1.16.0)
 >
 > Thin **backlog index**, **forward-looking only**. Nothing shipped belongs here —
 > per-release detail lives in [`../../CHANGELOG.md`](../../CHANGELOG.md), the
@@ -8,27 +8,24 @@
 > in [`state.md`](state.md). Open consumer requests live one-file-each in
 > [`requests/`](requests/); upstream cyrius bugs in [`issues/`](issues/).
 
-> **Current**: **v1.15.0**, cyrius pin **6.6.6**, zero `[deps.*]` git blocks.
-> Gates green: **1301 tests**, **8/8 fuzz**, 41 benchmarks, lint 0-warn, fmt
-> clean, libro 15/15, vidya 19/19, `dist/` in sync (**14** sidecar leaves), and
-> a new **"No raw syscalls or numeric open flags"** gate. Binary
-> **225,496 B** DCE-on / 340,184 B DCE-off. The whole suite also runs on
-> **aarch64** now — 1301/1301, 8/8 fuzz, 3/3 programs under `qemu-aarch64` —
-> where before 1.15.0 most of the harnesses did not compile.
+> **Current**: **v1.16.0**, cyrius pin **6.7.5**, zero `[deps.*]` git blocks.
+> Gates green: **1389 tests** (+ 6 raw-include), **8/8 fuzz**, 43 benchmarks,
+> lint 0-warn, fmt clean, libro 15/15, vidya 19/19, `dist/` in sync (**14**
+> sidecar leaves), no raw syscalls or numeric open flags. Binary **247,600 B**
+> DCE-on / 382,768 B DCE-off.
 >
-> **v1.15.0 closed the raw-syscall issue** and fixed three platform defects on
-> the way (two macOS, one Windows), all by inspection, none run on the affected
-> OS. It filed one agnos kernel gap with agnos. **Its review also found a
-> pre-existing multi-process crash-recovery bug**, now patra's one open issue
-> (below). See *Platforms* for the per-target picture.
+> **v1.16.0 closed both of patra's own open items and the five wrong answers
+> that v1.14.0 left alone.** WAL recovery now runs before every locked
+> statement, not only at `patra_open`, so a process that dies mid-transaction no
+> longer leaves the others reading, keeping or replaying over its uncommitted
+> pages; the page cache checks its allocations; and LIMIT 0, SUM / MIN / MAX on a
+> non-INT column, over-long identifiers and ORDER BY on an unknown or a chain
+> column are now errors or correct results. **Nothing of patra's own is open.**
+> The items found while doing that are below, each with its trigger.
 >
-> **Nothing patra filed upstream is open.** Five requests are written up but
-> **not filed** — see *To file upstream*.
->
-> The **1.13.x repair arc is complete**. It is recorded in
-> [`completed-phases.md`](completed-phases.md) and
-> [`../audit/2026-08-18/security-review.md`](../audit/2026-08-18/security-review.md),
-> not here.
+> **Nothing patra filed upstream is open.** Two cyrius requests are written up
+> and still **not filed** — see *To file upstream*. Three of the five written
+> up at v1.15.0 shipped in cyrius without a filing (6.6.9).
 
 ## Driven by consumer needs — with one standing exception
 
@@ -40,125 +37,88 @@ sovereignty"*.
 
 ## Open backlog
 
-**Consumer requests**: none open — one shipped in 1.13.10, see below.
-**Consumer-filed bugs**: none open. **Upstream cyrius issues filed by patra**: **none open** —
-the last filing was archived at v1.13.12 (fixed upstream in cyrius 6.5.28). The
-two cross-build warnings carried "open but unfiled" since v1.13.12 were fixed
-upstream without a filing (see *To file upstream*). **Upstream agnos issues**:
-**one filed** at v1.15.0, `agnos/docs/development/issues/2026-09-23-flock-never-waits-and-no-caller-spins.md` (contended `flock` never waits; see
-*Platforms*).
+**Consumer requests**: none open. **Consumer-filed bugs**: none open.
+**Upstream cyrius issues filed by patra**: none open. **Upstream agnos issues**:
+none open — the one filed at v1.15.0 (contended `flock` never waited) was
+resolved in agnos **1.57.7** and archived there
+(`agnos/docs/development/issues/archived/2026-09-23-flock-never-waits-and-no-caller-spins.md`).
 
 ### Recently shipped
 
-- **[`requests/archive/2026-08-21-patra-init-must-not-set-the-host-log-level.md`](requests/archive/2026-08-21-patra-init-must-not-set-the-host-log-level.md)**
-  — filed by **Agnostic** 2026-08-21, **shipped v1.13.10 the same day.**
-  `patra_init` ended with an unconditional `sakshi_set_level(SK_WARN)`, which is
-  process-global: a host that had configured its own level silently lost every
-  `INFO` line the moment it opened a database. Removed; the call suppressed
-  nothing of patra's own (its whole sakshi surface is one `sakshi_error`, which
-  passes at WARN anyway). Regression-guarded and mutation-verified.
-
-- **[`issues/archive/2026-09-21-raw-syscall-sweep-and-gate.md`](issues/archive/2026-09-21-raw-syscall-sweep-and-gate.md)**
-  — filed 2026-09-21 from libro 2.10.3, **shipped v1.15.0.** 345 raw
-  `syscall(…)` sites replaced by stdlib wrappers, fdatasync through one
-  `_pt_fdatasync`, `file.cyr`'s private `SYS_*` / `LOCK_*` tables deleted, a CI
-  gate that also rejects numeric open flags. Found three platform defects the
-  filing did not list (see *Platforms*).
+- **v1.16.0** — [`issues/archive/2026-09-23-wal-recovery-runs-only-at-open.md`](issues/archive/2026-09-23-wal-recovery-runs-only-at-open.md)
+  (WAL recovery before every locked statement; the per-statement probe costs
+  about 2.5 us), `_pc_alloc` / `_pc_reg_init` checking their allocations, and
+  the five deliberately-unfixed wrong answers of v1.14.0. CHANGELOG [1.16.0].
+- **v1.15.0** — the raw-syscall sweep and gate,
+  [`issues/archive/2026-09-21-raw-syscall-sweep-and-gate.md`](issues/archive/2026-09-21-raw-syscall-sweep-and-gate.md).
 
 ### Open — patra's own
 
-- 🔴 **[`issues/2026-09-23-wal-recovery-runs-only-at-open.md`](issues/2026-09-23-wal-recovery-runs-only-at-open.md)**
-  — found 2026-09-23 by the code review of the 1.15.0 cut, **pre-existing**
-  (identical on 1.14.3), reproduced with two processes. When one process dies
-  mid-transaction while another holds the database open, the survivor reads the
-  dead transaction's uncommitted rows. A `BEGIN` of its own then truncates the
-  orphaned WAL and makes those rows permanent, while an autocommit write of its
-  own is **lost** at the next open, when the WAL is replayed over it. The fix
-  (recover under `LOCK_EX` before any write, and escalate a reader that finds a
-  WAL) changes the lock protocol. *Effort: large.* Not a feature: it does not
-  wait for a consumer.
-- **`_pc_alloc` never checks `alloc()`** (`src/pcache.cyr`) when it builds the
-  opt-in page cache's three tables and 1,024 page buffers, so a refused mapping
-  becomes a store through null instead of an error from `patra_cache_enable`.
-  Pre-existing; needs the cache enabled and memory exhausted. *Effort: small.*
+**None.** Found while fixing the v1.16.0 items, not yet scheduled; each states
+its trigger:
 
-The previous two filings shipped as v1.14.1 and v1.15.0 and are in
-[`issues/archive/`](issues/archive/).
-
-### Deliberately not fixed at v1.14.0 — wrong answers, not corruption
-
-Each is verified with a repro. They were left alone to keep the 1.14.0 release
-free of gratuitous consumer breakage; every one of them is a **semantic** change
-that would turn a currently-silent wrong answer into an error.
-
-- **`LIMIT 0` returns every row instead of none.** `PR_LIMIT` cannot distinguish
-  "no LIMIT" from "LIMIT 0" (`src/sql.cyr` stores the literal, `src/lib.cyr`
-  tests `lim > 0`). Fix: store `limit + 1`, or add a presence flag.
-- **`SUM` / `MIN` / `MAX` over a non-INT column reinterpret the raw bytes.** For
-  `TEXT` / `BYTES` that value is an internal chain **page number**, returned to
-  the caller as an integer. Fix: reject anything but `COL_INT` where `aci` is
-  resolved.
-- **`ORDER BY` on a `TEXT` / `BYTES` column sorts by the chain reference**, not
-  the payload — matching `WHERE`'s documented "chain columns never match" would
-  mean refusing it.
-- **Identifiers over 31 bytes truncate silently.** A long table name creates a
-  table no statement can reach, and repeated `CREATE` exhausts the 63-entry
-  directory. Fix: reject at `tbl_create` rather than clamp.
-- **`ORDER BY` on a column that does not exist returns rows unsorted** rather
-  than erroring. v1.14.0 fixed the out-of-bounds read this used to perform; the
-  permissive behaviour is unchanged, and disagrees with the projection path,
-  which errors for the same input.
-
-*Trigger*: a consumer that hits one, or an explicit decision to take the
-breakage at a minor bump.
+- **`wal_rollback` reads a failed header check as a bad header and unlinks the
+  WAL.** `_wal_hdr_verify` returns the same error for bad magic as for a failed
+  `xlseek` or a refused scratch allocation (its `_pt_alloc(WAL_HDR_SZ)` is
+  unchecked: the read into 0 fails and reads as a short header).
+  `wal_rollback` then unlinks the WAL without restoring anything, and
+  `patra_rollback` reports `PATRA_ERR_MAGIC` over a part-written transaction.
+  `wal_recover`'s two scratch allocations were made to fail closed at 1.16.0;
+  this is the sibling. A regression test needs a way to make `fl_alloc`
+  refuse (the page-cache test lowers `ALLOC_MAX`, which `fl_alloc` does not
+  consult). *Trigger*: the next change to the WAL module. *Small.*
+- **A database whose `HDR_DBID` is still 0 has no crash recovery.** The id is
+  assigned only in `patra_open`'s non-blocking `LOCK_EX` block. If every open
+  of a file (one created by a pre-1.13.8 binary, or opened only while another
+  process held a lock) is contended, `wal_start` writes `dbid` 0 into the WAL,
+  which `wal_recover` refuses by design. The fix is to assign the id under the
+  first `LOCK_EX` that finds it 0 (`_db_lock_ex` now has the header in hand).
+  *Trigger*: a consumer whose databases are opened under contention. *Small.*
+- **The per-statement WAL probe costs one failed `open(2)`** — about 2.5 us
+  where one clock read costs 1.3 us; +12 % on `select_point_10k`, +26 % on
+  `dedup_insert_row_or_ignore_500`. It can be made free: a header flag that a
+  transaction sets (with a plain write, which a surviving process sees) before
+  its first page write and clears after the WAL is gone, read by the
+  `_pc_refresh` every statement already does. The ordering has to hold across
+  commit, rollback, a refused WAL and an older binary that does not know the
+  flag, so it was not taken as part of the fix. *Trigger*: a consumer that
+  measures the probe. *Medium.*
+- **A refused WAL left on disk costs every statement a header read, and every
+  reader an exclusive lock**, until an operator removes it: refusal leaves it
+  for inspection, as `patra_open` always has, and each statement re-checks it.
+  *Trigger*: an operator who hits it. *Small (remember the refusal per handle,
+  keyed on the file's identity).*
 
 ### To file upstream (cyrius)
 
-**Nothing filed and open.** The last filing —
-`2026-08-18-cyrius-distlib-named-deps-unanchored-scan` — was fixed upstream in
-cyrius **6.5.28** and is [archived](issues/archive/2026-08-18-cyrius-distlib-named-deps-unanchored-scan.md).
+**Nothing filed and open.** Of the five requests written up at v1.15.0, three
+shipped in cyrius without a filing, all in **6.6.9** (verified in the 6.7.5
+sources at this refresh):
 
-**The two cross-build warnings carried here since v1.13.12 are gone**, fixed
-upstream without a filing (measured at the v1.15.0 cut). `cyrius build
---aarch64 src/lib.cyr` has been warning-free since **6.6.4**, when `xflock`'s
-aarch64 arm stopped spelling the native 32 (the `raw syscall 32 is x86_64 dup`
-false positive). `--agnos` has been warning-free only since **6.6.6**, when
-`io.cyr` began including `args_agnos.cyr` (the undefined `_agnos_getenv`). Under
-6.6.4, and so in 1.14.3, that warning was still there.
+- `FlushFileBuffers` on Windows: PE routes `fsync` / `fdatasync` to it, so
+  `xfsync` — `_pt_fdatasync`'s Windows arm — flushes;
+- `O_NOFOLLOW` on Windows has its POSIX meaning (`EOPEN_PE`; verified by cyrius
+  on real Windows);
+- `cyrius deps` locks every leaf it vendors, and `--verify` fails on a file the
+  lock does not cover; `--relock` is in `cyrius help`.
 
-**Five requests written up, not filed**, all from the v1.15.0 cut. Items 2–4
-are Windows-shaped. Each names what patra does today without it.
+The `fl_alloc` defect filed by kybernet that reached patra (a refused large
+mapping faulted at address -12) was fixed in cyrius **6.6.7**: `fl_alloc`
+returns 0 (`lib/freelist.cyr`, `blk <= 0`).
+
+**Two requests remain written up, not filed:**
 
 1. **`xfdatasync(fd)` in `lib/io.cyr`** — `sys_fdatasync` on Linux / macOS,
-   `sys_sync` on agnos, a flush on Windows. patra carries all of that dispatch
-   except the Windows flush (its Windows arm is `xfsync`'s no-op) as
-   `_pt_fdatasync` in `src/file.cyr`, and would delete it; libro and sigil sync
-   too. (Option 2 of the archived raw-syscall issue.)
-2. **A `FlushFileBuffers` PE reroute**, so `xfsync` (and 1.) can flush on
-   Windows. Today both are no-ops there that report success: **no patra write on
-   Windows is ever flushed**, transaction or not.
-3. **`xflock` on Windows via `LockFileEx`.** It returns -1 today, which costs
-   patra more than cross-process locking: `patra_open` runs WAL recovery and
-   assigns the database identity only under a non-blocking exclusive flock, so
-   on Windows **neither ever runs** — a crashed transaction's WAL is never
-   replayed.
-4. **`O_NOFOLLOW` on Windows** — defined so portable source compiles, but not
-   enforced (see *Platforms*).
-5. **`cyrius deps` does not re-lock when `[deps] stdlib` gains a leaf.** At
-   1.15.0 it vendored `chrono` and `random` but left `cyrius.lock` at 29 of 31
-   entries, and `deps --verify` still passed. `--relock` fixed it, but that flag is
-   missing from `cyrius help`.
-
-**Filed by another consumer, open, and it reaches patra:**
-`cyrius/docs/development/issues/2026-09-23-kybernet-fl-alloc-unchecked-fl-mmap-faults-at-minus-12.md`.
-`fl_alloc` sends every request over 4,096 bytes to a direct `mmap` and writes its
-block header through the result unchecked, so a refused mapping is a SIGSEGV at
-address -12, not a 0. patra's `_pt_alloc` allocations (result sets, WAL and row
-buffers) go through `fl_alloc`, so their `== 0` checks on requests over 4 KB
-cannot fire under address-space pressure. The page-cache pool and the TLS slab
-stack use `alloc()`, which does return 0, but `_pc_alloc` never checks it (see
-*Open — patra's own*). Nothing to do in patra for `fl_alloc`; re-check at each
-pin bump.
+   `sys_sync` on agnos, the `FlushFileBuffers` route on Windows. patra carries
+   that dispatch as `_pt_fdatasync` in `src/file.cyr` and would delete it;
+   libro and sigil sync too.
+2. **`xflock` on Windows via `LockFileEx`.** It returns -1 today. Without it
+   there is no cross-process locking on Windows, and WAL recovery and the
+   database-identity assignment never run there: `patra_open` takes them only
+   under a non-blocking exclusive flock, and since 1.16.0 statements replay
+   only when their flock call succeeded. A crashed transaction's WAL is never
+   replayed on Windows. This is the one remaining cyrius gap in patra's crash
+   recovery.
 
 ### Release tooling — one decision left
 
@@ -175,7 +135,8 @@ pin bump.
   each miss gets attributed to human error rather than to a missing gate.
   **Evidence since:** 1.14.2 and 1.14.3 shipped without touching `state.md`,
   this file or `doc-health.md` at all; the 1.15.0 cut found all three still
-  describing 1.14.1 on cyrius 6.6.0. *Effort: medium.*
+  describing 1.14.1 on cyrius 6.6.0; and 1.15.1 / 1.15.2 left this file and
+  `doc-health.md` at 1.15.0. *Effort: medium.*
 
 ## Deferred — genuinely open, no consumer yet
 
@@ -229,6 +190,10 @@ are **not scheduled**. Each states the trigger that would move it.
 - **aarch64 in CI.** Every harness builds and passes on aarch64 since 1.15.0,
   checked by hand under `qemu-aarch64`; CI does not run it. See *Platforms*.
   *Trigger*: an aarch64 consumer. *Low.*
+- **Windows crash recovery.** Needs `xflock` on Windows (cyrius request 2 in
+  *To file upstream*); until then patra on Windows is single-process and a
+  crashed transaction stays applied. *Trigger*: the cyrius route landing, or a
+  Windows consumer. *Small once the route exists.*
 - **`docs/guides/` scaffolding.** `programs/` satisfies the examples half, which
   the standard permits. *Trigger*: a consumer asking for an integration
   walkthrough. *Low.*
@@ -253,67 +218,55 @@ surface is intentionally small, and no new SQL surface is planned.
 
 **Primary target: Linux x86_64, the only one CI builds or runs.** Every other
 row below is a hand-run cross-build, and at most an emulated run. Each gap names
-what would close it; the Windows ones are in *To file upstream*. Refreshed at
-v1.15.0 (cyrius 6.6.6).
+what would close it; the Windows one is in *To file upstream*. Refreshed at
+v1.16.0 (cyrius 6.7.5).
 
-| Target | Built | Run | Flush | Writers serialized | WAL recovery on open | `O_NOFOLLOW` |
+| Target | Built | Run | Flush | Writers serialized | WAL recovery (open and every statement) | `O_NOFOLLOW` |
 |---|---|---|---|---|---|---|
 | Linux x86_64 | CI | CI, full suite | fdatasync | yes (blocking `flock`) | yes | enforced |
-| Linux aarch64 | by hand | full suite under `qemu-aarch64` (1.15.0) | fdatasync | yes | yes | enforced |
+| Linux aarch64 | by hand | full suite, 8/8 fuzz, 3/3 programs under `qemu-aarch64` (1.16.0) | fdatasync | yes | yes | enforced |
 | macOS x86_64 / arm64 | by hand (`CYRIUS_MACHO=1` / `CYRIUS_MACHO_ARM=1` to `cycc` / `cycc_aarch64`) | **not run** | fdatasync (BSD 187) | yes (BSD `flock`) | yes | enforced |
-| agnos x86_64 | by hand (`--agnos`) | **not run** | whole-filesystem sync | ⚠ **no** — see below | yes | bridged to `AO_NOFOLLOW` (cyrius 6.6.4) |
-| Windows (PE) | by hand (`--win`) | **not run** | ⛔ **none** | ⛔ **no** | ⛔ **never** | ⛔ **not enforced** |
+| agnos x86_64 | by hand (`--agnos`) | **not run** | whole-filesystem sync | yes on agnos ≥ 1.57.7 (`flock`#59 waits); ⚠ **no** before | yes | bridged to `AO_NOFOLLOW` (cyrius 6.6.4) |
+| Windows (PE) | by hand (`--win`) | **not run** | `FlushFileBuffers` (cyrius 6.6.9) | ⛔ **no** | ⛔ **never** | enforced (cyrius 6.6.9) |
 
-Two notes apply across the table. **Recovery runs only at `patra_open`** on every
-target that has it: a process dying mid-transaction while another holds the
-database open is not recovered until the next open (*Open — patra's own*).
-**On macOS, the fsync family does not flush the drive's write cache**; Apple
-documents `fcntl(F_FULLFSYNC)` for that, and patra does not issue it. Durability
-there is weaker than on Linux.
+Two notes apply across the table. **Recovery replays a WAL only while the
+replaying process holds `LOCK_EX`** — the flock call returned 0 — because only
+then is every WAL on disk an orphan (a live transaction holds `LOCK_EX` for its
+whole span). Since 1.16.0 that happens before every locked statement and every
+`BEGIN`, not only at `patra_open`; where `flock` fails it does not happen at
+all. **On macOS, the fsync family does not flush the drive's write cache**;
+Apple documents `fcntl(F_FULLFSYNC)` for that, and patra does not issue it.
+Durability there is weaker than on Linux.
 
-- **Windows.** The 6.6.6 compiler fixed PE `open(2)` flag translation, which
-  patra depends on: before it, `jsonl_append` wrote every record at offset 0 over
-  the previous one, and a rewritten `<db>.wal` kept the old file's tail. cyrius
-  verified the fix on real Windows hardware, but **patra has not been run on
-  Windows**. The check is two `jsonl_append` calls
-  (the file must hold two lines) and one WAL rewritten over a longer one (no tail
-  may survive). What remains:
-  - **No flush.** `xfsync` is a no-op there, so nothing patra writes is ever
-    flushed. Since 1.15.0 transactions *work* on Windows (before, their first
-    write failed with `PATRA_ERR_IO`), `ROLLBACK` included, but they carry no
-    durability guarantee and no crash atomicity: a transaction interrupted by a
-    crash stays partly applied, because recovery never runs (next bullet) and
-    the next `BEGIN`'s `O_TRUNC` discards its WAL. Keeping transactions failing
-    until a flush is wired would be the alternative: one line in
-    `_pt_fdatasync`.
+- **Windows.** **patra has not been run on Windows**; everything here is from
+  the cyrius sources and cyrius's own runs on real Windows hardware. The 6.6.6
+  compiler fixed PE `open(2)` flag translation (before it, `jsonl_append` wrote
+  every record at offset 0, and a rewritten `<db>.wal` kept the old file's
+  tail). cyrius **6.6.9** routed `fsync` / `fdatasync` to `FlushFileBuffers`,
+  so `_pt_fdatasync`'s `xfsync` arm now flushes, and gave `O_NOFOLLOW`,
+  `O_DIRECTORY` and `O_EXCL` their POSIX meaning on PE, which closes the
+  dangling-symlink create through `_pt_file_create`'s `O_EXCL` path that this
+  section used to describe. What remains:
   - **No `flock`** (`xflock` returns -1). No cross-process locking at all, and
-    `patra_open`'s WAL recovery and database-identity assignment, which run only
-    under a non-blocking exclusive flock, **never run**: a crashed transaction's
-    WAL is never replayed.
-  - **`O_NOFOLLOW` is defined but not enforced** (the nearest Win32 flag *opens*
-    a reparse point rather than refusing it). A symlink planted at a
-    db / wal / jsonl path redirects the open, and cyrius measured on real `cass`
-    (2026-09-19) that `CREATE_NEW` over a dangling symlink **creates the target**.
-    ⚠ This file used to say that case "does not apply" because "patra does not
-    use `O_EXCL`". **It does**: `_pt_file_create` opens
-    `O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW`, so a dangling symlink planted at a
-    not-yet-existing database path makes patra create the file the link names and
-    write a 4 KB header into it.
+    WAL recovery and the database-identity assignment never run: `patra_open`
+    takes them only under a non-blocking exclusive flock, and statements only
+    when their flock call succeeds. A transaction interrupted by a crash stays
+    partly applied, and the next `BEGIN`'s `O_TRUNC` discards its WAL.
+  - **Not run.** The first Windows run should check two `jsonl_append` calls
+    (the file must hold two lines), one WAL rewritten over a longer one (no tail
+    may survive), and an `O_NOFOLLOW` open of a planted link.
 
-  **Treat patra on Windows as single-process, non-durable, and unsafe in a
-  directory an attacker can write to.**
-- **agnos: locks are not held across processes when contended — filed with
-  agnos** (`agnos/docs/development/issues/2026-09-23-flock-never-waits-and-no-caller-spins.md`). agnos `flock`#59 **never waits**: by design a contended
-  `LOCK_SH` / `LOCK_EX` returns -1 and "the ring-3 caller poll-spins" (the `#59`
-  arm in `kernel/core/syscall.cyr`), but no ring-3 layer does. cyrius's `xflock`
-  calls `#59` once, and patra ignores the result at all 14 `LOCK_EX` and 3
-  `LOCK_SH` sites, as it may where `flock` waits. So two agnos processes can
-  write one database at the same time, and a reader can run in the middle of
-  another process's write. (Threads are not affected: agnos runs a process's
-  threads serially.) Found at v1.15.0 by reading the kernel, **not reproduced**
-  (agnos is not run here). **patra does not work around kernel lock
-  semantics**: the fix belongs in agnos, or in cyrius's `xflock` if agnos keeps
-  `#59` non-blocking, and the filing asks for one or the other.
+  **Treat patra on Windows as single-process**, with flushes but no crash
+  recovery.
+- **agnos: contended `flock` waits since agnos 1.57.7.** Before it, `#59`
+  returned -1 at once for a contended `LOCK_SH` / `LOCK_EX` and expected the
+  ring-3 caller to poll-spin; nothing did, and patra ignores the result at its
+  lock sites, so two agnos processes could write one database at once. patra
+  filed that with agnos at v1.15.0; agnos 1.57.7 (2026-09-25) made a contended
+  `#59` without `LOCK_NB` block its caller, and archived the filing. **Not run
+  by patra.** ⚠ Since 1.16.0 the statement-level recovery leans on the lock
+  too: on an agnos older than 1.57.7, a process whose `BEGIN` did not get its
+  lock could have its live WAL replayed by another.
 - **macOS.** Both Mach-O targets compile with only stdlib-sourced "not routed"
   warnings (`thread_local.cyr`'s 158 on x86; five on arm64 that
   `lib/syscalls.cyr` alone reproduces). 1.15.0 fixed two macOS defects by

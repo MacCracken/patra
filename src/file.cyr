@@ -153,16 +153,16 @@ fn _pt_flock(fd, op): i64 {
 # (Linux, macOS): the WAL hot path and group commit are priced on it, and fsync
 # would add a metadata sync to every commit. Elsewhere, the stdlib's xfsync:
 # agnos has no per-fd sync, so that is a whole-filesystem sync (over-syncs, but
-# correct); Windows has no flush wired (no FlushFileBuffers reroute), so it is a
-# no-op that reports success.
+# correct); on Windows it is kernel32!FlushFileBuffers, which cyrius 6.6.9 wired
+# (until then it was a no-op that reported success).
 #
 # ⚠ Windows, before 1.15.0: this was a raw syscall(75), which PE does not route,
 # so it returned -ENOSYS. Eleven call sites ignored that. wal_log_page's
 # write-ahead check did not, so every write inside an explicit transaction failed
-# with PATRA_ERR_IO there. Transactions now work on Windows, ROLLBACK included,
-# with the guarantees autocommit always had there: no durability, and no crash
-# atomicity. Without flock, recovery never runs on open, and the next BEGIN's
-# O_TRUNC discards a crashed transaction's WAL, so its writes stay applied.
+# with PATRA_ERR_IO there. Transactions work on Windows since, ROLLBACK
+# included, but without crash atomicity: without flock, recovery never runs,
+# and the next BEGIN's O_TRUNC discards a crashed transaction's WAL, so its
+# writes stay applied.
 fn _pt_fdatasync(fd): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
     return xfsync(fd);
