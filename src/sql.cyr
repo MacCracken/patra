@@ -667,6 +667,10 @@ fn _parse_create(): i64 {
         if (_tok_type(pos) == SQLT_COMMA) { pos = pos + 1; }
         ncols = ncols + 1;
     }
+    # 1.16.2: `CREATE TABLE t ()` is a syntax error. It created a table with no
+    # columns, whose directory entry patra_hdr_verify rejects, so the next
+    # patra_open of the file failed.
+    if (ncols == 0) { return PATRA_ERR_SYNTAX; }
 
     store64(_spr() + PR_COUNT, ncols);
     return PATRA_OK;

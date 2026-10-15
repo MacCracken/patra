@@ -62,16 +62,27 @@ var _bt_pdepth = 0;
 
 # Create empty B-tree (single leaf root), returns page number
 fn btree_create(fd, hdr): i64 {
+    # 1.16.2: the buffer first, and checked (it was a memset through 0), so a
+    # refusal allocates no page — ALTER's early return relies on that.
+    var buf = pg_alloc();
+    if (buf == 0) { return 0; }
     # 1.14.0: page_alloc returns 0 on failure. Unchecked, page 0 is the
     # HEADER — every store below would have written B-tree structure over it.
     var pg = page_alloc(fd, hdr);
-    if (pg == 0) { return 0; }
-    var buf = pg_alloc();
+    if (pg == 0) {
+        pg_free(buf);
+        return 0;
+    }
     memset(buf, 0, PAGE_SIZE);
     store64(buf + BT_TYPE, PAGE_BTREE);
     store64(buf + BT_LEAF, 1);
-    page_write(fd, pg, buf);
+    # 1.16.2: checked. A refused write left the page as it was — off the free
+    # list, a free-list node still — and its number was returned as an empty
+    # B-tree root (1.16.2 review). The page is not given back here; the
+    # callers' failure paths restore the header that counted it.
+    var pw = page_write(fd, pg, buf);
     pg_free(buf);
+    if (pw != PATRA_OK) { return 0; }
     return pg;
 }
 

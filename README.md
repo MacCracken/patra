@@ -79,6 +79,21 @@ allocation it needs is refused. A library that wraps patra can ask first:
 process-wide, so it cannot vouch for a thread that has no TLS block (see the
 *Concurrent readers* note below).
 
+**Failures are reported (1.16.2).** A failed `fdatasync` is `PATRA_ERR_IO` from the
+statement, `patra_flush`, `patra_set_sync_mode` or `patra_close`, and stays so for
+that handle's flush and close until the database is reopened (Linux reports a
+writeback error once, then lets a retried sync succeed over the lost writes). An
+autocommit statement that fails this way **has been applied** but is not known to
+be durable — do not blindly retry an `INSERT`. A `patra_commit` that cannot be made
+whole and durable — a write it could not log, or a failed sync — is rolled back and
+returns `PATRA_ERR_FULL` / `PATRA_ERR_IO`: treat a failed commit as rolled back.
+`BEGIN` syncs pending BATCH writes first. A header
+that fails verification fails the statement (`PATRA_ERR_PAGE`; a query returns
+`0`). The 0 that a failed `patra_open` or `patra_query` returns is safe to pass
+on: handle calls return `PATRA_ERR_IO`, and `patra_result_*` accessors return 0,
+or -1 where -1 already meant "not that type", for a 0 result set or a row or
+column outside it.
+
 ### Dependencies
 
 **Patra has no external dependencies.** As of **v1.13.0** `cyrius.cyml` carries
@@ -91,7 +106,7 @@ from the version-pinned snapshot.
 ```toml
 [deps.patra]
 git = "https://github.com/MacCracken/patra.git"
-tag = "1.16.1"
+tag = "1.16.2"
 ```
 
 > ⚠ **If you are carrying a `[deps.sakshi]` block "required alongside patra",
@@ -239,6 +254,10 @@ by where its payload sat on disk. Table and column names are at most 31 bytes; a
 `CREATE TABLE` or `ALTER TABLE` that defines a longer one returns
 `PATRA_ERR_SYNTAX` (the name used to be cut to 31 bytes, leaving a table no
 statement could reach). A failed query returns `0`.
+
+**`CREATE TABLE` needs a column, and distinct names (1.16.2).** `CREATE TABLE t ()`
+is `PATRA_ERR_SYNTAX` — it used to succeed and leave a file that would not open
+again — and a repeated column name is `PATRA_ERR_EXISTS`.
 
 **`PATRA_ERR_EXISTS` does not depend on how full the file is (1.16.1).** A file
 holds at most 63 tables and a table at most 32 columns. `CREATE TABLE` of a table

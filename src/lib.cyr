@@ -34,7 +34,7 @@ include "src/btree.cyr"
 include "src/table.cyr"
 include "src/jsonl.cyr"
 
-# ── DB handle (88 bytes) ────────────────────
+# ── DB handle (96 bytes) ────────────────────
 #
 # DB_LAST_ID / DB_ROWS_AFFECTED are the write-readback fields added in
 # v1.11.3 (yeo-cy-test): the AUTOINCREMENT id of the most recent successful
@@ -50,12 +50,19 @@ include "src/jsonl.cyr"
 # every locked op, so a commit by another handle/process invalidates the cache.
 # DB_LP_IDX = -1 means "empty". Three i64 words, contiguous, so a single
 # `db + DB_LP_IDX` pointer is handed to tbl_insert as `lpc`.
+#
+# DB_SYNC_ERR (v1.16.2) is 1 once a sync of an autocommit write on this handle
+# has failed, and stays 1: Linux reports a writeback error to a file once and
+# marks the failed pages clean, so a later fdatasync returns 0 over the lost
+# writes. patra_flush, patra_set_sync_mode and patra_close keep returning
+# PATRA_ERR_IO for the handle. Reopening the database clears it.
 enum DbOff {
     DB_FD = 0; DB_HDR = 8; DB_PATH = 16; DB_TX = 24;
     DB_SYNC_MODE = 32; DB_BATCH_PENDING = 40;
     DB_LAST_ID = 48; DB_ROWS_AFFECTED = 56;
     DB_LP_IDX = 64; DB_LP_PAGE = 72; DB_LP_GEN = 80;
-    DB_SZ = 88;
+    DB_SYNC_ERR = 88;
+    DB_SZ = 96;
 }
 
 # 1.8.0 group-commit modes. FULL = fdatasync after every mutating exec
@@ -256,11 +263,19 @@ fn _pt_recover_held(fd, wpath, hdr): i64 {
 }
 
 # The statement-side tail of a recovery: called with LOCK_EX held and the
-# header just refreshed. Returns PATRA_OK, or the error after releasing the
-# lock. Only a replay costs anything beyond wal_recover's one failed open.
-fn _db_recover_held(db, fd, hdr): i64 {
+# header just refreshed, `rr` being that refresh's status. Returns PATRA_OK, or
+# the error after releasing the lock. Only a replay costs anything beyond
+# wal_recover's one failed open.
+#
+# 1.16.2: a header that failed to read or verify is judged AFTER recovery. A
+# writer that died mid-transaction can leave a torn header the replay restores;
+# failing first would refuse every statement on a file recovery would fix.
+fn _db_recover_held(db, fd, hdr, rr): i64 {
     var rc = _pt_recover_held(fd, load64(db + DB_PATH), hdr);
     if (rc < 0) {
+        # 1.16.2: a failed replay's syncs covered this handle's pending BATCH
+        # writes too, and their failure is reported once.
+        if (load64(db + DB_BATCH_PENDING) != 0) { store64(db + DB_SYNC_ERR, 1); }
         patra_unlock(fd);
         return 0 - rc;
     }
@@ -269,7 +284,11 @@ fn _db_recover_held(db, fd, hdr): i64 {
         # gate, and drop the tail-page cache, which may name a page the replay
         # changed.
         store64(db + DB_LP_IDX, 0 - 1);
-        _pc_refresh(fd, hdr);
+        rr = _pc_refresh(fd, hdr);
+    }
+    if (rr != PATRA_OK) {
+        patra_unlock(fd);
+        return rr;
     }
     return PATRA_OK;
 }
@@ -300,7 +319,14 @@ fn patra_open(path): i64 {
             _pt_err("patra: cannot read header");
             return 0;
         }
-        if (patra_hdr_verify(tmp) != PATRA_OK) {
+        # 1.16.2: only a wrong magic or version refuses the open here. Any other
+        # failure may be a header a crashed writer left, which WAL recovery
+        # below restores, or a torn read of one another process is writing —
+        # this read holds no lock, and every header write carries the same
+        # magic, so a torn read cannot fake that one. The verdict on the rest
+        # waits for the locked re-read after recovery, or, when that lock is
+        # contended, for the first statement, which verifies under its own.
+        if (patra_hdr_verify(tmp) == PATRA_ERR_MAGIC) {
             pg_free(tmp);
             sys_close(fd);
             _pt_err("patra: invalid magic");
@@ -312,6 +338,11 @@ fn patra_open(path): i64 {
     # Build WAL path
     var plen = strlen(path);
     var wpath = alloc(plen + 5);
+    if (wpath == 0) {
+        sys_close(fd);
+        _pt_err("patra: out of memory");
+        return 0;
+    }
     memcpy(wpath, path, plen);
     memcpy(wpath + plen, ".wal", 4);
     store8(wpath + plen + 4, 0);
@@ -330,28 +361,70 @@ fn patra_open(path): i64 {
     # statement and every patra_begin repeats it (_db_lock_ex / _db_lock_sh) —
     # but it is the same helper, so a replay here bumps HDR_COMMITGEN and
     # flushes the page cache exactly as one there does.
-    if (_pt_flock(fd, LOCK_EX + LOCK_NB) == 0) {
+    # 1.16.2: the header's verdict, taken under the lock after recovery. It
+    # stays PATRA_OK when the lock is contended: the first statement then
+    # recovers and verifies under its own lock. When no lock can be had at all
+    # (Windows has no flock), there is no recovery, as before, and the header
+    # is judged now, unlocked.
+    var hv = PATRA_OK;
+    var fl = _pt_flock(fd, LOCK_EX + LOCK_NB);
+    if (fl != 0) {
+        if (_pt_flock_contended(fl) == 0) {
+            var uh = pg_alloc();
+            hv = PATRA_ERR_IO;
+            if (patra_hdr_read(fd, uh) == PATRA_OK) { hv = patra_hdr_verify(uh); }
+            pg_free(uh);
+        }
+    }
+    if (fl == 0) {
         var ohdr = pg_alloc();
+        hv = PATRA_ERR_IO;
         if (patra_hdr_read(fd, ohdr) == PATRA_OK) {
             _pt_recover_held(fd, wpath, ohdr);
             # Assign this database its identity if it does not have one — a
             # freshly created file, or any file written before v1.13.8. Done
             # once, under the same exclusive lock, and re-read afterwards so
             # the handle sees it. Without an id a WAL cannot be bound, which is
-            # the whole point. (audit 2026-08-18 S1-8)
+            # the whole point. (audit 2026-08-18 S1-8) Never over a header that
+            # fails verification: writing it back would make it durable.
             if (patra_hdr_read(fd, ohdr) == PATRA_OK) {
-                if (load64(ohdr + HDR_DBID) == 0) {
-                    store64(ohdr + HDR_DBID, _pt_rand64());
-                    patra_hdr_write(fd, ohdr);
+                hv = patra_hdr_verify(ohdr);
+                if (hv == PATRA_OK) {
+                    if (load64(ohdr + HDR_DBID) == 0) {
+                        store64(ohdr + HDR_DBID, _pt_rand64());
+                        patra_hdr_write(fd, ohdr);
+                    }
                 }
             }
         }
         pg_free(ohdr);
         patra_unlock(fd);
     }
+    if (hv != PATRA_OK) {
+        sys_close(fd);
+        if (hv == PATRA_ERR_IO) { _pt_err("patra: cannot read header"); }
+        else { _pt_err("patra: corrupt header"); }
+        return 0;
+    }
 
+    # 1.16.2: both allocations are checked (a refusal was a store through 0).
+    # wpath is bump-allocated and cannot be returned.
     var db = _pt_alloc(DB_SZ);
+    if (db == 0) {
+        sys_close(fd);
+        _pt_err("patra: out of memory");
+        return 0;
+    }
     var hdr = pg_alloc();
+    if (hdr == 0) {
+        _pt_free(db);
+        sys_close(fd);
+        _pt_err("patra: out of memory");
+        return 0;
+    }
+    # Unlocked: a writer in another process may be mid-write, so this read's
+    # verification status is not grounds to refuse the open. Every statement
+    # re-reads and verifies the header under its lock (_db_lock_ex / _sh).
     _pc_refresh(fd, hdr);
     store64(db + DB_FD, fd);
     store64(db + DB_HDR, hdr);
@@ -364,6 +437,7 @@ fn patra_open(path): i64 {
     store64(db + DB_LP_IDX, 0 - 1);
     store64(db + DB_LP_PAGE, 0);
     store64(db + DB_LP_GEN, 0);
+    store64(db + DB_SYNC_ERR, 0);
     # 1.14.0: register this fd's database identity for the shared page cache,
     # which is keyed on (dbid, page) so two databases in one process cannot
     # serve each other's pages. The id is on disk by now — recovery above
@@ -401,7 +475,13 @@ fn patra_close(db): i64 {
     # never committed has not been asked for, and the .wal on disk is the only
     # record of how to undo its partial work. patra_rollback restores the
     # before-images, releases the slot and the lock, and unlinks the WAL.
-    if (load64(db + DB_TX) != 0) { patra_rollback(db); }
+    #
+    # 1.16.2: patra_close returns the first failure — that rollback's, or the
+    # pending BATCH writes' sync below, or any earlier sync failure the handle
+    # remembers (DB_SYNC_ERR) — rather than 0 regardless. The handle is closed
+    # and freed either way; it must not be used again.
+    var rc = PATRA_OK;
+    if (load64(db + DB_TX) != 0) { rc = patra_rollback(db); }
     # 1.14.0: drop this fd's WAL slot and page-cache identity. Kernel fd
     # numbers are recycled, so a stale entry of either kind would be inherited
     # by whichever database is handed this fd number next.
@@ -409,12 +489,15 @@ fn patra_close(db): i64 {
     pc_unregister(fd);
 
     if (load64(db + DB_BATCH_PENDING) != 0) {
-        _pt_fdatasync(fd);
+        if (_pt_fdatasync(fd) < 0) { store64(db + DB_SYNC_ERR, 1); }
+    }
+    if (load64(db + DB_SYNC_ERR) != 0) {
+        if (rc == PATRA_OK) { rc = PATRA_ERR_IO; }
     }
     pg_free(load64(db + DB_HDR));
     sys_close(fd);
     _pt_free(db);
-    return 0;
+    return rc;
 }
 
 fn _db_fd(db): i64 { return load64(db + DB_FD); }
@@ -426,10 +509,20 @@ fn _db_hdr(db): i64 { return load64(db + DB_HDR); }
 # on-disk HDR_COMMITGEN) forces a cache flush before this op trusts a cached
 # page. Same-process writers keep the cache coherent via page_write eviction +
 # _pc_set_gen, so the common case finds gen == _pc_gen and does not flush.
+#
+# 1.16.2: returns PATRA_OK, PATRA_ERR_IO for a short or failed read, or
+# patra_hdr_verify's code for a header that fails verification. Both used to go
+# unreported: patra_hdr_verify ran only in patra_open, so a table count or
+# directory written after the open (another process, corruption) reached
+# tbl_find, tbl_drop and the schema reads as it was, and a short read left part
+# of the previous header in the buffer. The statement-entry helpers below act
+# on the status only after WAL recovery, which may repair the header.
 fn _pc_refresh(fd, hdr): i64 {
-    patra_hdr_read(fd, hdr);
+    if (patra_hdr_read(fd, hdr) != PATRA_OK) { return PATRA_ERR_IO; }
+    var v = patra_hdr_verify(hdr);
+    if (v != PATRA_OK) { return v; }
     _pc_check(load64(hdr + HDR_COMMITGEN));
-    return 0;
+    return PATRA_OK;
 }
 
 # ── Write readback (v1.11.3, yeo-cy-test) ────────────────────
@@ -469,22 +562,38 @@ fn patra_rows_affected(db): i64 {
 }
 
 # Set group-commit mode (PATRA_SYNC_FULL or PATRA_SYNC_BATCH); flushes first.
+# 1.16.2: a 0 handle is PATRA_ERR_IO here and in the calls below, as in
+# patra_exec; they dereferenced it (patra_begin(0) died with SIGSEGV).
 fn patra_set_sync_mode(db, mode): i64 {
-    if (load64(db + DB_BATCH_PENDING) != 0) {
-        _pt_fdatasync(load64(db + DB_FD));
-        store64(db + DB_BATCH_PENDING, 0);
-    }
+    if (db == 0) { return PATRA_ERR_IO; }
+    # 1.16.2: the flush's failure is reported, and the mode changes anyway —
+    # it was kept, so a handle whose sync had failed could never go back from
+    # BATCH to syncing every statement (1.16.2 review).
+    var fr = patra_flush(db);
     store64(db + DB_SYNC_MODE, mode);
-    return PATRA_OK;
+    return fr;
 }
 
-# Return the current group-commit mode for this DB handle.
-fn patra_get_sync_mode(db): i64 { return load64(db + DB_SYNC_MODE); }
+# Return the current group-commit mode for this DB handle (the default,
+# PATRA_SYNC_FULL, for a 0 handle).
+fn patra_get_sync_mode(db): i64 {
+    if (db == 0) { return PATRA_SYNC_FULL; }
+    return load64(db + DB_SYNC_MODE);
+}
 
 # Force durability of any pending BATCH-mode writes. No-op in FULL mode.
+# PATRA_ERR_IO when the sync fails (1.16.2; it reported PATRA_OK), and from then
+# on for this handle (DB_SYNC_ERR — a retried sync cannot recover lost writes,
+# and on Linux reports success over them). patra_set_sync_mode flushes through
+# here and keeps the old mode when it fails.
 fn patra_flush(db): i64 {
+    if (db == 0) { return PATRA_ERR_IO; }
+    if (load64(db + DB_SYNC_ERR) != 0) { return PATRA_ERR_IO; }
     if (load64(db + DB_BATCH_PENDING) != 0) {
-        _pt_fdatasync(load64(db + DB_FD));
+        if (_pt_fdatasync(load64(db + DB_FD)) < 0) {
+            store64(db + DB_SYNC_ERR, 1);
+            return PATRA_ERR_IO;
+        }
         store64(db + DB_BATCH_PENDING, 0);
     }
     return PATRA_OK;
@@ -522,12 +631,23 @@ fn _db_hdr_commit(db, fd, hdr): i64 {
     # (audit 2026-08-18 S1-2)
     var hl = wal_log_hdr(fd);
     if (hl != PATRA_OK) { return hl; }
+    # 1.16.2: inside a transaction, before the BATCH accounting. A transaction's
+    # durability is its COMMIT's; the auto-flush that ran here every
+    # PATRA_BATCH_FLUSH_N statements was redundant, and a failure of it marked
+    # the handle (DB_SYNC_ERR) for writes a rollback covers.
+    if (load64(db + DB_TX)) { return patra_hdr_write_nosync(fd, hdr); }
     if (load64(db + DB_SYNC_MODE) == PATRA_SYNC_BATCH) {
         var r = patra_hdr_write_nosync(fd, hdr);
         if (r != PATRA_OK) { return r; }
         var pending = load64(db + DB_BATCH_PENDING) + 1;
         if (pending >= PATRA_BATCH_FLUSH_N) {
-            _pt_fdatasync(fd);
+            # 1.16.2: a failed auto-flush is the statement's error, and the
+            # handle remembers it (DB_SYNC_ERR) for patra_flush / patra_close.
+            if (_pt_fdatasync(fd) < 0) {
+                store64(db + DB_BATCH_PENDING, pending);
+                store64(db + DB_SYNC_ERR, 1);
+                return PATRA_ERR_IO;
+            }
             pending = 0;
         }
         store64(db + DB_BATCH_PENDING, pending);
@@ -546,8 +666,12 @@ fn _db_hdr_commit(db, fd, hdr): i64 {
     # WAL. What is dropped is only the intermediate sync of a header that is
     # still going to be overwritten by the next statement in the same
     # transaction.
-    if (load64(db + DB_TX)) { return patra_hdr_write_nosync(fd, hdr); }
-    return patra_hdr_write(fd, hdr);
+    # 1.16.2: a FULL-mode statement whose header write or sync failed has been
+    # applied — autocommit has no undo — but is not known to be durable. It
+    # returns PATRA_ERR_IO, and the handle remembers it (DB_SYNC_ERR).
+    var hw = patra_hdr_write(fd, hdr);
+    if (hw != PATRA_OK) { store64(db + DB_SYNC_ERR, 1); }
+    return hw;
 }
 
 # ── Exec: CREATE TABLE ────────────────────
@@ -575,7 +699,7 @@ fn _exec_create(db): i64 {
     _pt_free(names);
     _pt_free(types);
 
-    if (r == PATRA_OK) { _db_hdr_commit(db, fd, hdr); }
+    if (r == PATRA_OK) { r = _db_hdr_commit(db, fd, hdr); }
     _tx_unlock(db, fd);
     return r;
 }
@@ -911,7 +1035,7 @@ fn _exec_insert(db): i64 {
     _pt_free(row);
     pg_free(schema);
 
-    if (r == PATRA_OK) { _db_hdr_commit(db, fd, hdr); }
+    if (r == PATRA_OK) { r = _db_hdr_commit(db, fd, hdr); }
     _tx_unlock(db, fd);
     return r;
 }
@@ -944,7 +1068,7 @@ fn _exec_update(db): i64 {
     if (r == PATRA_OK) {
         store64(db + DB_ROWS_AFFECTED, _tbl_rows_affected);
         page_write(fd, spg, schema);
-        _db_hdr_commit(db, fd, hdr);
+        r = _db_hdr_commit(db, fd, hdr);
     }
     pg_free(schema);
     _tx_unlock(db, fd);
@@ -979,7 +1103,8 @@ fn _exec_delete(db): i64 {
 
     # DELETE compacts/frees data pages, so the cached tail page may be gone.
     store64(db + DB_LP_IDX, 0 - 1);
-    _db_hdr_commit(db, fd, hdr);
+    var hc = _db_hdr_commit(db, fd, hdr);
+    if (r == PATRA_OK) { r = hc; }
     _tx_unlock(db, fd);
     return r;
 }
@@ -1005,7 +1130,7 @@ fn _exec_drop(db): i64 {
     # DROP frees the table's pages and shifts directory indices, so any cached
     # (idx, page) is stale.
     store64(db + DB_LP_IDX, 0 - 1);
-    if (r == PATRA_OK) { _db_hdr_commit(db, fd, hdr); }
+    if (r == PATRA_OK) { r = _db_hdr_commit(db, fd, hdr); }
     _tx_unlock(db, fd);
     return r;
 }
@@ -1042,9 +1167,9 @@ fn _exec_alter_rename_tbl(db): i64 {
     memcpy(entry + TBL_NAME, new_ptr, nn);
     store8(entry + TBL_NAME + nn, 0);
 
-    _db_hdr_commit(db, fd, hdr);
+    var hc = _db_hdr_commit(db, fd, hdr);
     _tx_unlock(db, fd);
-    return PATRA_OK;
+    return hc;
 }
 
 # ALTER TABLE t RENAME COLUMN old TO new
@@ -1091,10 +1216,21 @@ fn _exec_alter_rename_col(db): i64 {
     memcpy(schema + coff, new_ptr, cn);
     store8(schema + coff + cn, 0);
 
-    page_write(fd, spg, schema);
+    # 1.16.2: checked — the rename is this one page, and a refused write was
+    # reported as done (1.16.2 review).
+    var pw = page_write(fd, spg, schema);
     pg_free(schema);
+    if (pw != PATRA_OK) {
+        _tx_unlock(db, fd);
+        return pw;
+    }
+    # 1.16.2: committed like every other write. It skipped _db_hdr_commit, so
+    # in FULL mode it never synced, and it never moved HDR_COMMITGEN: another
+    # process's page cache kept the old schema page, resolved the old name, and
+    # wrote that page back on its next UPDATE, losing the rename.
+    var hc = _db_hdr_commit(db, fd, hdr);
     _tx_unlock(db, fd);
-    return PATRA_OK;
+    return hc;
 }
 
 # ALTER TABLE t ADD COLUMN name INT|STR
@@ -1156,15 +1292,35 @@ fn _exec_alter_add(db): i64 {
         return PATRA_ERR_ROWSZ;
     }
 
-    var nrows = load64(entry + TBL_NROWS);
+    # 1.16.2: counted from the chain, not TBL_NROWS, which can read low (see
+    # tbl_chain_rows): staging stopped at that count, and the rows past it —
+    # the newest — were freed with the chain and never put back.
+    var nrows = tbl_chain_rows(fd, hdr, idx, rsz_old);
+    if (nrows < 0) {
+        pg_free(schema);
+        _tx_unlock(db, fd);
+        return PATRA_ERR_IO;
+    }
 
     # Stage rows into a scratch buffer with the default (zero) trailing field
     var scratch = 0;
     if (nrows > 0) {
         scratch = _pt_alloc(nrows * rsz_new);
+        # 1.16.2: checked (it was a memset through 0), with nothing yet changed.
+        if (scratch == 0) {
+            pg_free(schema);
+            _tx_unlock(db, fd);
+            return PATRA_ERR_IO;
+        }
         memset(scratch, 0, nrows * rsz_new);
     }
     var buf = pg_alloc();
+    if (buf == 0) {
+        if (scratch != 0) { _pt_free(scratch); }
+        pg_free(schema);
+        _tx_unlock(db, fd);
+        return PATRA_ERR_IO;
+    }
     var cur = load64(entry + TBL_ROOT);
     var written = 0;
     # 1.14.0: `scratch` is sized from TBL_NROWS (the directory's count) but was
@@ -1194,6 +1350,47 @@ fn _exec_alter_add(db): i64 {
         cur = load64(buf + DP_NEXT);
     }
 
+    # 1.16.2: the new data root, and the new index root, are allocated BEFORE
+    # anything is freed. They came after, unchecked: a refusal (ENOSPC
+    # extending the file, say) committed TBL_ROOT 0 over a table whose pages
+    # were already freed — the rows survived only in `scratch`, and the header
+    # then failed verification on every statement. Order matters for the
+    # early return: the root's buffer first (memory only); then the data root,
+    # which writes nothing when it comes off the free list (an extension writes
+    # past the on-disk page count, where nothing reads it); the index root last,
+    # because btree_create writes its page — once it has succeeded nothing
+    # here fails. So a refusal leaves the table and the on-disk free list as
+    # they were.
+    var ic = load64(schema + SCH_IDX_COL);
+    var ir_old = load64(schema + SCH_IDX_ROOT);
+    # A refusal must also give back what an allocation advanced in the
+    # in-memory header — inside a transaction, COMMIT writes that header as it
+    # is, and the abandoned page stayed counted (1.16.2 review).
+    var pc_snap = load64(hdr + HDR_PGCOUNT);
+    var fh_snap = load64(hdr + HDR_FREEHEAD);
+    var nbuf = pg_alloc();
+    var new_root = 0;
+    if (nbuf != 0) { new_root = page_alloc(fd, hdr); }
+    var bt_new = 0;
+    if (new_root != 0) {
+        if (ic >= 0) { bt_new = btree_create(fd, hdr); }
+    }
+    var root_ok = 1;
+    if (new_root == 0) { root_ok = 0; }
+    if (ic >= 0) { if (bt_new == 0) { root_ok = 0; } }
+    if (root_ok == 0) {
+        store64(hdr + HDR_PGCOUNT, pc_snap);
+        store64(hdr + HDR_FREEHEAD, fh_snap);
+        var rrc = PATRA_ERR_FULL;
+        if (nbuf == 0) { rrc = PATRA_ERR_IO; }
+        pg_free(nbuf);
+        pg_free(buf);
+        if (scratch != 0) { _pt_free(scratch); }
+        pg_free(schema);
+        _tx_unlock(db, fd);
+        return rrc;
+    }
+
     # Release old data pages. Invalidate the tail-page cache: this statement
     # frees the old data pages and re-inserts within the SAME commit gen, so a
     # stale same-gen cache entry could otherwise hit a just-freed page.
@@ -1213,8 +1410,6 @@ fn _exec_alter_add(db): i64 {
     pg_free(buf);
 
     # Release B-tree root (internal/leaf pages leak — matches tbl_drop behavior)
-    var ic = load64(schema + SCH_IDX_COL);
-    var ir_old = load64(schema + SCH_IDX_ROOT);
     if (ic >= 0) {
         if (ir_old != 0) { btree_free_all(fd, hdr, ir_old); }
     }
@@ -1230,16 +1425,12 @@ fn _exec_alter_add(db): i64 {
     var ncols_new = ncols_old + 1;
     store64(schema + SCH_NCOLS, ncols_new);
 
-    # Fresh empty data page as root, fresh B-tree if originally indexed
-    var new_root = page_alloc(fd, hdr);
-    var nbuf = pg_alloc();
+    # Fresh empty data page as root, fresh B-tree if originally indexed (both
+    # allocated above).
     page_init_data(nbuf);
     page_write(fd, new_root, nbuf);
     pg_free(nbuf);
-    if (ic >= 0) {
-        var bt_new = btree_create(fd, hdr);
-        store64(schema + SCH_IDX_ROOT, bt_new);
-    }
+    if (ic >= 0) { store64(schema + SCH_IDX_ROOT, bt_new); }
 
     store64(entry + TBL_NCOLS, ncols_new);
     store64(entry + TBL_ROOT, new_root);
@@ -1268,13 +1459,13 @@ fn _exec_alter_add(db): i64 {
     page_write(fd, spg, schema);
     if (nrows > 0) { _pt_free(scratch); }
     pg_free(schema);
-    _db_hdr_commit(db, fd, hdr);
+    var hc = _db_hdr_commit(db, fd, hdr);
     _tx_unlock(db, fd);
     # Report a partial rebuild rather than PATRA_OK. The schema change and the
     # rows that did land are already committed — there is no undo here outside
     # an explicit transaction — but the caller must not be told this worked.
     if (reins_err != PATRA_OK) { return reins_err; }
-    return PATRA_OK;
+    return hc;
 }
 
 # ALTER TABLE t DROP COLUMN name
@@ -1321,7 +1512,13 @@ fn _exec_alter_drop_col(db): i64 {
     var drop_sz = row_col_size(dctype);
     var rsz_new = rsz_old - drop_sz;
     var post_sz = rsz_old - drop_off - drop_sz;
-    var nrows = load64(entry + TBL_NROWS);
+    # 1.16.2: counted from the chain, as in _exec_alter_add.
+    var nrows = tbl_chain_rows(fd, hdr, idx, rsz_old);
+    if (nrows < 0) {
+        pg_free(schema);
+        _tx_unlock(db, fd);
+        return PATRA_ERR_IO;
+    }
 
     # Stage rows: copy pre-drop bytes then post-drop bytes. If the dropped
     # column is a BLOB, free each row's chain first — those pages become
@@ -1330,9 +1527,63 @@ fn _exec_alter_drop_col(db): i64 {
     var scratch = 0;
     if (nrows > 0) {
         scratch = _pt_alloc(nrows * rsz_new);
+        # 1.16.2: checked (it was a memset through 0), with nothing yet changed.
+        if (scratch == 0) {
+            pg_free(schema);
+            _tx_unlock(db, fd);
+            return PATRA_ERR_IO;
+        }
         memset(scratch, 0, nrows * rsz_new);
     }
     var buf = pg_alloc();
+    if (buf == 0) {
+        if (scratch != 0) { _pt_free(scratch); }
+        pg_free(schema);
+        _tx_unlock(db, fd);
+        return PATRA_ERR_IO;
+    }
+
+    # 1.16.2: the new data root and index root, before anything is freed — as
+    # in _exec_alter_add (see the comment there for the order), and here also
+    # before the staging loop below, which frees a dropped BYTES / TEXT
+    # column's chains as it goes. Recompute the index column first: torn down
+    # if it was the dropped one, shifted if it followed it.
+    var ic_old = load64(schema + SCH_IDX_COL);
+    var ir_old = load64(schema + SCH_IDX_ROOT);
+    var ic_new = 0 - 1;
+    if (ic_old >= 0) {
+        if (ic_old == di) { ic_new = 0 - 1; }
+        elif (ic_old > di) { ic_new = ic_old - 1; }
+        else { ic_new = ic_old; }
+    }
+    # A refusal must also give back what an allocation advanced in the
+    # in-memory header — inside a transaction, COMMIT writes that header as it
+    # is, and the abandoned page stayed counted (1.16.2 review).
+    var pc_snap = load64(hdr + HDR_PGCOUNT);
+    var fh_snap = load64(hdr + HDR_FREEHEAD);
+    var nbuf = pg_alloc();
+    var new_root = 0;
+    if (nbuf != 0) { new_root = page_alloc(fd, hdr); }
+    var bt_new = 0;
+    if (new_root != 0) {
+        if (ic_new >= 0) { bt_new = btree_create(fd, hdr); }
+    }
+    var root_ok = 1;
+    if (new_root == 0) { root_ok = 0; }
+    if (ic_new >= 0) { if (bt_new == 0) { root_ok = 0; } }
+    if (root_ok == 0) {
+        store64(hdr + HDR_PGCOUNT, pc_snap);
+        store64(hdr + HDR_FREEHEAD, fh_snap);
+        var rrc = PATRA_ERR_FULL;
+        if (nbuf == 0) { rrc = PATRA_ERR_IO; }
+        pg_free(nbuf);
+        pg_free(buf);
+        if (scratch != 0) { _pt_free(scratch); }
+        pg_free(schema);
+        _tx_unlock(db, fd);
+        return rrc;
+    }
+
     var cur = load64(entry + TBL_ROOT);
     var written = 0;
     var hops = 0;
@@ -1386,8 +1637,6 @@ fn _exec_alter_drop_col(db): i64 {
     pg_free(buf);
 
     # Release B-tree root (pre-existing tbl_drop pattern: internal/leaf pages leak)
-    var ic_old = load64(schema + SCH_IDX_COL);
-    var ir_old = load64(schema + SCH_IDX_ROOT);
     if (ic_old >= 0) {
         if (ir_old != 0) { btree_free_all(fd, hdr, ir_old); }
     }
@@ -1402,26 +1651,16 @@ fn _exec_alter_drop_col(db): i64 {
     memset(schema + SCH_START + ncols_new * SCH_ENTRY_SZ, 0, SCH_ENTRY_SZ);
     store64(schema + SCH_NCOLS, ncols_new);
 
-    # Recompute index column: tear down if dropped, shift if it followed
-    var ic_new = 0 - 1;
-    if (ic_old >= 0) {
-        if (ic_old == di) { ic_new = 0 - 1; }
-        elif (ic_old > di) { ic_new = ic_old - 1; }
-        else { ic_new = ic_old; }
-    }
+    # The index column was recomputed above (ic_new).
     store64(schema + SCH_IDX_COL, ic_new);
     store64(schema + SCH_IDX_ROOT, 0);
 
-    # Fresh empty data page + fresh B-tree if still indexed
-    var new_root = page_alloc(fd, hdr);
-    var nbuf = pg_alloc();
+    # Fresh empty data page + fresh B-tree if still indexed (both allocated
+    # above).
     page_init_data(nbuf);
     page_write(fd, new_root, nbuf);
     pg_free(nbuf);
-    if (ic_new >= 0) {
-        var bt_new = btree_create(fd, hdr);
-        store64(schema + SCH_IDX_ROOT, bt_new);
-    }
+    if (ic_new >= 0) { store64(schema + SCH_IDX_ROOT, bt_new); }
 
     store64(entry + TBL_NCOLS, ncols_new);
     store64(entry + TBL_ROOT, new_root);
@@ -1449,10 +1688,10 @@ fn _exec_alter_drop_col(db): i64 {
     page_write(fd, spg, schema);
     if (nrows > 0) { _pt_free(scratch); }
     pg_free(schema);
-    _db_hdr_commit(db, fd, hdr);
+    var hc = _db_hdr_commit(db, fd, hdr);
     _tx_unlock(db, fd);
     if (reins_err2 != PATRA_OK) { return reins_err2; }
-    return PATRA_OK;
+    return hc;
 }
 
 # ── Exec: VACUUM ────────────────────
@@ -1480,8 +1719,11 @@ fn _exec_vacuum(db): i64 {
             btree_compact(fd, hdr, ir);
         }
     }
+    # 1.16.2: committed like every other write (synced in FULL mode, and
+    # HDR_COMMITGEN moved so other processes' caches drop the compacted leaves).
+    var hc = _db_hdr_commit(db, fd, hdr);
     _tx_unlock(db, fd);
-    return PATRA_OK;
+    return hc;
 }
 
 # ── Exec: CREATE INDEX ────────────────────
@@ -1555,9 +1797,9 @@ fn _exec_create_index(db): i64 {
     page_write(fd, spg, schema);
     pg_free(schema);
 
-    _db_hdr_commit(db, fd, hdr);
+    var hc = _db_hdr_commit(db, fd, hdr);
     _tx_unlock(db, fd);
-    return PATRA_OK;
+    return hc;
 }
 
 # ── Transaction-aware locking (v1.13.3) ────────────────────
@@ -1608,10 +1850,47 @@ fn _db_lock_ex(db): i64 {
     var fd = _db_fd(db);
     var hdr = _db_hdr(db);
     var lk = patra_lock_ex(fd);
-    _pc_refresh(fd, hdr);
-    if (load64(db + DB_TX) != 0) { return PATRA_OK; }
-    if (lk != 0) { return PATRA_OK; }
-    return _db_recover_held(db, fd, hdr);
+    var rr = _pc_refresh(fd, hdr);
+    # Inside the handle's transaction the lock stays with the transaction; with
+    # no lock acquired there is nothing to release. Either way, report rr.
+    if (load64(db + DB_TX) != 0) { return rr; }
+    if (lk != 0) { return rr; }
+    var rc = _db_recover_held(db, fd, hdr, rr);
+    if (rc != PATRA_OK) { return rc; }
+    if (load64(hdr + HDR_DBID) == 0) {
+        rc = _db_assign_id(fd, hdr);
+        # As in _db_recover_held: that sync covered the pending BATCH writes.
+        if (rc != PATRA_OK) {
+            if (load64(db + DB_BATCH_PENDING) != 0) { store64(db + DB_SYNC_ERR, 1); }
+        }
+    }
+    return rc;
+}
+
+# Give a database without an identity one, under the writer's LOCK_EX (1.16.2).
+# patra_open assigns HDR_DBID only when its non-blocking LOCK_EX succeeds, so a
+# file written before v1.13.8 that is only ever opened while another process
+# holds a lock kept id 0 — and wal_start then bound every WAL to 0, which
+# wal_recover refuses by design: no crash recovery for that file at all. The
+# first writer statement (patra_begin included, before wal_start) now assigns
+# it, and registers the handle with the page cache, which an id of 0 kept it
+# out of. On failure the lock is released and the error returned.
+fn _db_assign_id(fd, hdr): i64 {
+    store64(hdr + HDR_DBID, _pt_rand64());
+    if (patra_hdr_write_nosync(fd, hdr) != PATRA_OK) {
+        store64(hdr + HDR_DBID, 0);
+        patra_unlock(fd);
+        return PATRA_ERR_IO;
+    }
+    # Registered once written, before the sync: every later read of the header
+    # sees this id whether or not the sync succeeds, so a later statement does
+    # not come back here, and a handle left unregistered would stay so.
+    pc_register(fd, load64(hdr + HDR_DBID));
+    if (_pt_fdatasync(fd) < 0) {
+        patra_unlock(fd);
+        return PATRA_ERR_IO;
+    }
+    return PATRA_OK;
 }
 
 # Readers. A reader holds LOCK_SH, under which it may not write, so it only
@@ -1625,17 +1904,14 @@ fn _db_lock_ex(db): i64 {
 fn _db_lock_sh(db): i64 {
     var fd = _db_fd(db);
     var hdr = _db_hdr(db);
-    if (load64(db + DB_TX) != 0) {
-        _pc_refresh(fd, hdr);
-        return PATRA_OK;
-    }
-    if (patra_lock_sh(fd) != 0) {
-        _pc_refresh(fd, hdr);
-        return PATRA_OK;
-    }
+    if (load64(db + DB_TX) != 0) { return _pc_refresh(fd, hdr); }
+    if (patra_lock_sh(fd) != 0) { return _pc_refresh(fd, hdr); }
+    var rr = 0;
     if (wal_exists(load64(db + DB_PATH)) == 0) {
-        _pc_refresh(fd, hdr);
-        return PATRA_OK;
+        # A reader's caller does not release the lock on failure: do it here.
+        rr = _pc_refresh(fd, hdr);
+        if (rr != PATRA_OK) { patra_unlock(fd); }
+        return rr;
     }
     if (patra_lock_ex(fd) != 0) {
         # The conversion failed, and flock may have dropped the shared lock on
@@ -1644,16 +1920,26 @@ fn _db_lock_sh(db): i64 {
         patra_unlock(fd);
         return PATRA_ERR_IO;
     }
-    _pc_refresh(fd, hdr);
-    return _db_recover_held(db, fd, hdr);
+    rr = _pc_refresh(fd, hdr);
+    return _db_recover_held(db, fd, hdr, rr);
 }
 
 # ── Transactions ────────────────────
 
 # Begin an explicit transaction (lock + WAL)
 fn patra_begin(db): i64 {
+    if (db == 0) { return PATRA_ERR_IO; }
     if (load64(db + DB_TX)) { return PATRA_OK; }
     var fd = _db_fd(db);
+    # 1.16.2: BATCH writes acknowledged before BEGIN are synced first. A sync
+    # that fails inside the transaction then concerns only the transaction,
+    # which its rollback covers; before, it also swallowed the error for those
+    # earlier writes, and a later flush returned 0 over them. A failure here
+    # marks the handle and the transaction goes ahead.
+    if (load64(db + DB_BATCH_PENDING) != 0) {
+        if (_pt_fdatasync(fd) < 0) { store64(db + DB_SYNC_ERR, 1); }
+        else { store64(db + DB_BATCH_PENDING, 0); }
+    }
     var wpath = load64(db + DB_PATH);
     # 1.16.0: recover an orphaned WAL BEFORE wal_start, whose O_TRUNC would
     # otherwise destroy it and make the dead transaction's pages permanent.
@@ -1683,10 +1969,19 @@ fn patra_begin(db): i64 {
 
 # Commit transaction (sync + unlock)
 fn patra_commit(db): i64 {
+    if (db == 0) { return PATRA_ERR_IO; }
     if (load64(db + DB_TX) == 0) { return PATRA_OK; }
     var fd = _db_fd(db);
     var wpath = load64(db + DB_PATH);
     var overflow = wal_overflowed(fd);
+    # 1.16.2: a write this transaction could not log was refused, so what it
+    # holds is not what its statements did. It used to commit anyway and return
+    # PATRA_ERR_FULL — part of a transaction, made permanent. Roll it back.
+    if (overflow != 0) {
+        patra_rollback(db);
+        if (overflow == 1) { return PATRA_ERR_FULL; }
+        return PATRA_ERR_IO;
+    }
     # P2: bump the commit generation on explicit-transaction commit too, so a
     # multi-statement txn is detectable as a change by readers on other handles;
     # _pc_set_gen keeps same-process readers from flushing (the txn's pages were
@@ -1694,16 +1989,26 @@ fn patra_commit(db): i64 {
     var _tg = load64(_db_hdr(db) + HDR_COMMITGEN) + 1;
     store64(_db_hdr(db) + HDR_COMMITGEN, _tg);
     _pc_set_gen(_tg);
-    patra_hdr_write(fd, _db_hdr(db));
-    wal_commit(fd, wpath);
+    # 1.16.2: both writes are checked. Neither was, so a header that failed to
+    # reach the disk, or data pages whose sync failed, were reported as a
+    # commit — and wal_commit then unlinked the WAL that could undo them. A
+    # failure now undoes the transaction from that WAL and returns
+    # PATRA_ERR_IO. If the rollback cannot finish either, it keeps the WAL and
+    # the next statement on any handle replays it.
+    var cr = patra_hdr_write(fd, _db_hdr(db));
+    if (cr == PATRA_OK) { cr = wal_commit(fd, wpath); }
+    if (cr != PATRA_OK) {
+        patra_rollback(db);
+        return PATRA_ERR_IO;
+    }
     patra_unlock(fd);
     store64(db + DB_TX, 0);
-    if (overflow != 0) { return PATRA_ERR_FULL; }
     return PATRA_OK;
 }
 
 # Rollback transaction (restore pages + unlock)
 fn patra_rollback(db): i64 {
+    if (db == 0) { return PATRA_ERR_IO; }
     if (load64(db + DB_TX) == 0) { return PATRA_OK; }
     var wpath = load64(db + DB_PATH);
     # A non-OK return means the restore was INCOMPLETE — the caller must be told
@@ -1714,11 +2019,13 @@ fn patra_rollback(db): i64 {
     # modified pages, so a flush is belt-and-suspenders — but rollback is rare
     # and a stale cached page here would be a silent correctness hole, so flush.
     _pc_flush();
-    patra_hdr_read(_db_fd(db), _db_hdr(db));
+    # 1.16.2: the re-read is checked (it was not), and reported after the
+    # restore's own status.
+    var hr = _pc_refresh(_db_fd(db), _db_hdr(db));
     patra_unlock(_db_fd(db));
     store64(db + DB_TX, 0);
     if (rbr != 0) { return rbr; }
-    return PATRA_OK;
+    return hr;
 }
 
 # ── patra_exec ────────────────────
@@ -2481,7 +2788,35 @@ fn _patra_query_exec(db): i64 {
     _pt_free(plan_refs);
 
     if (used_index == 0) {
-        actual = tbl_scan_where(fd, hdr, idx, data_ptr, rsz, schema, ncols, _spr(), alloc_rows);
+        var ovf = 0;
+        actual = tbl_scan_where(fd, hdr, idx, data_ptr, rsz, schema, ncols, _spr(), alloc_rows, &ovf);
+        # 1.16.2: a matching row did not fit. alloc_rows came from TBL_NROWS,
+        # which reads low after a power loss left a data page ahead of its
+        # header; the result ended silently short (COUNT(*) walks the chain and
+        # disagreed). Size from the chain and scan again — only on overflow.
+        if (ovf != 0) {
+            var real = tbl_chain_rows(fd, hdr, idx, rsz);
+            var rs2 = 0;
+            if (real > alloc_rows) {
+                if (real <= maxrows) { rs2 = _pt_alloc(fixed + real * rsz); }
+            }
+            if (rs2 == 0) {
+                _pt_free(rs);
+                pg_free(schema);
+                _tx_unlock(db, fd);
+                return 0;
+            }
+            memcpy(rs2, rs, fixed);
+            types_ptr = rs2 + RS_HDR_SZ;
+            names_ptr = types_ptr + ncols * 8;
+            data_ptr = names_ptr + ncols * SCH_CNAME_MAX;
+            store64(rs2 + RS_TYPES, types_ptr);
+            store64(rs2 + RS_NAMES, names_ptr);
+            store64(rs2 + RS_DATA, data_ptr);
+            _pt_free(rs);
+            rs = rs2;
+            actual = tbl_scan_where(fd, hdr, idx, data_ptr, rsz, schema, ncols, _spr(), real, 0);
+        }
     }
     store64(rs + RS_NROWS, actual);
 
@@ -2928,31 +3263,65 @@ fn patra_bind_text(stmt, idx, ptr, len): i64 {
 }
 
 # ── Result set accessors ────────────────────
+#
+# 1.16.2: every accessor checks what it is handed. patra_query returns 0 for a
+# failed query, and a 0 result set, or a row / column outside the one given,
+# was dereferenced as given — patra_result_count(0) died with SIGSEGV, and
+# get_int(rs, nrows, 0) read past the result buffer. A value accessor now
+# returns its "none" value for those: 0, or -1 where -1 already meant "not
+# that type"; read_bytes / read_text return PATRA_ERR_PARAM. Nothing is
+# reported for a value accessor, as SQLite's sqlite3_column_* do not report one.
 
-# Get number of rows in result set
-fn patra_result_count(rs): i64 { return load64(rs + RS_NROWS); }
-# Get number of columns in result set
-fn patra_result_cols(rs): i64 { return load64(rs + RS_NCOLS); }
+# Is `col` a column of `rs`?
+fn _rs_col_ok(rs, col): i64 {
+    if (rs == 0) { return 0; }
+    if (col < 0) { return 0; }
+    if (col >= load64(rs + RS_NCOLS)) { return 0; }
+    return 1;
+}
 
-# Get integer value at (row, col)
+# Is (row, col) a cell of `rs`?
+fn _rs_cell_ok(rs, row, col): i64 {
+    if (_rs_col_ok(rs, col) == 0) { return 0; }
+    if (row < 0) { return 0; }
+    if (row >= load64(rs + RS_NROWS)) { return 0; }
+    return 1;
+}
+
+# Number of rows in the result set (0 for a 0 result set)
+fn patra_result_count(rs): i64 {
+    if (rs == 0) { return 0; }
+    return load64(rs + RS_NROWS);
+}
+
+# Number of columns in the result set (0 for a 0 result set)
+fn patra_result_cols(rs): i64 {
+    if (rs == 0) { return 0; }
+    return load64(rs + RS_NCOLS);
+}
+
+# Integer value at (row, col); 0 outside the result set
 fn patra_result_get_int(rs, row, col): i64 {
+    if (_rs_cell_ok(rs, row, col) == 0) { return 0; }
     var data = load64(rs + RS_DATA);
     var rsz = load64(rs + RS_ROWSZ);
     return load64(data + row * rsz + _rs_field_off(rs, col));
 }
 
-# Get string pointer at (row, col)
+# Pointer to the STR slot at (row, col); 0 outside the result set
 fn patra_result_get_str(rs, row, col): i64 {
+    if (_rs_cell_ok(rs, row, col) == 0) { return 0; }
     var data = load64(rs + RS_DATA);
     var rsz = load64(rs + RS_ROWSZ);
     return data + row * rsz + _rs_field_off(rs, col);
 }
 
-# Length of a STR value at (row, col): bounded scan over the COL_STR_SZ slot,
-# stopping at the first NUL or COL_STR_SZ. Returns -1 if the column isn't STR.
-# Mirrors patra_result_get_bytes_len so consumers can drop ad-hoc strnlen.
-# Byte length of a STR value at (row, col), or -1 if the column isn't STR.
+# Byte length of a STR value at (row, col): a bounded scan over the COL_STR_SZ
+# slot, stopping at the first NUL. -1 if the column isn't STR or the cell is
+# outside the result set. Mirrors patra_result_get_bytes_len so consumers can
+# drop ad-hoc strnlen.
 fn patra_result_get_str_len(rs, row, col): i64 {
+    if (_rs_cell_ok(rs, row, col) == 0) { return 0 - 1; }
     var types = load64(rs + RS_TYPES);
     if (load64(types + col * 8) != COL_STR) { return 0 - 1; }
     var data = load64(rs + RS_DATA);
@@ -2966,21 +3335,25 @@ fn patra_result_get_str_len(rs, row, col): i64 {
     return COL_STR_SZ;
 }
 
-# Get column name at index
+# Column name at index; 0 outside the result set
 fn patra_result_col_name(rs, col): i64 {
+    if (_rs_col_ok(rs, col) == 0) { return 0; }
     var names = load64(rs + RS_NAMES);
     return names + col * SCH_CNAME_MAX;
 }
 
-# Get column type at index (COL_INT or COL_STR)
+# Column type at index (COL_INT, COL_STR, COL_BYTES or COL_TEXT); -1 outside
+# the result set (COL_INT is 0, so 0 cannot mean "none" here)
 fn patra_result_col_type(rs, col): i64 {
+    if (_rs_col_ok(rs, col) == 0) { return 0 - 1; }
     var types = load64(rs + RS_TYPES);
     return load64(types + col * 8);
 }
 
-# Get column type at index (COL_INT or COL_STR)
-# Length of a BLOB value at (row, col). Returns -1 if the column isn't BLOB.
+# Length of a BYTES value at (row, col). -1 if the column isn't BYTES or the
+# cell is outside the result set.
 fn patra_result_get_bytes_len(rs, row, col): i64 {
+    if (_rs_cell_ok(rs, row, col) == 0) { return 0 - 1; }
     var types = load64(rs + RS_TYPES);
     if (load64(types + col * 8) != COL_BYTES) { return 0 - 1; }
     var data = load64(rs + RS_DATA);
@@ -2988,15 +3361,16 @@ fn patra_result_get_bytes_len(rs, row, col): i64 {
     return load64(data + row * rsz + _rs_field_off(rs, col) + BR_LEN);
 }
 
-# Read a BLOB column's payload into `out` (caller-allocated, must be at
-# least `patra_result_get_bytes_len(rs, row, col)` bytes). Returns PATRA_OK,
-# PATRA_ERR_TYPE for non-BLOB columns, or PATRA_ERR_PAGE on a malformed
-# chain. The empty blob (length 0) returns PATRA_OK with no bytes read.
-# Read a BYTES column's payload into a caller-allocated `out` buffer. The payload
-# was snapshotted into a heap buffer by _rs_materialize under the query's flock
-# (BR_PAGE now holds that buffer pointer, not a disk page), so this is a pure
-# memory copy — safe against concurrent writers, and `db` is no longer read from.
+# Read a BYTES column's payload into a caller-allocated `out` buffer, at least
+# patra_result_get_bytes_len(rs, row, col) bytes. Returns PATRA_OK,
+# PATRA_ERR_PARAM for a cell outside the result set, PATRA_ERR_TYPE for a
+# non-BYTES column, or PATRA_ERR_PAGE on a malformed chain; an empty value
+# (length 0) is PATRA_OK with nothing written. The payload was snapshotted into
+# a heap buffer by _rs_materialize under the query's flock (BR_PAGE now holds
+# that buffer pointer, not a disk page), so this is a pure memory copy — safe
+# against concurrent writers, and `db` is no longer read from.
 fn patra_result_read_bytes(db, rs, row, col, out): i64 {
+    if (_rs_cell_ok(rs, row, col) == 0) { return PATRA_ERR_PARAM; }
     var types = load64(rs + RS_TYPES);
     if (load64(types + col * 8) != COL_BYTES) { return PATRA_ERR_TYPE; }
     var data = load64(rs + RS_DATA);
@@ -3010,10 +3384,12 @@ fn patra_result_read_bytes(db, rs, row, col, out): i64 {
     return PATRA_OK;
 }
 
-# Byte length of a TEXT value at (row, col), or -1 if the column isn't TEXT.
-# Mirrors patra_result_get_bytes_len; the caller sizes its `out` buffer from
-# this before patra_result_read_text (no NUL terminator is stored).
+# Byte length of a TEXT value at (row, col), or -1 if the column isn't TEXT or
+# the cell is outside the result set. Mirrors patra_result_get_bytes_len; the
+# caller sizes its `out` buffer from this before patra_result_read_text (no NUL
+# terminator is stored).
 fn patra_result_get_text_len(rs, row, col): i64 {
+    if (_rs_cell_ok(rs, row, col) == 0) { return 0 - 1; }
     var types = load64(rs + RS_TYPES);
     if (load64(types + col * 8) != COL_TEXT) { return 0 - 1; }
     var data = load64(rs + RS_DATA);
@@ -3022,13 +3398,15 @@ fn patra_result_get_text_len(rs, row, col): i64 {
 }
 
 # Read a TEXT column's payload into a caller-allocated `out` buffer (at least
-# patra_result_get_text_len bytes). Returns PATRA_OK, PATRA_ERR_TYPE for a
-# non-TEXT column, or PATRA_ERR_PAGE on a malformed chain. Empty TEXT (len 0)
-# returns PATRA_OK with nothing written. The payload was snapshotted into a heap
-# buffer by _rs_materialize under the query's flock (BR_PAGE now holds that buffer
+# patra_result_get_text_len bytes). Returns PATRA_OK, PATRA_ERR_PARAM for a cell
+# outside the result set, PATRA_ERR_TYPE for a non-TEXT column, or
+# PATRA_ERR_PAGE on a malformed chain. Empty TEXT (len 0) returns PATRA_OK with
+# nothing written. The payload was snapshotted into a heap buffer by
+# _rs_materialize under the query's flock (BR_PAGE now holds that buffer
 # pointer, not a disk page), so this is a pure memory copy — safe against a
 # concurrent writer that modifies the row after the query returned; `db` unused.
 fn patra_result_read_text(db, rs, row, col, out): i64 {
+    if (_rs_cell_ok(rs, row, col) == 0) { return PATRA_ERR_PARAM; }
     var types = load64(rs + RS_TYPES);
     if (load64(types + col * 8) != COL_TEXT) { return PATRA_ERR_TYPE; }
     var data = load64(rs + RS_DATA);
@@ -3109,6 +3487,7 @@ fn patra_insert_row_or_ignore(db, tname, tnlen, ncols, types, ivals, sptrs, slen
 }
 
 fn _patra_insert_row_impl(db, tname, tnlen, ncols, types, ivals, sptrs, slens, bptrs, blens, or_ignore): i64 {
+    if (db == 0) { return PATRA_ERR_IO; }
     var fd = _db_fd(db);
     var hdr = _db_hdr(db);
 
@@ -3326,7 +3705,7 @@ fn _patra_insert_row_impl(db, tname, tnlen, ncols, types, ivals, sptrs, slens, b
     _pt_free(row);
     pg_free(schema);
 
-    if (r == PATRA_OK) { _db_hdr_commit(db, fd, hdr); }
+    if (r == PATRA_OK) { r = _db_hdr_commit(db, fd, hdr); }
     _tx_unlock(db, fd);
     return r;
 }

@@ -149,6 +149,21 @@ fn _pt_flock(fd, op): i64 {
     return xflock(fd, op);
 }
 
+# Did a non-blocking flock fail only because another description holds a
+# conflicting lock? That is EAGAIN on Linux and macOS (the stdlib's errno
+# table). Anything else — Windows, whose xflock is -1 (no flock at all), or any
+# other error — means no lock can be had, not that someone else holds it
+# (1.16.2 review: patra_open told the two apart wrongly).
+fn _pt_flock_contended(r): i64 {
+    #ifdef CYRIUS_TARGET_LINUX
+    if (r == 0 - EAGAIN) { return 1; }
+    #endif
+    #ifdef CYRIUS_TARGET_MACOS
+    if (r == 0 - EAGAIN) { return 1; }
+    #endif
+    return 0;
+}
+
 # Flush a file's data to stable storage. fdatasync where the target has it
 # (Linux, macOS): the WAL hot path and group commit are priced on it, and fsync
 # would add a metadata sync to every commit. Elsewhere, the stdlib's xfsync:
@@ -163,7 +178,42 @@ fn _pt_flock(fd, op): i64 {
 # included, but without crash atomicity: without flock, recovery never runs,
 # and the next BEGIN's O_TRUNC discards a crashed transaction's WAL, so its
 # writes stay applied.
+#
+# 1.16.2: every caller now checks the result (several discarded it — a failed
+# sync was reported as a durable statement or commit).
+#
+# Test-only fault seam (1.16.2): while `_pt_sync_fail_on` is 1, a sync of the
+# fd in `_pt_sync_fail_fd` fails with -5 (EIO) once `_pt_sync_fail_skip` more
+# syncs of it have succeeded. The durability error paths cannot be reached
+# otherwise; nothing outside tests/ sets these.
+var _pt_sync_fail_on = 0;
+var _pt_sync_fail_fd = 0;
+var _pt_sync_fail_skip = 0;
+
+# Did a sync fail only because the fd has nothing to sync — a pipe, socket or
+# terminal, which Linux's fdatasync refuses with EINVAL? For a caller that may
+# be handed such an fd (jsonl_append); a database file is always a regular file,
+# and its syncs never take this exemption. EINVAL comes from the stdlib's errno
+# table. ⚠ macOS answers a pipe with ENOTSUP, which that table lacks, so there a
+# pipe still fails (roadmap: To file upstream); the macOS arm covers EINVAL
+# only. Windows has no errno to test (1.16.2 review).
+fn _pt_sync_nothing_to_sync(r): i64 {
+    #ifdef CYRIUS_TARGET_LINUX
+    if (r == 0 - EINVAL) { return 1; }
+    #endif
+    #ifdef CYRIUS_TARGET_MACOS
+    if (r == 0 - EINVAL) { return 1; }
+    #endif
+    return 0;
+}
+
 fn _pt_fdatasync(fd): i64 {
+    if (_pt_sync_fail_on != 0) {
+        if (fd == _pt_sync_fail_fd) {
+            if (_pt_sync_fail_skip == 0) { return 0 - 5; }
+            _pt_sync_fail_skip = _pt_sync_fail_skip - 1;
+        }
+    }
     #ifdef CYRIUS_TARGET_AGNOS
     return xfsync(fd);
     #endif
@@ -214,7 +264,9 @@ fn patra_hdr_write_nosync(fd, buf): i64 {
 fn patra_hdr_write(fd, buf): i64 {
     var r = patra_hdr_write_nosync(fd, buf);
     if (r != PATRA_OK) { return r; }
-    _pt_fdatasync(fd);
+    # 1.16.2: checked. Every autocommit statement in FULL mode ends here, and a
+    # failed sync returned PATRA_OK — a statement reported durable that was not.
+    if (_pt_fdatasync(fd) < 0) { return PATRA_ERR_IO; }
     return PATRA_OK;
 }
 
@@ -245,9 +297,10 @@ fn patra_hdr_verify(buf): i64 {
     # page numbers with no range check, so a crafted value reads an arbitrary
     # file offset into a page buffer, and TBL_NROWS sizes heap allocations.
     #
-    # This runs on every patra_hdr_read, so it is the one place that sees the
-    # directory before anything else does. At most MAX_TABLES (63) iterations
-    # of four comparisons — unmeasurable next to the page read it follows.
+    # This runs in patra_open and, since 1.16.2, on every statement's re-read
+    # of the header (lib.cyr _pc_refresh) — until then it ran at open only,
+    # though this comment said otherwise. At most MAX_TABLES (63) iterations of
+    # four comparisons — unmeasurable next to the page read it follows.
     for (var ti = 0; ti < tc; ti = ti + 1) {
         var e = buf + HDR_TBLDIR + ti * TBL_ENTRY_SZ;
         var nc = load64(e + TBL_NCOLS);
@@ -394,7 +447,24 @@ fn _pt_sync_dir(path): i64 {
 # outside the cache lock, so the two mutexes never nest.
 var _pt_alloc_mtx = 0;
 
+# Test-only fault seam (1.16.2), the allocation twin of _pt_fdatasync's: while
+# `_pt_alloc_fail_on` is 1, _pt_alloc returns 0 once `_pt_alloc_fail_skip` more
+# allocations have succeeded — every allocation after that, or, with
+# `_pt_alloc_fail_once` 1, that one only. fl_alloc refuses only when the kernel
+# refuses memory, so the refused-allocation paths cannot be reached otherwise;
+# nothing outside tests/ sets these.
+var _pt_alloc_fail_on = 0;
+var _pt_alloc_fail_skip = 0;
+var _pt_alloc_fail_once = 0;
+
 fn _pt_alloc(n): i64 {
+    if (_pt_alloc_fail_on != 0) {
+        if (_pt_alloc_fail_skip == 0) {
+            if (_pt_alloc_fail_once != 0) { _pt_alloc_fail_on = 0; }
+            return 0;
+        }
+        _pt_alloc_fail_skip = _pt_alloc_fail_skip - 1;
+    }
     if (_pt_alloc_mtx == 0) { return fl_alloc(n); }
     mutex_lock(_pt_alloc_mtx);
     var p = fl_alloc(n);

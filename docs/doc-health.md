@@ -6,9 +6,10 @@ type: state
 
 # Documentation Health — patra
 
-> **Last refresh**: 2026-10-14 (v1.16.1 — **targeted release refresh**: the
+> **Last refresh**: 2026-10-14 (v1.16.2 — **targeted release refresh**: the
 > ground-truth table re-measured cell by cell, plus every row this cut touched.
-> Prior: 2026-10-08 (v1.16.0), the same kind of refresh.
+> Prior: 2026-10-14 (v1.16.1) and 2026-10-08 (v1.16.0), the same kind of
+> refresh.
 > ⚠ **Not a full sweep.** The four known-stale docs listed under *In-flight*
 > (`overview.md`, `architecture/README.md`, `completed-phases.md`, the
 > `requests/` indexes) are still not corrected. ⚠ **This file was not opened by
@@ -27,15 +28,15 @@ Everything below was **measured**, not copied forward:
 
 | Fact | Value | How |
 |---|---|---|
-| Version | **1.16.1** | `cat VERSION` |
+| Version | **1.16.2** | `cat VERSION` |
 | Cyrius pin | **6.7.10** | `cyrius.cyml [package].cyrius`; `cyrius --version` reports `manifest-pin: 6.7.10` |
-| Unit tests | **1413 / 1413** (and 1413 / 1413 on aarch64 under `qemu-aarch64`, by hand); plus raw-include **6 / 6** and the no-`patra_init` process **18 / 18** (also 18 / 18 on aarch64) | `cyrius test tests/tcyr/patra.tcyr`, `…/patra_raw_include.tcyr` (staging dir), `…/patra_uninit.tcyr` |
+| Unit tests | **1594 / 1594** (and 1594 / 1594 on aarch64 under `qemu-aarch64`, by hand); plus raw-include **6 / 6** and the no-`patra_init` process **18 / 18** (also 18 / 18 on aarch64) | `cyrius test tests/tcyr/patra.tcyr`, `…/patra_raw_include.tcyr` (staging dir), `…/patra_uninit.tcyr` |
 | Fuzz harnesses | **8 / 8** (8 / 8 on aarch64 under qemu) | each `fuzz/*.fcyr` built with `CYRIUS_DCE=1` and run, as CI does |
 | Benchmarks | **43** | `grep -c 'bench_new(' tests/bcyr/patra.bcyr`, and the run |
-| Demo binary | **247,128 B** DCE-on · **386,392 B** DCE-off | `CYRIUS_DCE=1 cyrius build programs/demo.cyr` vs. the same build without the flag. 1.16.0 on 6.7.5 measured 247,600 / 382,768; the 6.7.10 pin alone 247,048 / 382,216 (DCE-off +4,176 is 568 B of text crossing a page boundary) |
-| `dist/patra.cyr` | **8,464 lines** per `cyrius distlib`'s own report · **8,520** per `wc -l` | both run; the gap is the tool's count, not a stale figure — quote whichever the context needs and say which |
+| Demo binary | **255,488 B** DCE-on · **394,752 B** DCE-off | `CYRIUS_DCE=1 cyrius build programs/demo.cyr` vs. the same build without the flag. 1.16.0 on 6.7.5 measured 247,600 / 382,768; the 6.7.10 pin alone 247,048 / 382,216 (DCE-off +4,176 is 568 B of text crossing a page boundary) |
+| `dist/patra.cyr` | **9,106 lines** per `cyrius distlib`'s own report · **9,162** per `wc -l` | both run; the gap is the tool's count, not a stale figure — quote whichever the context needs and say which |
 | `dist/patra.deps` | **14 leaves** (matches `[deps].stdlib`) | `cyrius distlib` |
-| `src/` | **12 modules, 8,476 lines** | `wc -l src/*.cyr` |
+| `src/` | **12 modules, 9,118 lines** | `wc -l src/*.cyr` |
 | Integration | libro **15/15**, vidya **19/19** | `programs/test_*.cyr` |
 | WAL format | **v4** (v2/v3 accepted best-effort on recovery) | `src/wal.cyr` |
 
@@ -68,14 +69,14 @@ the archives have grown).
 
 | File | Last touched | Status | Notes |
 |---|---|---|---|
-| `README.md` | 2026-10-14 | ✅ Fresh | `[deps.patra]` tag at **1.16.1**, CI-gated. v1.16.1: *Usage* says `patra_init` is required and names `patra_initialized()`; the page-cache note says call it after `patra_init`; a note under *SQL Supported* says `PATRA_ERR_EXISTS` does not depend on the table / column count. v1.16.0: the storage bullet no longer names an open multi-process recovery gap, the aggregates bullet says `INT` columns, and a new note under *SQL Supported* states the five 1.16.0 behaviours (`LIMIT 0`, `INT`-only aggregates, 31-byte identifiers, `ORDER BY` refusals). |
-| `CHANGELOG.md` | 2026-10-14 | ✅ Fresh | Source of truth for shipped work. Current through **1.16.1** (1.16.0 has a *Breaking* section and migration paragraph); top entry CI-gated against `VERSION`. |
+| `README.md` | 2026-10-14 | ✅ Fresh | `[deps.patra]` tag at **1.16.2**, CI-gated. v1.16.2: *Usage* states the failure-reporting contract (sync errors sticky per handle, an autocommit statement that fails its sync has been applied, a failed commit is rolled back, the 0 handle); *SQL Supported* notes `CREATE TABLE` needs a column and distinct names. v1.16.1: *Usage* says `patra_init` is required and names `patra_initialized()`; the page-cache note says call it after `patra_init`; a note under *SQL Supported* says `PATRA_ERR_EXISTS` does not depend on the table / column count. v1.16.0: the storage bullet no longer names an open multi-process recovery gap, the aggregates bullet says `INT` columns, and a new note under *SQL Supported* states the five 1.16.0 behaviours (`LIMIT 0`, `INT`-only aggregates, 31-byte identifiers, `ORDER BY` refusals). |
+| `CHANGELOG.md` | 2026-10-14 | ✅ Fresh | Source of truth for shipped work. Current through **1.16.2** (1.16.0 has a *Breaking* section and migration paragraph); top entry CI-gated against `VERSION`. |
 | `CLAUDE.md` | 2026-10-14 | ✅ Fresh | Durable rules only. v1.16.1: *Quick Start* lists the no-`patra_init` test (`tests/tcyr/patra_uninit.tcyr`). v1.15.0 added two DO-NOT rules: no raw `syscall(…)` or numeric `open(2)` flags, which CI enforces, and no private copies of stdlib ABI constants, which nothing enforces. |
 | `CONTRIBUTING.md` | 2026-05-21 | ✅ Fresh | Pointer-only on the toolchain pin; no version numbers to rot. |
-| `SECURITY.md` | 2026-10-08 | ✅ Fresh | **v1.16.0:** the WAL row says recovery runs before every statement; the multi-process row loses its open gap; the symlink and targets rows say what cyrius 6.6.9 changed on Windows (flush, `O_NOFOLLOW`) and that agnos 1.57.7 made `flock` wait. Earlier (v1.15.0): the cross-platform row was corrected. |
+| `SECURITY.md` | 2026-10-14 | ✅ Fresh | **v1.16.2:** the file-format row says the header is verified per statement and at open after recovery (and a directory / FIFO WAL path is refused); the commit-durability row says a failed sync or an unloggable write rolls the transaction back. **v1.16.0:** the WAL row says recovery runs before every statement; the multi-process row loses its open gap; the symlink and targets rows say what cyrius 6.6.9 changed on Windows (flush, `O_NOFOLLOW`) and that agnos 1.57.7 made `flock` wait. Earlier (v1.15.0): the cross-platform row was corrected. |
 | `CODE_OF_CONDUCT.md` | 2026-04-30 | 🔵 Evergreen | Standard. |
 | `LICENSE` | (initial) | 🔵 Evergreen | GPL-3.0-only. |
-| `VERSION` | 2026-10-14 | ✅ Fresh | `1.16.1`; CI-gated against four other anchors. |
+| `VERSION` | 2026-10-14 | ✅ Fresh | `1.16.2`; CI-gated against four other anchors. |
 
 ---
 
@@ -83,9 +84,9 @@ the archives have grown).
 
 | File | Last touched | Status | Notes |
 |---|---|---|---|
-| `state.md` | 2026-10-14 | ✅ Fresh | Current block at **v1.16.1**. Assertion count **1413** (the value CI compares the suite against). Footguns gain three v1.16.1-review items (unverified header re-read, 0-handle calls, the process-wide flag). v1.16.1 also fixed three interior bullets the v1.16.0 cut left stale: *Version* (said 1.15.2), *Cyrius toolchain* (said 6.6.18) and *Status* (said v1.15.2), plus *Primary target*'s Windows / agnos gaps (both closed in 1.15.x / agnos 1.57.7), the *sakshi* bullet (said 2.5.2) and the cross-build paragraph's 6.6.6-era warning counts. At v1.16.0: Footguns: Windows single-process, agnos before 1.57.7, the per-statement probe, a refused WAL; the recovery issue moved to *Resolved*. Binary, source layout, sakshi (2.5.7 in 6.7.5) and the bench count re-measured. |
-| `roadmap.md` | 2026-10-14 | ✅ Fresh | Current block at **v1.16.1**; the two libro 2.10.8 bugs moved from *Open backlog* to *Recently shipped*; *Open — patra's own* gains two items from the release review (header re-read unverified, 0-handle calls); *Platforms* re-run under 6.7.10. At v1.16.0 (it read v1.15.0 on 6.6.6 through 1.15.1 and 1.15.2): Both of patra's own items and the five v1.14.0 wrong answers shipped; four new items, each with a trigger. Three of the five cyrius requests shipped upstream (6.6.9), `fl_alloc` in 6.6.7; two remain unfiled. Platforms re-stated for recovery-per-statement, Windows (cyrius 6.6.9) and agnos 1.57.7. |
-| `BENCHMARKS.md` | 2026-10-14 | 🟡 **Note fresh, table stale by design** | Currency note brought to v1.16.1 / 6.7.10: flat, with the one +7 % row shown to be placement by instruction count. Before that, v1.16.0 / 6.7.5 / 43 benchmarks, with the per-statement WAL probe priced (about 2.5 us; +12 % to +26 % on the smallest statements). Earlier: v1.15.0 / 6.6.6 / 41, with the finding that sub-10 µs rows move ±20 % on code placement alone. The table itself is still the v1.9.5 baseline. |
+| `state.md` | 2026-10-14 | ✅ Fresh | Current block at **v1.16.2**. Assertion count **1594**; footguns rewritten (two closed, four added). At v1.16.1: assertion count 1413 (the value CI compares the suite against). Footguns gain three v1.16.1-review items (unverified header re-read, 0-handle calls, the process-wide flag). v1.16.1 also fixed three interior bullets the v1.16.0 cut left stale: *Version* (said 1.15.2), *Cyrius toolchain* (said 6.6.18) and *Status* (said v1.15.2), plus *Primary target*'s Windows / agnos gaps (both closed in 1.15.x / agnos 1.57.7), the *sakshi* bullet (said 2.5.2) and the cross-build paragraph's 6.6.6-era warning counts. At v1.16.0: Footguns: Windows single-process, agnos before 1.57.7, the per-statement probe, a refused WAL; the recovery issue moved to *Resolved*. Binary, source layout, sakshi (2.5.7 in 6.7.5) and the bench count re-measured. |
+| `roadmap.md` | 2026-10-14 | ✅ Fresh | Current block at **v1.16.2**; *Open — patra's own* now six items (four closed, `page_write` narrowed to autocommit, allocations, copied identities, the zero-column file added); a third cyrius request written up (ENOTSUP / ESPIPE). At v1.16.1: the two libro 2.10.8 bugs moved from *Open backlog* to *Recently shipped*; *Open — patra's own* gains two items from the release review (header re-read unverified, 0-handle calls); *Platforms* re-run under 6.7.10. At v1.16.0 (it read v1.15.0 on 6.6.6 through 1.15.1 and 1.15.2): Both of patra's own items and the five v1.14.0 wrong answers shipped; four new items, each with a trigger. Three of the five cyrius requests shipped upstream (6.6.9), `fl_alloc` in 6.6.7; two remain unfiled. Platforms re-stated for recovery-per-statement, Windows (cyrius 6.6.9) and agnos 1.57.7. |
+| `BENCHMARKS.md` | 2026-10-14 | 🟡 **Note fresh, table stale by design** | Currency note brought to v1.16.2: flat, `insert_2k_in_txn` bimodal on this disk, +240 instructions per INSERT. v1.16.1 / 6.7.10: flat, with the one +7 % row shown to be placement by instruction count. Before that, v1.16.0 / 6.7.5 / 43 benchmarks, with the per-statement WAL probe priced (about 2.5 us; +12 % to +26 % on the smallest statements). Earlier: v1.15.0 / 6.6.6 / 41, with the finding that sub-10 µs rows move ±20 % on code placement alone. The table itself is still the v1.9.5 baseline. |
 | `completed-phases.md` | 2026-08-18 | ✅ Fresh (append-only) | Extended from v1.12.6 through **v1.13.8** — the v1.12.7–1.13.1 patch tail plus a per-release breakdown of the repair arc. It had been carrying a promise to "fold into a 1.12.x phase row at the next phase rewrite" since v1.12.6; that promise is now kept. |
 | `requests/README.md` | 2026-08-18 | ✅ Fresh | Open list correctly empty — verified against the folder (README + `archive/` only). Rewritten this sweep to name all five archived requests and to state the partial-ship rule explicitly: sit's v1.13.1 request archived with its second half (scan-path `LIMIT`) carried to the roadmap's Deferred list, because the *consumer's* blocker is gone and leaving the request open would mis-state their position. |
 | `requests/archive/README.md` | 2026-08-18 | ✅ Fresh | **Index was incomplete** — it listed 3 of the 5 archived requests, missing the argonaut escaping P1 (v1.12.10) and sit's result-buffer report (v1.13.1). Both rows added. |
@@ -100,10 +101,11 @@ the archives have grown).
 
 | File | Last touched | Status | Notes |
 |---|---|---|---|
-| `README.md` | 2026-07-16 | ✅ Fresh | Index + conventions. |
+| `README.md` | 2026-10-14 | ✅ Fresh | Index + conventions. v1.16.2: indexes note 004, and no longer says there are no numbered notes. |
 | `001-thread-local-scratch.md` | 2026-08-18 | ✅ Fresh | **Slot map was wrong twice over.** It listed hardcoded indices 0–4, but v1.12.12 moved the slots to runtime `thread_local_alloc()` claiming, and v1.13.6 added a sixth (`TLS_LEXERR`). Table rewritten as *claim order* with the new slot, plus why the lexer flag must be per-thread (readers parse concurrently since v1.12.0, so a global would cross-contaminate parses). |
 | `002-flock-non-counted.md` | 2026-08-18 | ✅ Fresh | Extended with the v1.13.3 transaction defect, which is the sharpest illustration this note has: property (1) — one unlock releases regardless of nesting — is *exactly* what made a transaction drop its lock at the first statement. Includes the measured before/after lock-state table. |
 | `003-page-cache-coherence.md` | 2026-10-08 | ✅ Fresh | v1.16.0 added point (4b): a recovery replay flushes the cache and moves `HDR_COMMITGEN` past the restored and the dead transaction's values. Cross-process cache coherence remains ungated (SECURITY.md limitations). |
+| `004-test-fault-seams.md` | 2026-10-14 | ✅ Fresh | New at v1.16.2: the test-only sync and allocation seams in `src/file.cyr` — why they exist, never armed outside `tests/`, a countdown not a filter, the refuse-once mode, the slab drain the ALTER sweep needs. |
 | `overview.md` | 2026-08-18 | ✅ Fresh | **Had zero awareness of the entire 1.13.x arc** — no `_idx_plan`, `_tx_unlock`, `HDR_DBID`, `_bt_mut_walk`, or `TLS_LEXERR`. Added a section covering the durable shape changes, and corrected the concurrency section's transaction caveat, which said a `begin…commit` span is not protected — true across threads, false across processes since v1.13.3. |
 
 ---
@@ -182,21 +184,23 @@ record instead of showing as fresh:
 | File | Defect (verified 2026-09-07) |
 |---|---|
 | `architecture/overview.md` | Concurrency section has been wrong since **v1.12.0** — it predates the connection-per-thread model, the lock-free `SELECT` path, and the TLS parse scratch. Also missing the v1.13.9 hybrid-sort invariant and the DELETE page-reclaim path, and its free-list bullet is stale. |
-| `architecture/README.md` | Says there are no numbered notes, then indexes three. Note 003 has no record of v1.13.11's `_pc_alloc` publish-order fix. |
+| `architecture/README.md` | Note 003 has no record of v1.13.11's `_pc_alloc` publish-order fix. (Its "no numbered notes" line was fixed at v1.16.2.) |
 | `completed-phases.md` | Stops at **v1.13.8**; the v1.13.9–**v1.15.0** tail is unrecorded (widened by five cuts since v1.13.12). Carries a 1059-vs-1061 assertion-count contradiction that should be settled against the v1.13.8 CHANGELOG entry rather than by picking a number. |
 | `requests/README.md` + `requests/archive/README.md` | List 5 of 7 entries. sit's ORDER BY request (shipped v1.13.9) and Agnostic's log-level request (shipped v1.13.10) are missing from both. |
 
-**Three dangling internal links**, all pre-existing (verified against `HEAD`) and
-all left alone because fixing them means editing historical records:
+**Four dangling internal links**, all pre-existing and all left alone because
+fixing them means editing historical records:
 
 | In | Points at | Should be |
 |---|---|---|
-| `CHANGELOG.md` | `docs/development/issues/2026-06-28-concurrent-read-table-lookup-cache-race.md` | the file moved to `issues/archive/` — but this is a shipped CHANGELOG entry, and rewriting one to chase a later move is worse than the dead link |
-| `issues/archive/2026-06-28-…` | `../adr/0002-connection-per-thread-concurrency.md` | `../../adr/…` — off by one directory since the file was archived |
+| `CHANGELOG.md` [1.12.7] | `docs/development/issues/2026-06-28-concurrent-read-table-lookup-cache-race.md` | the file moved to `issues/archive/` — but this is a shipped CHANGELOG entry, and rewriting one to chase a later move is worse than the dead link |
+| `CHANGELOG.md` [1.15.0] | `docs/development/issues/2026-09-23-wal-recovery-runs-only-at-open.md` | the same: archived at v1.16.0 (this row added at v1.16.2) |
+| `issues/archive/2026-06-28-…` | `../adr/0002-connection-per-thread-concurrency.md` | `../../../adr/…` — the file is three levels below `docs/` since it was archived (this row said `../../adr/`, which is also wrong; corrected v1.16.2) |
 | `requests/archive/2026-06-18-yeo-cy-test-insert-returning-id.md` | `../2026-06-09-yeo-cy-test-concurrent-readers.md` | that request is also archived, so the sibling path is now `./` |
 
-A link check is cheap and nothing runs one; consider adding it to CI rather than
-sweeping by hand a fourth time.
+**CI checks links since v1.16.2** (*No dangling links between the repo's docs*,
+in the docs job): every relative link in a tracked `.md` file must name a file
+that exists, with exactly these four allowlisted. Anchors are not checked. Mutation-verified with a planted link.
 
 Also unresolved, and **not** a documentation problem: `state.md`'s release table
 has no **1.13.1** row. It was not back-filled because no summary for it exists to
@@ -236,4 +240,4 @@ copy — writing one would mean inventing it.
 
 ---
 
-*Last refresh: 2026-10-14 (v1.16.1 — targeted release refresh: ground truth and the rows this cut touched). Prior: 2026-10-08 (v1.16.0, the same); 2026-09-23 (v1.15.0 — targeted release sweep, then corrected against the cut's adversarial docs review: agnos cross-build dating, README thread-safety, `fl_alloc` scope, bench spread, inventory counts, ADR rows); 2026-09-07, v1.13.12.*
+*Last refresh: 2026-10-14 (v1.16.2 — targeted release refresh: ground truth and the rows this cut touched). Prior: 2026-10-14 (v1.16.1); 2026-10-08 (v1.16.0, the same); 2026-09-23 (v1.15.0 — targeted release sweep, then corrected against the cut's adversarial docs review: agnos cross-build dating, README thread-safety, `fl_alloc` scope, bench spread, inventory counts, ADR rows); 2026-09-07, v1.13.12.*

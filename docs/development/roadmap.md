@@ -1,6 +1,6 @@
 # Patra Development Roadmap
 
-> **Last refreshed**: 2026-10-14 (v1.16.1)
+> **Last refreshed**: 2026-10-14 (v1.16.2)
 >
 > Thin **backlog index**, **forward-looking only**. Nothing shipped belongs here —
 > per-release detail lives in [`../../CHANGELOG.md`](../../CHANGELOG.md), the
@@ -8,11 +8,19 @@
 > in [`state.md`](state.md). Open consumer requests live one-file-each in
 > [`requests/`](requests/); upstream cyrius bugs in [`issues/`](issues/).
 
-> **Current**: **v1.16.1**, cyrius pin **6.7.10**, zero `[deps.*]` git blocks.
-> Gates green: **1413 tests** (+ 6 raw-include, + 18 in the no-`patra_init`
+> **Current**: **v1.16.2**, cyrius pin **6.7.10**, zero `[deps.*]` git blocks.
+> Gates green: **1594 tests** (+ 6 raw-include, + 18 in the no-`patra_init`
 > process), **8/8 fuzz**, 43 benchmarks, lint 0-warn, fmt clean, libro 15/15,
 > vidya 19/19, `dist/` in sync (**14** sidecar leaves), no raw syscalls or
-> numeric open flags. Binary **247,128 B** DCE-on / 386,392 B DCE-off.
+> numeric open flags, no dangling doc links. Binary **255,488 B** DCE-on /
+> 394,752 B DCE-off.
+>
+> **v1.16.2 closed the 1.16.1 review's two follow-ups and both older items of
+> patra's own**, and what two adversarial reviews found around them: failed
+> syncs, refused writes and refused allocations reported rather than taken for
+> success (a transaction that cannot be made whole and durable is rolled back
+> at COMMIT), three row-loss paths, and a statement that made a file
+> unopenable. CHANGELOG [1.16.2].
 >
 > **v1.16.1 closed the two bugs libro 2.10.8 filed** (both 2026-10-14):
 > `patra_open` without `patra_init` refuses instead of dying with SIGSEGV, and
@@ -52,6 +60,9 @@ resolved in agnos **1.57.7** and archived there
 
 ### Recently shipped
 
+- **v1.16.2** — failures reported, headers verified per statement, the 0
+  handle; `wal_rollback` keeps a WAL it cannot read; the first writer assigns a
+  missing identity. CHANGELOG [1.16.2].
 - **v1.16.1** — [`issues/archive/2026-10-14-patra-open-faults-without-patra-init.md`](issues/archive/2026-10-14-patra-open-faults-without-patra-init.md)
   (`patra_open` / `patra_cache_enable(1)` refuse before `patra_init`, which
   fails closed; new `patra_initialized()`) and
@@ -67,26 +78,46 @@ resolved in agnos **1.57.7** and archived there
 
 ### Open — patra's own
 
-**None scheduled.** Found while fixing the v1.16.0 and v1.16.1 items; each
-states its trigger:
+**None scheduled.** Each states its trigger. v1.16.2 closed four that stood
+here — `wal_rollback` giving up a WAL it could not read, a database without an
+identity having no crash recovery, the unverified header re-read, the 0 handle
+(CHANGELOG [1.16.2]).
 
-- **`wal_rollback` reads a failed header check as a bad header and unlinks the
-  WAL.** `_wal_hdr_verify` returns the same error for bad magic as for a failed
-  `xlseek` or a refused scratch allocation (its `_pt_alloc(WAL_HDR_SZ)` is
-  unchecked: the read into 0 fails and reads as a short header).
-  `wal_rollback` then unlinks the WAL without restoring anything, and
-  `patra_rollback` reports `PATRA_ERR_MAGIC` over a part-written transaction.
-  `wal_recover`'s two scratch allocations were made to fail closed at 1.16.0;
-  this is the sibling. A regression test needs a way to make `fl_alloc`
-  refuse (the page-cache test lowers `ALLOC_MAX`, which `fl_alloc` does not
-  consult). *Trigger*: the next change to the WAL module. *Small.*
-- **A database whose `HDR_DBID` is still 0 has no crash recovery.** The id is
-  assigned only in `patra_open`'s non-blocking `LOCK_EX` block. If every open
-  of a file (one created by a pre-1.13.8 binary, or opened only while another
-  process held a lock) is contended, `wal_start` writes `dbid` 0 into the WAL,
-  which `wal_recover` refuses by design. The fix is to assign the id under the
-  first `LOCK_EX` that finds it 0 (`_db_lock_ex` now has the header in hand).
-  *Trigger*: a consumer whose databases are opened under contention. *Small.*
+- **`page_write`'s result is discarded at most of its 30 call sites —
+  outside a transaction** (found at v1.16.2). Inside a transaction this is
+  handled since v1.16.2: `wal_log_page` marks the transaction when it cannot log
+  a before-image, `page_write` then refuses that page, and `patra_commit` rolls
+  the whole transaction back rather than commit part of it (an overflowed one
+  used to commit what it wrote and return `PATRA_ERR_FULL`). In autocommit
+  `page_write` fails only on a real seek or write error, and the statement
+  still carries on and reports success; there is no undo there. 1.13.4 tried
+  failing those writes outright and backed out (a half-written page hung
+  `tbl_insert`'s tail walk), so this wants the statement paths to propagate
+  one site at a time, B-tree splits last. *Trigger*: the next change to
+  `page.cyr` or a statement path. *Medium; small bites.*
+- **Two copies of one database corrupt each other under the page cache**
+  (found by the 1.16.2 review, pre-existing). `cp a.patra b.patra` copies
+  `HDR_DBID`, the page cache's key ([ADR-0004](../adr/0004-per-database-wal-and-cache-identity.md));
+  with the cache enabled and both open in one process, each serves the other's
+  pages and a write lands in the wrong file. The cache is off by default.
+  Detect it at `pc_register` (the same id registered for a file with another
+  device and inode), or re-key on (dbid, inode). A narrower path to the same
+  state: `_db_assign_id` registers a new id before its sync, and if that
+  write-back is lost before any later header sync, another handle in the
+  process can assign a second id. *Trigger*: a consumer that enables the cache
+  and copies databases. *Small.*
+- **About 70 allocation results are unchecked across `src/`** (found at v1.16.2,
+  a heuristic count: `var x = _pt_alloc(..)` / `pg_alloc()` with no test of
+  `x` in the next lines). A refusal is mostly a store or a `memset` through 0;
+  `pg_alloc` reaches `_pt_alloc` only when the thread's page slab is empty.
+  v1.16.2 fixed the ones on the paths it touched (`patra_open`, ALTER ADD / DROP
+  COLUMN, `page_alloc`, `btree_create`, `wal_rollback`, `jsonl_append_obj`). The
+  allocation seam (architecture note 004) makes the rest testable statement by
+  statement: `test_alter_survives_refused_allocations` drains the slab and
+  refuses each allocation in turn, one forked child each — the same sweep over
+  INSERT, UPDATE, DELETE, CREATE INDEX and the query path is the test for the
+  rest. *Trigger*: the next change to any of those paths. *Medium; one
+  statement at a time.*
 - **The per-statement WAL probe costs one failed `open(2)`** — about 2.5 us
   where one clock read costs 1.3 us; +12 % on `select_point_10k`, +26 % on
   `dedup_insert_row_or_ignore_500`. It can be made free: a header flag that a
@@ -101,25 +132,11 @@ states its trigger:
   for inspection, as `patra_open` always has, and each statement re-checks it.
   *Trigger*: an operator who hits it. *Small (remember the refusal per handle,
   keyed on the file's identity).*
-- **A header re-read by a statement is never verified** (found by the 1.16.1
-  review). `patra_hdr_verify` runs only in `patra_open`; every statement
-  re-reads the header (`_pc_refresh` → `patra_hdr_read`) and trusts its table
-  count and directory. `src/file.cyr`'s comment that verification "runs on every
-  patra_hdr_read" is wrong. 1.16.1 bounded `tbl_find` to 63 slots, which covers
-  every lookup; `DROP TABLE`'s directory compaction still loops to the raw
-  count and faults on one past 63 (probed), and `TBL_NCOLS` / `TBL_ROOT` /
-  `TBL_SCHEMA` from a re-read directory are unchecked. Either verify on re-read
-  (a cost per statement, and a new `PATRA_ERR_PAGE` from any statement) or
-  bound each consumer. *Trigger*: the next change to the header or directory
-  code. *Small to medium.*
-- **Several public calls dereference a 0 handle**: `patra_begin`,
-  `patra_commit`, `patra_rollback`, `patra_flush`, `patra_set_sync_mode`,
-  `patra_get_sync_mode`, `patra_insert_row`, `patra_insert_row_or_ignore`
-  (`patra_begin(0)` exits 139, probed by the 1.16.1 review). `patra_exec`,
-  `patra_query`, `patra_prepare`, `patra_close` and the prepared-statement calls
-  already check. More visible since 1.16.1 made 0 the answer to an open before
-  `patra_init`, for a caller that also ignores it. *Trigger*: any change to
-  those entry points. *Small.*
+- **A file already holding a zero-column table does not open** (found at
+  v1.16.2). `CREATE TABLE t ()` is refused since 1.16.2, but a file an older
+  binary wrote one into fails `patra_hdr_verify` at `patra_open`. Nothing in
+  the tree creates one. A repair path would let `patra_open` drop such an entry
+  under `LOCK_EX`. *Trigger*: a consumer with such a file. *Small.*
 
 ### To file upstream (cyrius)
 
@@ -138,7 +155,7 @@ The `fl_alloc` defect filed by kybernet that reached patra (a refused large
 mapping faulted at address -12) was fixed in cyrius **6.6.7**: `fl_alloc`
 returns 0 (`lib/freelist.cyr`, `blk <= 0`).
 
-**Two requests remain written up, not filed:**
+**Three requests remain written up, not filed:**
 
 1. **`xfdatasync(fd)` in `lib/io.cyr`** — `sys_fdatasync` on Linux / macOS,
    `sys_sync` on agnos, the `FlushFileBuffers` route on Windows. patra carries
@@ -151,6 +168,14 @@ returns 0 (`lib/freelist.cyr`, `blk <= 0`).
    only when their flock call succeeded. A crashed transaction's WAL is never
    replayed on Windows. This is the one remaining cyrius gap in patra's crash
    recovery.
+3. **`ENOTSUP` (and `ESPIPE`) in the errno tables** (written up at v1.16.2).
+   `jsonl_append` treats a sync that fails only because the fd has nothing to
+   sync as success. On Linux that is EINVAL, which the stdlib defines; on macOS
+   XNU answers a pipe or socket with ENOTSUP (45), which `lib/syscalls_macos.cyr`
+   lacks, so there a JSONL append to a pipe returns `PATRA_ERR_IO`. patra may
+   not copy the value in (CLAUDE.md). ESPIPE would let `_wal_hdr_verify` name
+   the FIFO case instead of inferring it from any failed seek. Windows: a
+   console handle's `FlushFileBuffers` fails too, and has no errno to test.
 
 ### Release tooling — one decision left
 
@@ -251,12 +276,13 @@ surface is intentionally small, and no new SQL surface is planned.
 **Primary target: Linux x86_64, the only one CI builds or runs.** Every other
 row below is a hand-run cross-build, and at most an emulated run. Each gap names
 what would close it; the Windows one is in *To file upstream*. Refreshed at
-v1.16.1 (cyrius 6.7.10): every build row re-run, all warning-free.
+v1.16.2 (cyrius 6.7.10): every build row re-run, all warning-free; the Windows
+open path run under wine.
 
 | Target | Built | Run | Flush | Writers serialized | WAL recovery (open and every statement) | `O_NOFOLLOW` |
 |---|---|---|---|---|---|---|
 | Linux x86_64 | CI | CI, full suite | fdatasync | yes (blocking `flock`) | yes | enforced |
-| Linux aarch64 | by hand | full suite, the no-`patra_init` test, 8/8 fuzz, 3/3 programs under `qemu-aarch64` (1.16.1) | fdatasync | yes | yes | enforced |
+| Linux aarch64 | by hand | full suite, the no-`patra_init` test, 8/8 fuzz, 3/3 programs under `qemu-aarch64` (1.16.2) | fdatasync | yes | yes | enforced |
 | macOS x86_64 / arm64 | by hand (`CYRIUS_MACHO=1` / `CYRIUS_MACHO_ARM=1` to `cycc` / `cycc_aarch64`) | **not run** | fdatasync (BSD 187) | yes (BSD `flock`) | yes | enforced |
 | agnos x86_64 | by hand (`--agnos`) | **not run** | whole-filesystem sync | yes on agnos ≥ 1.57.7 (`flock`#59 waits); ⚠ **no** before | yes | bridged to `AO_NOFOLLOW` (cyrius 6.6.4) |
 | Windows (PE) | by hand (`--win`) | **not run** | `FlushFileBuffers` (cyrius 6.6.9) | ⛔ **no** | ⛔ **never** | enforced (cyrius 6.6.9) |

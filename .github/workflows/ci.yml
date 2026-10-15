@@ -112,13 +112,15 @@ jobs:
       - name: Unit tests
         run: |
           set -o pipefail
-          cyrius test tests/tcyr/patra.tcyr 2>&1 | tee build/test.out
+          # --timeout: a regression that hangs (a FIFO at the WAL path did,
+          # before 1.16.2) fails the job instead of stalling it.
+          cyrius test --timeout 300 tests/tcyr/patra.tcyr 2>&1 | tee build/test.out
 
       - name: patra_open refuses before patra_init
         # Its own process: patra.tcyr's main calls patra_init, and nothing
         # un-runs it. Before 1.16.1 this exited 139 (SIGSEGV) at its first
         # patra_open.
-        run: cyrius test tests/tcyr/patra_uninit.tcyr
+        run: cyrius test --timeout 300 tests/tcyr/patra_uninit.tcyr
 
       - name: dist/patra.cyr compiles when included alone
         # A consumer that vendors the bundle writes `include "dist/patra.cyr"`
@@ -236,6 +238,54 @@ jobs:
             if [ -f "$doc" ]; then echo "  OK: $doc"; else echo "  MISSING: $doc"; MISSING=1; fi
           done
           exit $MISSING
+      - name: No dangling links between the repo's docs
+        # Every relative `](path)` link in a tracked .md file must name a file
+        # that exists (anchors are not checked: GitHub's heading slugs are not
+        # worth re-implementing). A link that leaves the repository — the two
+        # into the sibling yeo-cy-test checkout — cannot be resolved on a
+        # runner and is skipped. Four historical links are allowed to dangle —
+        # shipped CHANGELOG entries and frozen archive files that named a file
+        # before it moved; docs/doc-health.md records why they stay. Added at
+        # 1.16.2: the ledger had said a check was cheap and nothing ran one, and
+        # a fourth dead link had appeared since it was written.
+        run: |
+          python3 -I - <<'EOF'
+          import os, re, subprocess, sys
+          allowed = {
+              ("CHANGELOG.md", "docs/development/issues/2026-06-28-concurrent-read-table-lookup-cache-race.md"),
+              ("CHANGELOG.md", "docs/development/issues/2026-09-23-wal-recovery-runs-only-at-open.md"),
+              ("docs/development/issues/archive/2026-06-28-concurrent-read-table-lookup-cache-race.md", "../adr/0002-connection-per-thread-concurrency.md"),
+              ("docs/development/requests/archive/2026-06-18-yeo-cy-test-insert-returning-id.md", "../2026-06-09-yeo-cy-test-concurrent-readers.md"),
+          }
+          link = re.compile(r'\]\(([^)\s]+)\)')
+          files = subprocess.run(["git", "ls-files", "*.md"], capture_output=True, text=True, check=True).stdout.split()
+          bad = 0
+          for f in files:
+              fence = False
+              for n, line in enumerate(open(f, encoding="utf-8"), 1):
+                  if line.lstrip().startswith("```"):
+                      fence = not fence
+                      continue
+                  if fence:
+                      continue
+                  for m in link.finditer(line):
+                      t = m.group(1)
+                      if t.startswith(("http:", "https:", "mailto:", "#")):
+                          continue
+                      path = t.split("#", 1)[0]
+                      target = os.path.normpath(os.path.join(os.path.dirname(f), path))
+                      if target == ".." or target.startswith("../"):
+                          continue
+                      if os.path.exists(target):
+                          continue
+                      if (f, t.split("#", 1)[0]) in allowed:
+                          continue
+                      print(f"{f}:{n}: dangling link -> {t}")
+                      bad += 1
+          print(f"dangling links: {bad}")
+          sys.exit(1 if bad else 0)
+          EOF
+
       - name: Verify version consistency
         run: |
           FILE_VERSION=$(cat VERSION | tr -d '[:space:]')

@@ -22,15 +22,26 @@ fn jsonl_close(fd): i64 {
 
 # ── Append ────────────────────
 
-# Append raw data + newline with exclusive lock
+# Append raw data + newline with exclusive lock. PATRA_ERR_IO if any of the
+# three steps fails (1.16.2: a short write of the line, the newline's write and
+# the sync were unchecked, so a partial or unsynced record returned PATRA_OK).
+# An fd with nothing to sync — a pipe or terminal, where fdatasync is EINVAL —
+# is not a failure.
 fn jsonl_append(fd, data, len): i64 {
     patra_lock_ex(fd);
-    var w = sys_write(fd, data, len);
-    if (w < 0) { patra_unlock(fd); return PATRA_ERR_IO; }
-    sys_write(fd, "\n", 1);
-    _pt_fdatasync(fd);
+    var r = PATRA_OK;
+    if (sys_write(fd, data, len) != len) { r = PATRA_ERR_IO; }
+    if (r == PATRA_OK) {
+        if (sys_write(fd, "\n", 1) != 1) { r = PATRA_ERR_IO; }
+    }
+    if (r == PATRA_OK) {
+        var sr = _pt_fdatasync(fd);
+        if (sr < 0) {
+            if (_pt_sync_nothing_to_sync(sr) == 0) { r = PATRA_ERR_IO; }
+        }
+    }
     patra_unlock(fd);
-    return PATRA_OK;
+    return r;
 }
 
 # ── JSON string escaping ────────────────────
@@ -183,7 +194,10 @@ fn patra_json_build(buf, max, keys, vals, types, n): i64 {
 # values (ignored for INT). Added in 1.5.3 to close the embedded-NUL
 # truncation in `jsonl_append_obj` without breaking existing callers.
 fn jsonl_append_obj_lens(fd, keys, vals, vlens, types, n): i64 {
+    # 1.16.2: the allocation is checked, and jsonl_append's status returned
+    # (both were dropped — a refusal was a write through 0, a failed append 0).
     var buf = _pt_alloc(4096);
+    if (buf == 0) { return PATRA_ERR_IO; }
     var len = json_build_lens(buf, 4096, keys, vals, vlens, types, n);
     if (len < 0) {
         # Does not fit — emit nothing rather than a truncated, malformed line
@@ -191,9 +205,9 @@ fn jsonl_append_obj_lens(fd, keys, vals, vlens, types, n): i64 {
         _pt_free(buf);
         return PATRA_ERR_FULL;
     }
-    jsonl_append(fd, buf, len);
+    var r = jsonl_append(fd, buf, len);
     _pt_free(buf);
-    return 0;
+    return r;
 }
 
 # Legacy append — strlen-based. Kept for backward compatibility.

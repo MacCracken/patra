@@ -64,6 +64,9 @@ fn page_alloc(fd, hdr): i64 {
     var fh = load64(hdr + HDR_FREEHEAD);
     if (fh != 0) {
         var buf = _pt_alloc(PAGE_SIZE);
+        # 1.16.2: checked. A refused buffer made the read below fail, which was
+        # taken for a corrupt free list and dropped it — every page on it leaked.
+        if (buf == 0) { return 0; }
         # HDR_FREEHEAD is an on-disk pointer: bounds-check it like any other.
         var rr = page_read_checked(fd, hdr, fh, buf);
         if (rr == PATRA_OK) {
@@ -80,8 +83,9 @@ fn page_alloc(fd, hdr): i64 {
         store64(hdr + HDR_FREEHEAD, 0);
     }
     var num = load64(hdr + HDR_PGCOUNT);
-    store64(hdr + HDR_PGCOUNT, num + 1);
     var buf = _pt_alloc(PAGE_SIZE);
+    if (buf == 0) { return 0; }      # 1.16.2: checked (it was a memset through 0)
+    store64(hdr + HDR_PGCOUNT, num + 1);
     memset(buf, 0, PAGE_SIZE);
     # page_write can now fail (it refuses to modify a page whose WAL
     # before-image is not durable). Undo the extend and report failure rather

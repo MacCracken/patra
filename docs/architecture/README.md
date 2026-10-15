@@ -7,7 +7,7 @@ Architecture documents capture invariants, constraints, and quirks a reader **ca
 ## Conventions
 
 - **System overview**: [`overview.md`](overview.md) — module map, file format, page layouts, SQL pipeline. The whole-system view; the place to start.
-- **Numbered notes**: `NNN-kebab-case-title.md`, zero-padded to three digits. **Never renumber.** Numbered chronologically in order of discovery. (None yet — overview.md has carried the load.)
+- **Numbered notes**: `NNN-kebab-case-title.md`, zero-padded to three digits. **Never renumber.** Numbered chronologically in order of discovery.
 
 ## What belongs here
 
@@ -30,3 +30,4 @@ Architecture documents capture invariants, constraints, and quirks a reader **ca
 | 001 | [thread-local-scratch.md](001-thread-local-scratch.md) | `sql.cyr`, `file.cyr`, `lib.cyr` | P2: the per-thread TLS scratch model + the canonical 16-slot map (parse scratch 0–2, page slab 3–4); `thread_local_init` contract for main / worker / foreign threads. |
 | 002 | [flock-non-counted.md](002-flock-non-counted.md) | `file.cyr`, `lib.cyr` | P2: flock conflicts across fds/processes (connection-per-thread arbiter) and is NON-counted (a nested lock is a no-op, one `LOCK_UN` fully releases) — why reader/writer mutual exclusion lets the cache skip live-writer coherence. |
 | 003 | [page-cache-coherence.md](003-page-cache-coherence.md) | `pcache.cyr`, `page.cyr`, `lib.cyr` | P2: the opt-in page cache's coherence — invalidate-on-write (Variant I), the `HDR_COMMITGEN` gen gate, the publish-inside-`LOCK_EX` invariant, and the BYTES/TEXT lazy-read TOCTOU caveat (**closed in v1.12.8** — `_rs_materialize` snapshots under the flock; dated update in the note). |
+| 004 | [test-fault-seams.md](004-test-fault-seams.md) | `file.cyr`, `tests/tcyr/patra.tcyr` | v1.16.2: the test-only `_pt_sync_fail_*` / `_pt_alloc_fail_*` globals that make a sync or an allocation fail on demand — why they exist (no other way to reach the durability and refused-allocation paths), and the rules: never armed outside tests/, a countdown not a filter, not thread-safe, don't move the checks. |

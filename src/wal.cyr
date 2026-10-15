@@ -253,7 +253,7 @@ fn _wal_hash(pg, page_data, salt1, salt2): i64 {
 
 # Begin WAL logging for a transaction
 fn wal_start(db_fd, wal_path, dbid): i64 {
-    var wfd = file_open(wal_path, O_RDWR | O_CREAT | O_TRUNC | O_NOFOLLOW, 420);
+    var wfd = file_open(wal_path, O_RDWR | O_CREAT | O_TRUNC | O_NOFOLLOW | _wal_open_nb(), 420);
     # file_open (io): portable — bridges agnos's namelen + AO_* flag ABI. The
     # base flags were the x86_64 number 578 until 1.15.0, which on Darwin
     # decodes without O_TRUNC; see the note above _pt_file_create.
@@ -269,6 +269,12 @@ fn wal_start(db_fd, wal_path, dbid): i64 {
     # and the commit path's unlink then removed the symlink rather than the
     # victim, leaving the damage in place and the evidence gone.
     if (wfd < 0) { return PATRA_ERR_IO; }
+    # 1.16.2: a WAL must be a regular file. A FIFO at the path opens (O_RDWR,
+    # non-blocking) but cannot seek, and its records would only fill a pipe.
+    if (xlseek(wfd, 0, 0) < 0) {
+        sys_close(wfd);
+        return PATRA_ERR_IO;
+    }
 
     # 1.14.0: claim a slot keyed by this database's fd. A second transaction on
     # the SAME fd is a caller error (patra_begin already returns early when
@@ -325,7 +331,8 @@ fn wal_is_active(db_fd): i64 {
     return 0;
 }
 
-# Returns 1 if this database's WAL overflowed during the open transaction.
+# Nonzero if a write of the open transaction could not be logged: 1 when the
+# dedup list could not grow, 2 for an I/O or allocation failure (1.16.2).
 fn wal_overflowed(db_fd): i64 {
     var slot = _wal_find(db_fd);
     if (slot == 0) { return 0; }
@@ -341,7 +348,7 @@ fn wal_overflowed(db_fd): i64 {
 #
 # Bookkeeping (_wal_pages / _wal_nlog) is updated only AFTER the record is
 # durable, so a failed attempt never marks a page as logged.
-fn wal_log_page(db_fd, page_num): i64 {
+fn _wal_log_page_inner(db_fd, page_num): i64 {
     # No slot => no open transaction on this database. Auto-commit writes are
     # deliberately un-WAL'd (single statement, header fdatasync), so this is
     # the normal path, not an error.
@@ -378,6 +385,10 @@ fn wal_log_page(db_fd, page_num): i64 {
     }
 
     var buf = _pt_alloc(WAL_REC_SZ);
+    # 1.16.2: checked (it was a memset through 0). A refusal is a before-image
+    # that could not be logged, which page_write already handles: the page is
+    # not written.
+    if (buf == 0) { return PATRA_ERR_IO; }
     memset(buf, 0, WAL_REC_SZ);
     store64(buf, page_num);
     if (_pt_seek(db_fd, _wal_rec_offset(page_num)) < 0) {
@@ -411,6 +422,27 @@ fn wal_log_page(db_fd, page_num): i64 {
     return PATRA_OK;
 }
 
+# 1.16.2: every failure marks the transaction (WS_OVERFLOW: 1 when the dedup
+# list could not grow, 2 for an I/O or allocation failure), not only the
+# list's growth. page_write refuses the page whose before-image this could not
+# log, and its callers carry on — 30 of them discard the result — so the
+# transaction's pages are no longer the statement's intent; patra_commit rolls
+# such a transaction back rather than commit part of it. The refused page was
+# never written, so the rollback restores exactly the state before BEGIN.
+fn wal_log_page(db_fd, page_num): i64 {
+    var r = _wal_log_page_inner(db_fd, page_num);
+    if (r != PATRA_OK) {
+        var slot = _wal_find(db_fd);
+        if (slot != 0) {
+            if (load64(slot + WS_OVERFLOW) == 0) {
+                if (r == PATRA_ERR_FULL) { store64(slot + WS_OVERFLOW, 1); }
+                else { store64(slot + WS_OVERFLOW, 2); }
+            }
+        }
+    }
+    return r;
+}
+
 # Log the database header's before-image. The header (table directory,
 # TBL_NROWS/TBL_ROOT, free-list head) is written by patra_hdr_write on EVERY
 # statement, including statements inside a transaction — and it was never
@@ -424,27 +456,35 @@ fn wal_log_hdr(db_fd): i64 { return wal_log_page(db_fd, WAL_HDR_PAGE); }
 # writes were durable. A crash in that window lost committed data. Now we
 # fdatasync the DB fd before unlink, guaranteeing that by the time the WAL
 # disappears, the committed pages have reached disk.
+#
+# 1.16.2: returns PATRA_ERR_IO when the data pages' sync fails, with the slot,
+# its fd and the WAL left as they were. That sync was unchecked, and the WAL —
+# the transaction's only undo record — was unlinked over pages that may not
+# have reached the disk. patra_commit rolls the transaction back from it. The
+# WAL fd's own sync stays unchecked: wal_log_page synced every record as it was
+# written.
 fn wal_commit(db_fd, wal_path): i64 {
     var slot = _wal_find(db_fd);
-    if (slot == 0) { return 0; }
+    if (slot == 0) { return PATRA_OK; }
     var wfd = load64(slot + WS_WALFD);
+    if (db_fd >= 0) {
+        if (_pt_fdatasync(db_fd) < 0) { return PATRA_ERR_IO; }
+    }
     if (wfd >= 0) {
         _pt_fdatasync(wfd);
         sys_close(wfd);
     }
-    if (db_fd >= 0) {
-        _pt_fdatasync(db_fd);
-    }
     _wal_release(slot);
     xunlink(wal_path);
     _pt_sync_dir(wal_path);
-    return 0;
+    return PATRA_OK;
 }
 
-# Verify WAL header and load its salts into the module globals. Returns
-# PATRA_OK, or PATRA_ERR_MAGIC on bad magic / unsupported version / short read.
-# Verify the WAL header and load its salts. Returns the WAL version (>= 2), or
-# a negative PATRA_ERR_* on bad magic / unsupported version / short read.
+# Verify the WAL header and load its salts. Returns the WAL version (>= 2),
+# `0 - PATRA_ERR_MAGIC` on bad magic / unsupported version / a short file, or
+# `0 - PATRA_ERR_IO` when the header could not be read at all (a failed seek or
+# read, a refused allocation) — 1.16.2: those were MAGIC too, and both callers
+# act on MAGIC by giving the WAL up, which a read error is no reason to do.
 # Leaves the fd positioned at the first record, which differs by version: a
 # v2/v3 header is 24 bytes, v4 is 32.
 
@@ -452,10 +492,35 @@ fn wal_commit(db_fd, wal_path): i64 {
 # into `out` instead of into module globals, so two databases verifying their
 # own WALs concurrently cannot clobber each other's salts. WS_SALT1 / WS_SALT2 /
 # WS_DBID are laid out contiguously for exactly this call.
+# Did a read fail because the path is not a file at all? A directory at the
+# WAL path opens read-only on Linux and macOS, and its read fails with EISDIR.
+# That is no WAL — refused, as a bad header is — not an I/O failure that would
+# fail every statement until an operator removes it (1.16.2 review). EISDIR
+# comes from the stdlib's errno table, which those targets define; on Windows
+# such an open fails before any read.
+fn _wal_read_not_a_file(nr): i64 {
+    #ifdef CYRIUS_TARGET_LINUX
+    if (nr == 0 - EISDIR) { return 1; }
+    #endif
+    #ifdef CYRIUS_TARGET_MACOS
+    if (nr == 0 - EISDIR) { return 1; }
+    #endif
+    return 0;
+}
+
 fn _wal_hdr_verify(fd, out): i64 {
-    if (xlseek(fd, 0, 0) < 0) { return 0 - PATRA_ERR_IO; }
+    # A descriptor that cannot seek to 0 is not a regular file — a FIFO (ESPIPE)
+    # — so this path holds no WAL, which wal_start only ever writes as a regular
+    # file: refused, like a directory below, not an I/O failure.
+    if (xlseek(fd, 0, 0) < 0) { return 0 - PATRA_ERR_MAGIC; }
     var hdr = _pt_alloc(WAL_HDR_SZ);
+    if (hdr == 0) { return 0 - PATRA_ERR_IO; }
     var nr = sys_read(fd, hdr, WAL_HDR_SZ_V3);
+    if (nr < 0) {
+        _pt_free(hdr);
+        if (_wal_read_not_a_file(nr) != 0) { return 0 - PATRA_ERR_MAGIC; }
+        return 0 - PATRA_ERR_IO;
+    }
     if (nr != WAL_HDR_SZ_V3) { _pt_free(hdr); return 0 - PATRA_ERR_MAGIC; }
     if (load32(hdr) != WAL_MAGIC) { _pt_free(hdr); return 0 - PATRA_ERR_MAGIC; }
     var wv = load32(hdr + 4);
@@ -466,6 +531,7 @@ fn _wal_hdr_verify(fd, out): i64 {
     store64(out + 16, 0);
     if (wv >= 4) {
         var nr2 = sys_read(fd, hdr + 24, 8);
+        if (nr2 < 0) { _pt_free(hdr); return 0 - PATRA_ERR_IO; }
         if (nr2 != 8) { _pt_free(hdr); return 0 - PATRA_ERR_MAGIC; }
         store64(out + 16, load64(hdr + 24));
     }
@@ -481,14 +547,27 @@ fn wal_rollback(db_fd, wal_path): i64 {
     if (slot == 0) { return 0; }
     var wfd = load64(slot + WS_WALFD);
     if (wfd < 0) { return 0; }
-    if (_wal_hdr_verify(wfd, slot + WS_SALT1) < 0) {
+    var hv = _wal_hdr_verify(wfd, slot + WS_SALT1);
+    if (hv == 0 - PATRA_ERR_MAGIC) {
         sys_close(wfd);
         _wal_release(slot);
         xunlink(wal_path);
         _pt_sync_dir(wal_path);
         return PATRA_ERR_MAGIC;
     }
-    var buf = _pt_alloc(WAL_REC_SZ);
+    # 1.16.2: a header that could not be READ, and a refused record buffer, keep
+    # the WAL. Both were taken for a bad WAL or a clean end of log — the buffer
+    # unchecked, its first read failed with EFAULT — and the WAL was unlinked
+    # with nothing restored, so patra_rollback left the transaction's pages in
+    # place and reported PATRA_ERR_MAGIC, or PATRA_OK.
+    var buf = 0;
+    if (hv >= 0) { buf = _pt_alloc(WAL_REC_SZ); }
+    if (buf == 0) {
+        sys_close(wfd);
+        _wal_release(slot);
+        _pt_err("patra: WAL rollback could not read the WAL — WAL kept for recovery");
+        return PATRA_ERR_IO;
+    }
     var done = 0;
     # 1.14.0: a restore write that fails or comes up short means the database
     # is left PART-ROLLED-BACK. Both the seek and the write were unchecked, and
@@ -498,6 +577,8 @@ fn wal_rollback(db_fd, wal_path): i64 {
     var failed = 0;
     while (done == 0) {
         var nr = sys_read(wfd, buf, WAL_REC_SZ);
+        # 1.16.2: a read ERROR is a failed restore, not the end of the log.
+        if (nr < 0) { failed = 1; done = 1; continue; }
         if (nr != WAL_REC_SZ) { done = 1; continue; }
         var pg = load64(buf);
         var want = load64(buf + 8 + PAGE_SIZE);
@@ -507,7 +588,9 @@ fn wal_rollback(db_fd, wal_path): i64 {
         if (sys_write(db_fd, buf + 8, PAGE_SIZE) != PAGE_SIZE) { failed = 1; done = 1; continue; }
     }
     _pt_free(buf);
-    _pt_fdatasync(db_fd);
+    # 1.16.2: a failed sync leaves the restore as incomplete as a failed write
+    # does — the before-images may not be on disk — so the WAL is kept.
+    if (_pt_fdatasync(db_fd) < 0) { failed = 1; }
     sys_close(wfd);
     var overflowed = load64(slot + WS_OVERFLOW);
     _wal_release(slot);
@@ -548,8 +631,24 @@ enum WalRecover {
 # asks first, and escalates to LOCK_EX only when there is something to replay.
 # Same O_NOFOLLOW open as wal_recover, so a symlink planted at the path reads
 # as "no WAL" here exactly as it does there.
+# O_NONBLOCK for every open of the WAL path, where a FIFO can stand at it
+# (Linux, macOS; the stdlib defines it there). A regular file ignores it. A FIFO
+# opened read-only without it waited for a writer that never came — inside
+# patra_open's LOCK_EX, so every later opener hung too — and opened read-write,
+# wal_start's records filled the pipe and then blocked. With it a FIFO reads as
+# an empty, refused WAL, and a full pipe is a write error (1.16.2 review).
+fn _wal_open_nb(): i64 {
+    #ifdef CYRIUS_TARGET_LINUX
+    return O_NONBLOCK;
+    #endif
+    #ifdef CYRIUS_TARGET_MACOS
+    return O_NONBLOCK;
+    #endif
+    return 0;
+}
+
 fn wal_exists(wal_path): i64 {
-    var wfd = file_open(wal_path, O_RDONLY | O_NOFOLLOW, 0);
+    var wfd = file_open(wal_path, O_RDONLY | O_NOFOLLOW | _wal_open_nb(), 0);
     if (wfd < 0) { return 0; }
     sys_close(wfd);
     return 1;
@@ -589,7 +688,7 @@ fn wal_recover(db_fd, wal_path, dbid, pgcount): i64 {
     # feeds attacker-chosen pages to the replay and deletes the link. The
     # v4 dbid binding is the real defence against a foreign WAL; this closes
     # the path-level half.
-    var wfd = file_open(wal_path, O_RDONLY | O_NOFOLLOW, 0);
+    var wfd = file_open(wal_path, O_RDONLY | O_NOFOLLOW | _wal_open_nb(), 0);
     if (wfd < 0) { return WAL_RECOVER_NONE; }
     # 1.14.0: recovery has no transaction slot, so it verifies into its own
     # 3-word scratch (salt1, salt2, dbid) rather than into module globals.
@@ -599,6 +698,14 @@ fn wal_recover(db_fd, wal_path, dbid, pgcount): i64 {
     var vh = _pt_alloc(24);
     if (vh == 0) { sys_close(wfd); return 0 - 1; }
     var wv = _wal_hdr_verify(wfd, vh);
+    # 1.16.2: a header that could not be read is a failed recovery (WAL kept,
+    # the statement fails and the next one retries), not a refused WAL, which a
+    # statement would read as leave to write over the dead transaction's pages.
+    if (wv == 0 - PATRA_ERR_IO) {
+        _pt_free(vh);
+        sys_close(wfd);
+        return 0 - 1;
+    }
     if (wv < 0) {
         # Bad magic / stale format: refuse to replay. Leave the file on disk
         # so an operator can inspect it; we will not silently corrupt the DB.
@@ -629,6 +736,8 @@ fn wal_recover(db_fd, wal_path, dbid, pgcount): i64 {
     var failed = 0;
     while (done == 0) {
         var nr = sys_read(wfd, buf, WAL_REC_SZ);
+        # 1.16.2: a read ERROR is a failed restore, not the end of the log.
+        if (nr < 0) { failed = 1; done = 1; continue; }
         if (nr != WAL_REC_SZ) { done = 1; continue; }
         var pg = load64(buf);
         var want = load64(buf + 8 + PAGE_SIZE);
@@ -647,7 +756,8 @@ fn wal_recover(db_fd, wal_path, dbid, pgcount): i64 {
     }
     _pt_free(buf);
     _pt_free(vh);
-    _pt_fdatasync(db_fd);
+    # 1.16.2: as in wal_rollback, a failed sync is an incomplete replay.
+    if (_pt_fdatasync(db_fd) < 0) { failed = 1; }
     sys_close(wfd);
     # Same rule as wal_rollback (1.14.0): an incomplete replay must not unlink
     # the WAL, or the pages it still had to undo are unrecoverable. patra_open

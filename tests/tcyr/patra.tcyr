@@ -6473,6 +6473,391 @@ fn test_no_mutex_flock_deadlock() {
     xunlink(_dl_path);
 }
 
+# -- 1.16.2: a failed fdatasync is reported, not taken for durability --
+#
+# Several sync calls discarded their result, so a failed sync was reported as a
+# durable statement, flush or commit. src/file.cyr's test-only seam fails the
+# sync of one fd on demand (`_pt_sync_fail_*`); /dev/null, which takes a seek
+# and a write but refuses fdatasync with EINVAL, covers the bare helpers.
+fn _sync_fail(fd, skip): i64 {
+    _pt_sync_fail_fd = fd;
+    _pt_sync_fail_skip = skip;
+    _pt_sync_fail_on = 1;
+    return 0;
+}
+
+fn _sync_ok(): i64 {
+    _pt_sync_fail_on = 0;
+    return 0;
+}
+
+fn test_failed_sync_reported() {
+    test_group("a failed fdatasync is reported, not taken for durability (1.16.2)");
+    var nul = file_open("/dev/null", O_RDWR, 0);
+    assert(nul >= 0, "open /dev/null");
+    var h = fl_alloc(PAGE_SIZE);
+    patra_hdr_init(h);
+    assert_eq(patra_hdr_write(nul, h), PATRA_ERR_IO, "patra_hdr_write: a refused sync is an error");
+    fl_free(h);
+    # /dev/null refuses fdatasync with EINVAL — nothing to sync, as for a pipe
+    # or a terminal — which is not a failure; a failed sync is.
+    assert_eq(jsonl_append(nul, "{}", 2), PATRA_OK, "jsonl_append: an fd with nothing to sync is fine");
+    _sync_fail(nul, 0);
+    assert_eq(jsonl_append(nul, "{}", 2), PATRA_ERR_IO, "jsonl_append: a failed sync is an error");
+    var jk = fl_alloc(8);
+    var jv = fl_alloc(8);
+    var jt = fl_alloc(8);
+    store64(jk, "n");
+    store64(jv, 1);
+    store64(jt, COL_INT);
+    assert_eq(jsonl_append_obj(nul, jk, jv, jt, 1), PATRA_ERR_IO, "jsonl_append_obj passes it on");
+    _sync_ok();
+    fl_free(jk);
+    fl_free(jv);
+    fl_free(jt);
+
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE s (a INT)");
+    _sync_fail(_db_fd(db), 0);
+    assert_eq(patra_exec(db, "INSERT INTO s VALUES (1)"), PATRA_ERR_IO, "autocommit: the statement reports it");
+    _sync_ok();
+    assert_eq(_wr_n(db, "SELECT COUNT(*) FROM s"), 1, "autocommit: applied (there is no undo), not known durable");
+    assert_eq(patra_exec(db, "INSERT INTO s VALUES (2)"), PATRA_OK, "the next statement syncs its own write");
+    # Linux reports a writeback error once and marks the pages clean, so a
+    # later sync succeeds over the lost write: the handle remembers instead.
+    assert_eq(patra_flush(db), PATRA_ERR_IO, "the handle remembers the failure: patra_flush");
+    assert_eq(patra_close(db), PATRA_ERR_IO, "and patra_close");
+    db = patra_open(_tpath);
+    assert_eq(patra_flush(db), PATRA_OK, "reopening clears it");
+
+    # BATCH mode: the auto-flush every PATRA_BATCH_FLUSH_N writes, patra_flush,
+    # patra_set_sync_mode (which flushes first) and patra_close.
+    assert_eq(patra_set_sync_mode(db, PATRA_SYNC_BATCH), PATRA_OK, "batch mode on");
+    _sync_fail(_db_fd(db), 0);
+    var bi = 1;
+    while (bi < PATRA_BATCH_FLUSH_N) {
+        patra_exec(db, "INSERT INTO s VALUES (3)");
+        bi = bi + 1;
+    }
+    assert_eq(patra_exec(db, "INSERT INTO s VALUES (3)"), PATRA_ERR_IO, "batch: the auto-flush's failure is the statement's");
+    assert_eq(load64(db + DB_BATCH_PENDING), PATRA_BATCH_FLUSH_N, "and the writes stay pending");
+    assert_eq(patra_flush(db), PATRA_ERR_IO, "patra_flush reports it");
+    assert_eq(patra_set_sync_mode(db, PATRA_SYNC_FULL), PATRA_ERR_IO, "patra_set_sync_mode reports it");
+    assert_eq(patra_get_sync_mode(db), PATRA_SYNC_FULL, "and switches anyway (it kept BATCH for good)");
+    _sync_ok();
+    assert_eq(patra_flush(db), PATRA_ERR_IO, "a later flush still reports it (it said OK over lost writes)");
+    assert_eq(patra_close(db), PATRA_ERR_IO, "patra_close reports it");
+    db = patra_open(_tpath);
+    assert(db != 0, "the file reopens");
+    assert_eq(patra_set_sync_mode(db, PATRA_SYNC_BATCH), PATRA_OK, "batch mode on a fresh handle");
+    patra_exec(db, "INSERT INTO s VALUES (4)");
+    _sync_fail(_db_fd(db), 0);
+    assert_eq(patra_close(db), PATRA_ERR_IO, "patra_close reports a failed final flush");
+    _sync_ok();
+
+    # BATCH writes pending at BEGIN are synced by BEGIN: a sync failure there
+    # marks the handle, where before the COMMIT's failed sync swallowed it and
+    # a later flush returned 0 over those writes. (1.16.2 review)
+    db = patra_open(_tpath);
+    patra_set_sync_mode(db, PATRA_SYNC_BATCH);
+    patra_exec(db, "INSERT INTO s VALUES (5)");
+    _sync_fail(_db_fd(db), 0);
+    assert_eq(patra_begin(db), PATRA_OK, "BEGIN goes ahead");
+    patra_exec(db, "INSERT INTO s VALUES (6)");
+    assert_eq(patra_commit(db), PATRA_ERR_IO, "the COMMIT's sync fails too");
+    _sync_ok();
+    assert_eq(patra_flush(db), PATRA_ERR_IO, "and the earlier BATCH write's loss is still reported");
+    patra_close(db);
+
+    # Inside a transaction there is no BATCH auto-flush: its failure marked the
+    # handle for writes the rollback covers. (1.16.2 review)
+    db = patra_open(_tpath);
+    patra_set_sync_mode(db, PATRA_SYNC_BATCH);
+    patra_begin(db);
+    _sync_fail(_db_fd(db), 0);
+    var ti = 0;
+    var tbad = 0;
+    while (ti < PATRA_BATCH_FLUSH_N + 4) {
+        if (patra_exec(db, "INSERT INTO s VALUES (7)") != PATRA_OK) { tbad = tbad + 1; }
+        ti = ti + 1;
+    }
+    _sync_ok();
+    assert_eq(tbad, 0, "statements in a transaction never sync, so none fails");
+    assert_eq(patra_commit(db), PATRA_OK, "the COMMIT syncs");
+    assert_eq(patra_flush(db), PATRA_OK, "and the handle is clean");
+    patra_close(db);
+
+    db = patra_open(_tpath);
+    assert_eq(patra_close(db), PATRA_OK, "a clean close is PATRA_OK");
+
+    # COMMIT: the header's sync (skip 0) or wal_commit's data sync (skip 1)
+    # fails. The commit is refused and the transaction undone from its WAL.
+    # The seam keeps failing, so that rollback cannot sync either: it keeps
+    # the WAL, and the next statement replays it.
+    var skip = 0;
+    while (skip < 2) {
+        cleanup();
+        xunlink(_wpath());
+        db = patra_open(_tpath);
+        patra_exec(db, "CREATE TABLE c (a INT)");
+        patra_exec(db, "INSERT INTO c VALUES (1)");
+        patra_begin(db);
+        patra_exec(db, "INSERT INTO c VALUES (2)");
+        _sync_fail(_db_fd(db), skip);
+        assert_eq(patra_commit(db), PATRA_ERR_IO, "commit: a failed sync refuses the commit");
+        _sync_ok();
+        assert_eq(load64(db + DB_TX), 0, "commit: the transaction is over");
+        assert_eq(_lock_state(), 0, "commit: no lock is held");
+        assert_eq(wal_exists(_wpath()), 1, "commit: the WAL survives (it was unlinked)");
+        assert_eq(_wr_n(db, "SELECT COUNT(*) FROM c"), 1, "commit: the transaction was undone");
+        assert_eq(wal_exists(_wpath()), 0, "commit: the replay removed the WAL");
+        patra_close(db);
+        db = patra_open(_tpath);
+        assert_eq(_wr_n(db, "SELECT COUNT(*) FROM c"), 1, "commit: a fresh open agrees");
+        patra_close(db);
+        skip = skip + 1;
+    }
+
+    # ROLLBACK whose restore cannot be synced: reported, and the WAL kept.
+    db = patra_open(_tpath);
+    patra_begin(db);
+    patra_exec(db, "INSERT INTO c VALUES (3)");
+    _sync_fail(_db_fd(db), 0);
+    assert_eq(patra_rollback(db), PATRA_ERR_IO, "rollback: a failed sync is reported");
+    _sync_ok();
+    assert_eq(wal_exists(_wpath()), 1, "rollback: the WAL is kept");
+    assert_eq(_wr_n(db, "SELECT COUNT(*) FROM c"), 1, "rollback: the next statement finishes it");
+    assert_eq(wal_exists(_wpath()), 0, "rollback: and removes the WAL");
+    patra_close(db);
+
+    # Recovery of a crashed writer's WAL whose replay cannot be synced.
+    #ifdef CYRIUS_TARGET_LINUX
+    var a = _wr_setup();
+    assert_eq(_wr_crash(), 1, "recovery: B left its WAL");
+    _sync_fail(_db_fd(a), 0);
+    assert_eq(_wr_n(a, "SELECT COUNT(*) FROM t"), 0 - 1, "recovery: a failed sync fails the statement");
+    _sync_ok();
+    assert_eq(wal_exists(_wpath()), 1, "recovery: the WAL is kept (it was unlinked)");
+    assert_eq(_wr_n(a, "SELECT COUNT(*) FROM t"), 1, "recovery: the next statement replays it");
+    assert_eq(wal_exists(_wpath()), 0, "recovery: and removes it");
+    patra_close(a);
+    #endif
+    cleanup();
+    xunlink(_wpath());
+    sys_close(nul);
+}
+
+# -- 1.16.2: a 0 handle or result set, or an out-of-range cell, is refused --
+#
+# patra_open returns 0 on failure (and since 1.16.1 before patra_init) and
+# patra_query returns 0 for a failed query, but eight handle calls and every
+# result accessor dereferenced what they were given: patra_begin(0) exited 139,
+# as did patra_result_count(0) after a failed query. A row or column past the
+# result set read past its buffer. Now: a statement-style call returns
+# PATRA_ERR_IO for a 0 handle (as patra_exec does), a value accessor its "none"
+# value (0, or -1 where -1 already meant "not that type"), and
+# patra_result_read_bytes / _read_text PATRA_ERR_PARAM.
+fn test_zero_handles_and_cells() {
+    test_group("a 0 handle or result set, or an out-of-range cell, is refused (1.16.2)");
+    assert_eq(patra_begin(0), PATRA_ERR_IO, "begin(0)");
+    assert_eq(patra_commit(0), PATRA_ERR_IO, "commit(0)");
+    assert_eq(patra_rollback(0), PATRA_ERR_IO, "rollback(0)");
+    assert_eq(patra_flush(0), PATRA_ERR_IO, "flush(0)");
+    assert_eq(patra_set_sync_mode(0, PATRA_SYNC_BATCH), PATRA_ERR_IO, "set_sync_mode(0)");
+    assert_eq(patra_get_sync_mode(0), PATRA_SYNC_FULL, "get_sync_mode(0) is the default");
+    assert_eq(patra_insert_row(0, "t", 1, 1, 0, 0, 0, 0, 0, 0), PATRA_ERR_IO, "insert_row(0)");
+    assert_eq(patra_insert_row_or_ignore(0, "t", 1, 1, 0, 0, 0, 0, 0, 0), PATRA_ERR_IO, "insert_row_or_ignore(0)");
+
+    var buf = fl_alloc(64);
+    assert_eq(patra_result_count(0), 0, "result_count(0)");
+    assert_eq(patra_result_cols(0), 0, "result_cols(0)");
+    assert_eq(patra_result_get_int(0, 0, 0), 0, "get_int(0)");
+    assert_eq(patra_result_get_str(0, 0, 0), 0, "get_str(0)");
+    assert_eq(patra_result_get_str_len(0, 0, 0), 0 - 1, "get_str_len(0)");
+    assert_eq(patra_result_col_name(0, 0), 0, "col_name(0)");
+    assert_eq(patra_result_col_type(0, 0), 0 - 1, "col_type(0)");
+    assert_eq(patra_result_get_bytes_len(0, 0, 0), 0 - 1, "get_bytes_len(0)");
+    assert_eq(patra_result_get_text_len(0, 0, 0), 0 - 1, "get_text_len(0)");
+    assert_eq(patra_result_read_bytes(0, 0, 0, 0, buf), PATRA_ERR_PARAM, "read_bytes(0)");
+    assert_eq(patra_result_read_text(0, 0, 0, 0, buf), PATRA_ERR_PARAM, "read_text(0)");
+    assert_eq(patra_result_free(0), 0, "result_free(0)");
+
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE cz (a INT, s STR, x TEXT)");
+    patra_exec(db, "INSERT INTO cz VALUES (7, 'seven', 'text')");
+    var rs = patra_query(db, "SELECT * FROM cz");
+    assert_eq(patra_result_count(rs), 1, "one row");
+    assert_eq(patra_result_get_int(rs, 0, 0), 7, "an in-range cell still reads");
+    assert_eq(patra_result_get_str_len(rs, 0, 1), 5, "an in-range STR still reads");
+    assert_eq(patra_result_get_text_len(rs, 0, 2), 4, "an in-range TEXT still reads");
+    assert_eq(patra_result_get_int(rs, 1, 0), 0, "row == nrows");
+    assert_eq(patra_result_get_int(rs, 0 - 1, 0), 0, "row < 0");
+    assert_eq(patra_result_get_int(rs, 0, 3), 0, "col == ncols");
+    assert_eq(patra_result_get_int(rs, 0, 0 - 1), 0, "col < 0");
+    assert_eq(patra_result_get_str(rs, 0, 9), 0, "get_str past the columns");
+    assert_eq(patra_result_get_str_len(rs, 2, 1), 0 - 1, "get_str_len past the rows");
+    assert_eq(patra_result_col_name(rs, 3), 0, "col_name past the columns");
+    assert_eq(patra_result_col_type(rs, 0 - 1), 0 - 1, "col_type before the columns");
+    assert_eq(patra_result_get_bytes_len(rs, 0, 5), 0 - 1, "get_bytes_len past the columns");
+    assert_eq(patra_result_get_text_len(rs, 1, 2), 0 - 1, "get_text_len past the rows");
+    assert_eq(patra_result_read_text(db, rs, 1, 2, buf), PATRA_ERR_PARAM, "read_text past the rows");
+    assert_eq(patra_result_read_bytes(db, rs, 0, 3, buf), PATRA_ERR_PARAM, "read_bytes past the columns");
+    patra_result_free(rs);
+
+    rs = patra_query(db, "SELECT * FROM cz WHERE a = 99");
+    assert_eq(patra_result_count(rs), 0, "an empty result");
+    assert_eq(patra_result_get_int(rs, 0, 0), 0, "row 0 of an empty result");
+    patra_result_free(rs);
+    fl_free(buf);
+    patra_close(db);
+    cleanup();
+}
+
+# -- 1.16.2: a row count that drifted low does not go negative --
+#
+# After a power loss in autocommit a data page can reach the disk while the
+# header that counts it does not, so TBL_NROWS reads low. DELETE then wrote
+# `count - deleted` below zero, and since 1.16.2 verifies the header on every
+# statement, a negative count failed every statement and the next open.
+# (found by the 1.16.2 review)
+fn test_row_count_never_negative() {
+    test_group("a row count that drifted low does not go negative (1.16.2)");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE n (a INT)");
+    patra_exec(db, "INSERT INTO n VALUES (1)");
+    patra_exec(db, "INSERT INTO n VALUES (2)");
+    var fd = _db_fd(db);
+    var h = fl_alloc(PAGE_SIZE);
+    patra_hdr_read(fd, h);
+    store64(h + HDR_TBLDIR + TBL_NROWS, 1);
+    patra_hdr_write(fd, h);
+    assert_eq(patra_exec(db, "DELETE FROM n"), PATRA_OK, "DELETE of more rows than counted");
+    patra_hdr_read(fd, h);
+    assert_eq(load64(h + HDR_TBLDIR + TBL_NROWS), 0, "leaves the count at 0, not -1");
+    fl_free(h);
+    assert_eq(patra_exec(db, "INSERT INTO n VALUES (3)"), PATRA_OK, "the next statement runs");
+    patra_close(db);
+    db = patra_open(_tpath);
+    assert(db != 0, "and the file reopens");
+    patra_close(db);
+    cleanup();
+}
+
+# A count that drifted low must not decide how many rows exist. SELECT * sized
+# its result from TBL_NROWS and stopped there, silently short; ALTER ADD / DROP
+# COLUMN staged only that many rows, freed the chain and put back the rest's
+# absence — the newest, acknowledged rows lost, with PATRA_OK. Both now count
+# the chain. (1.16.2 review)
+fn _drift_set(db, n): i64 {
+    var h = fl_alloc(PAGE_SIZE);
+    patra_hdr_read(_db_fd(db), h);
+    store64(h + HDR_TBLDIR + TBL_NROWS, n);
+    patra_hdr_write(_db_fd(db), h);
+    fl_free(h);
+    return 0;
+}
+
+fn test_row_count_drift_low() {
+    test_group("a row count that drifted low decides nothing (1.16.2)");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE g (a INT)");
+    patra_exec(db, "INSERT INTO g VALUES (1)");
+    patra_exec(db, "INSERT INTO g VALUES (2)");
+    patra_exec(db, "INSERT INTO g VALUES (3)");
+    _drift_set(db, 1);
+    var rs = patra_query(db, "SELECT * FROM g");
+    assert_eq(patra_result_count(rs), 3, "SELECT * returns every row (it returned 1)");
+    patra_result_free(rs);
+    rs = patra_query(db, "SELECT a FROM g WHERE a > 1");
+    assert_eq(patra_result_count(rs), 2, "a filtered scan too");
+    patra_result_free(rs);
+    assert_eq(_wr_n(db, "SELECT SUM(a) FROM g"), 6, "and agrees with the aggregate");
+    assert_eq(patra_exec(db, "ALTER TABLE g ADD COLUMN b INT"), PATRA_OK, "ALTER ADD COLUMN");
+    assert_eq(_wr_n(db, "SELECT SUM(a) FROM g"), 6, "keeps every row (it kept 1)");
+    _drift_set(db, 1);
+    assert_eq(patra_exec(db, "ALTER TABLE g DROP COLUMN b"), PATRA_OK, "ALTER DROP COLUMN");
+    assert_eq(_wr_n(db, "SELECT SUM(a) FROM g"), 6, "keeps every row too");
+    patra_close(db);
+    db = patra_open(_tpath);
+    assert_eq(_wr_n(db, "SELECT COUNT(*) FROM g"), 3, "and a fresh open agrees");
+    patra_close(db);
+    cleanup();
+}
+
+# -- 1.16.2: RENAME COLUMN and VACUUM commit like every other write --
+#
+# Both skipped _db_hdr_commit, so in FULL mode neither synced, and neither moved
+# HDR_COMMITGEN — another process's page cache kept the old schema page after
+# a RENAME COLUMN, resolved the old name, and wrote that page back on its next
+# UPDATE, losing the rename. (found by the 1.16.2 review)
+fn test_rename_column_and_vacuum_commit() {
+    test_group("RENAME COLUMN and VACUUM commit like every other write (1.16.2)");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE v (a INT, b INT)");
+    patra_exec(db, "CREATE INDEX ON v (a)");
+    patra_exec(db, "INSERT INTO v VALUES (1, 1)");
+    patra_exec(db, "INSERT INTO v VALUES (2, 2)");
+    patra_exec(db, "DELETE FROM v WHERE a = 1");
+    var g0 = _wr_disk_gen();
+    assert_eq(patra_exec(db, "ALTER TABLE v RENAME COLUMN b TO c"), PATRA_OK, "RENAME COLUMN");
+    var g1 = _wr_disk_gen();
+    assert(g1 > g0, "RENAME COLUMN moves HDR_COMMITGEN, so other processes' caches drop the old schema page");
+    assert_eq(patra_exec(db, "VACUUM v"), PATRA_OK, "VACUUM");
+    assert(_wr_disk_gen() > g1, "VACUUM moves HDR_COMMITGEN");
+    _sync_fail(_db_fd(db), 0);
+    assert_eq(patra_exec(db, "ALTER TABLE v RENAME COLUMN c TO d"), PATRA_ERR_IO, "RENAME COLUMN's sync is checked");
+    assert_eq(patra_exec(db, "VACUUM v"), PATRA_ERR_IO, "and VACUUM's");
+    _sync_ok();
+    # Inside a transaction a refused write of the schema page (its before-image
+    # could not be logged) is the statement's error, not a rename that never
+    # happened reported as done.
+    patra_close(db);
+    db = patra_open(_tpath);
+    patra_begin(db);
+    _alloc_fail_once(0);
+    var rr = patra_exec(db, "ALTER TABLE v RENAME COLUMN d TO e");
+    _alloc_ok();
+    assert(rr != PATRA_OK, "a RENAME COLUMN whose page could not be written fails");
+    assert(patra_commit(db) != PATRA_OK, "and its transaction cannot commit");
+    patra_close(db);
+    db = patra_open(_tpath);
+    assert_eq(_wr_n(db, "SELECT COUNT(*) FROM v WHERE d = 2"), 1, "the applied rename reads back");
+    patra_close(db);
+    cleanup();
+}
+
+# -- 1.16.2: CREATE TABLE needs a column, and distinct column names --
+#
+# `CREATE TABLE t ()` returned PATRA_OK and wrote a directory entry with no
+# columns, which patra_hdr_verify rejects: the next patra_open of the file
+# failed ("invalid magic"), so one legal-looking statement made the whole
+# database unopenable. And `CREATE TABLE t (a INT, a INT)` was accepted, after
+# which `SELECT a` read the second column, while ADD COLUMN / RENAME COLUMN
+# already refused a duplicate name with PATRA_ERR_EXISTS.
+fn test_create_column_list_checks() {
+    test_group("CREATE TABLE needs a column, and distinct column names (1.16.2)");
+    cleanup();
+    var db = patra_open(_tpath);
+    assert_eq(patra_exec(db, "CREATE TABLE z ()"), PATRA_ERR_SYNTAX, "no columns: syntax error");
+    assert_eq(tbl_create(_db_fd(db), _db_hdr(db), "z", 1, 0, 0, 0, 0), PATRA_ERR_COLCOUNT,
+      "tbl_create with no columns: COLCOUNT");
+    assert_eq(patra_exec(db, "CREATE TABLE d (a INT, a INT)"), PATRA_ERR_EXISTS, "a duplicate column: EXISTS");
+    assert_eq(patra_exec(db, "CREATE TABLE d (a INT, b STR, a TEXT)"), PATRA_ERR_EXISTS, "a duplicate of another type: EXISTS");
+    assert_eq(patra_exec(db, "CREATE TABLE d (a INT, A INT)"), PATRA_OK, "names are case-sensitive, as lookups are");
+    assert_eq(load64(_db_hdr(db) + HDR_TBLCOUNT), 1, "only the valid CREATE took a directory entry");
+    patra_close(db);
+    db = patra_open(_tpath);
+    assert(db != 0, "the file still opens");
+    assert_eq(patra_exec(db, "INSERT INTO d VALUES (1, 2)"), PATRA_OK, "and works");
+    patra_close(db);
+    cleanup();
+}
+
 # -- 1.16.1: CREATE TABLE of an existing name is EXISTS at any table count --
 #
 # tbl_create tested the 63-table cap before the name, so in a full file
@@ -6512,28 +6897,68 @@ fn test_create_exists_at_table_cap() {
 
 # Moving the cap below the name put tbl_find ahead of every check on
 # HDR_TBLCOUNT, which each statement re-reads from disk and only patra_open
-# verifies. With a count written after the open (another process, corruption),
+# verified. With a count written after the open (another process, corruption),
 # CREATE TABLE walked past the header page and died with SIGBUS, where 1.16.0's
-# cap-first order returned PATRA_ERR_FULL. tbl_find now scans at most the 63
-# slots that exist. Found by the 1.16.1 review.
+# cap-first order returned PATRA_ERR_FULL. 1.16.1 bounded tbl_find to the 63
+# slots that exist (found by the 1.16.1 review). 1.16.2 verifies the header on
+# every re-read, so such a file fails each statement with PATRA_ERR_PAGE —
+# DROP TABLE included, which walked its directory compaction to the raw count —
+# and a corrupt directory entry is refused the same way. The tbl_find bound
+# stays, and is checked directly.
 fn test_create_with_corrupt_table_count() {
-    test_group("CREATE TABLE with an unverified on-disk table count (1.16.1)");
+    test_group("statements on an unverified on-disk header (1.16.1, 1.16.2)");
     cleanup();
     var db = patra_open(_tpath);
     assert_eq(patra_exec(db, "CREATE TABLE t (a INT)"), PATRA_OK, "create t");
+    assert_eq(patra_exec(db, "INSERT INTO t VALUES (1)"), PATRA_OK, "insert");
     var fd = _db_fd(db);
     var h = fl_alloc(PAGE_SIZE);
     patra_hdr_read(fd, h);
     store64(h + HDR_TBLCOUNT, 1000000000);
     patra_hdr_write(fd, h);
-    assert_eq(patra_exec(db, "CREATE TABLE zz (a INT)"), PATRA_ERR_FULL, "a count past the cap is FULL, not a fault");
-    assert_eq(patra_exec(db, "CREATE TABLE t (a INT)"), PATRA_ERR_EXISTS, "the table in slot 0 is still found");
+    assert_eq(tbl_find(h, "nope", 4), 0 - 1, "tbl_find stops at the 63 slots");
+    assert_eq(tbl_find(h, "t", 1), 0, "and still finds slot 0");
+    assert_eq(patra_exec(db, "CREATE TABLE zz (a INT)"), PATRA_ERR_PAGE, "CREATE refuses the header");
+    assert_eq(_lock_state(), 0, "a refused writer releases its lock");
+    assert_eq(patra_exec(db, "INSERT INTO nope VALUES (2)"), PATRA_ERR_PAGE, "INSERT refuses it (1.16.0: SIGBUS)");
+    assert_eq(patra_exec(db, "DROP TABLE t"), PATRA_ERR_PAGE, "DROP TABLE refuses it (1.16.1: a fault)");
+    assert_eq(patra_query(db, "SELECT * FROM t"), 0, "a query returns 0");
+    assert_eq(_lock_state(), 0, "a refused reader releases its lock");
+    assert_eq(patra_begin(db), PATRA_ERR_PAGE, "BEGIN refuses it");
+    assert_eq(_lock_state(), 0, "a refused BEGIN releases its lock");
     patra_hdr_read(fd, h);
-    assert_eq(load64(h + HDR_TBLCOUNT), 1000000000, "the refused CREATEs wrote nothing");
+    assert_eq(load64(h + HDR_TBLCOUNT), 1000000000, "the refused statements wrote nothing");
+
+    # patra_open judges the header too — under its lock, after recovery — and
+    # refuses one that fails with no WAL to repair it. (1.16.2 review: nothing
+    # tested the open-time check.)
+    patra_close(db);
+    db = patra_open(_tpath);
+    assert_eq(db, 0, "a fresh open refuses the header");
+    # Restore the count through a raw descriptor, and reopen.
+    fd = _pt_file_open(_tpath);
     store64(h + HDR_TBLCOUNT, 1);
+    patra_hdr_write(fd, h);
+    sys_close(fd);
+    db = patra_open(_tpath);
+    assert(db != 0, "restored, it opens");
+    fd = _db_fd(db);
+
+    # A corrupt directory entry: a column count no schema page can hold.
+    store64(h + HDR_TBLCOUNT, 1);
+    var ncols0 = load64(h + HDR_TBLDIR + TBL_NCOLS);
+    store64(h + HDR_TBLDIR + TBL_NCOLS, 1000);
+    patra_hdr_write(fd, h);
+    assert_eq(patra_exec(db, "INSERT INTO t VALUES (2)"), PATRA_ERR_PAGE, "a corrupt TBL_NCOLS is refused");
+    assert_eq(patra_query(db, "SELECT * FROM t"), 0, "by a query too");
+
+    store64(h + HDR_TBLDIR + TBL_NCOLS, ncols0);
     patra_hdr_write(fd, h);
     fl_free(h);
     assert_eq(patra_exec(db, "INSERT INTO t VALUES (3)"), PATRA_OK, "restored, the file works");
+    var rs = patra_query(db, "SELECT * FROM t");
+    assert_eq(patra_result_count(rs), 2, "with the rows written before and after");
+    patra_result_free(rs);
     patra_close(db);
     cleanup();
 }
@@ -7108,6 +7533,351 @@ fn _wr_disk_gen(): i64 {
     return g;
 }
 
+# -- 1.16.2: a header is judged after recovery, not before --
+#
+# Every statement now verifies the header it re-reads. A writer that dies
+# mid-transaction can leave a header that fails verification on disk, with its
+# before-image in the WAL; judging the header before replaying the WAL would
+# refuse every statement on a file recovery repairs. B here begins, inserts
+# (logging the header's before-image), writes a header with an impossible
+# table count, and dies. Linux forks here.
+#ifdef CYRIUS_TARGET_LINUX
+fn _wr_bad_header_child(): i64 {
+    var b = patra_open(_tpath);
+    patra_begin(b);
+    patra_exec(b, "INSERT INTO t VALUES (99, 99)");
+    var h = fl_alloc(PAGE_SIZE);
+    patra_hdr_read(_db_fd(b), h);
+    store64(h + HDR_TBLCOUNT, 1000000000);
+    patra_hdr_write(_db_fd(b), h);
+    sys_exit(0);
+    return 0;
+}
+
+# HDR_TBLCOUNT as it is on disk right now, read past every handle.
+fn _wr_disk_tblcount(): i64 {
+    var fd = _pt_file_open(_tpath);
+    if (fd < 0) { return 0 - 1; }
+    var h = pg_alloc();
+    var c = 0 - 1;
+    if (patra_hdr_read(fd, h) == PATRA_OK) { c = load64(h + HDR_TBLCOUNT); }
+    pg_free(h);
+    sys_close(fd);
+    return c;
+}
+#endif
+
+fn test_header_judged_after_recovery() {
+    test_group("a header a crashed writer left invalid is replayed before it is judged (1.16.2)");
+    #ifdef CYRIUS_TARGET_LINUX
+    var a = _wr_setup();
+    var pid = sys_fork();
+    if (pid == 0) { _wr_bad_header_child(); }
+    var st[8];
+    sys_waitpid(pid, &st, 0);
+    assert_eq(wal_exists(_wpath()), 1, "B died mid-transaction and left its WAL");
+    assert_eq(_wr_disk_tblcount(), 1000000000, "and a header that fails verification");
+    assert_eq(_wr_n(a, "SELECT COUNT(*) FROM t"), 1, "A's next statement replays the WAL and reads");
+    assert_eq(_wr_disk_tblcount(), 1, "the replay restored the header");
+    assert_eq(wal_exists(_wpath()), 0, "and removed the WAL");
+    assert_eq(patra_exec(a, "INSERT INTO t VALUES (2, 2)"), PATRA_OK, "A writes");
+    patra_close(a);
+
+    # The same crash with no handle open: patra_open itself judged the header
+    # before recovering, and refused a file its WAL would repair. (found by the
+    # 1.16.2 review)
+    a = _wr_setup();
+    patra_close(a);
+    pid = sys_fork();
+    if (pid == 0) { _wr_bad_header_child(); }
+    sys_waitpid(pid, &st, 0);
+    assert_eq(_wr_disk_tblcount(), 1000000000, "open: B left a header that fails verification");
+    a = patra_open(_tpath);
+    assert(a != 0, "open: a fresh open replays the WAL and opens (it refused the file)");
+    assert_eq(_wr_n(a, "SELECT COUNT(*) FROM t"), 1, "open: with B's row undone");
+    assert_eq(wal_exists(_wpath()), 0, "open: and the WAL removed");
+    patra_close(a);
+    #endif
+    return 0;
+}
+
+# -- 1.16.2: a WAL that cannot be read is kept, not given up --
+#
+# _wal_hdr_verify reported a failed read or a refused allocation as bad magic,
+# and wal_rollback answers bad magic by unlinking the WAL; its record buffer was
+# unchecked, and a refused one ended the restore as a clean end of log, after
+# which the WAL was unlinked too. Either way the transaction's pages stayed and
+# patra_rollback said PATRA_ERR_MAGIC or PATRA_OK. wal_recover took the same
+# read failure for a refused WAL, which lets the statement carry on over the
+# dead transaction's pages. src/file.cyr's allocation seam (`_pt_alloc_fail_*`)
+# refuses the Nth allocation.
+fn _alloc_fail(skip): i64 {
+    _pt_alloc_fail_skip = skip;
+    _pt_alloc_fail_once = 0;
+    _pt_alloc_fail_on = 1;
+    return 0;
+}
+
+# Refuse only the allocation after `skip`, then allocate normally again.
+fn _alloc_fail_once(skip): i64 {
+    _alloc_fail(skip);
+    _pt_alloc_fail_once = 1;
+    return 0;
+}
+
+fn _alloc_ok(): i64 {
+    _pt_alloc_fail_on = 0;
+    _pt_alloc_fail_once = 0;
+    return 0;
+}
+
+fn test_unreadable_wal_kept() {
+    test_group("a WAL that cannot be read is kept, not given up (1.16.2)");
+    # skip 0 refuses wal_rollback's header buffer, skip 1 its record buffer.
+    var skip = 0;
+    while (skip < 2) {
+        cleanup();
+        xunlink(_wpath());
+        var db = patra_open(_tpath);
+        patra_exec(db, "CREATE TABLE r (a INT)");
+        patra_exec(db, "INSERT INTO r VALUES (1)");
+        patra_begin(db);
+        patra_exec(db, "INSERT INTO r VALUES (2)");
+        _alloc_fail(skip);
+        var rb = patra_rollback(db);
+        _alloc_ok();
+        assert_eq(rb, PATRA_ERR_IO, "rollback: reported as an I/O failure (it said MAGIC, or OK)");
+        assert_eq(wal_exists(_wpath()), 1, "rollback: the WAL is kept (it was unlinked)");
+        assert_eq(_wr_n(db, "SELECT COUNT(*) FROM r"), 1, "rollback: the next statement replays it");
+        assert_eq(wal_exists(_wpath()), 0, "rollback: and removes it");
+        patra_close(db);
+        skip = skip + 1;
+    }
+
+    # A directory at the WAL path is not a WAL: refused, as before 1.16.2, not
+    # a failed read that fails every statement. (found by the 1.16.2 review)
+    #ifdef CYRIUS_TARGET_LINUX
+    cleanup();
+    xunlink(_wpath());
+    var dd = patra_open(_tpath);
+    patra_exec(dd, "CREATE TABLE r (a INT)");
+    assert_eq(xmkdir(_wpath(), 493), 0, "dir: a directory at the WAL path");
+    assert_eq(patra_exec(dd, "INSERT INTO r VALUES (1)"), PATRA_OK, "dir: a write still runs");
+    assert_eq(_wr_n(dd, "SELECT COUNT(*) FROM r"), 1, "dir: so does a read");
+    xrmdir(_wpath());
+    patra_close(dd);
+
+    # A FIFO at the WAL path: opened without O_NONBLOCK, patra_open's recovery
+    # waited for a writer forever, holding LOCK_EX. (1.16.2 review) mknodat
+    # takes the directory's fd; 4096 is S_IFIFO, 420 the mode 0644.
+    xunlink(_wpath());
+    var dirfd = file_open("/tmp", O_RDONLY | O_DIRECTORY, 0);
+    assert_eq(sys_mknodat(dirfd, "patra_test.patra.wal", 4096 + 420, 0), 0, "fifo: a FIFO at the WAL path");
+    sys_close(dirfd);
+    dd = patra_open(_tpath);
+    assert(dd != 0, "fifo: patra_open returns (it hung)");
+    assert_eq(patra_exec(dd, "INSERT INTO r VALUES (2)"), PATRA_OK, "fifo: a write runs");
+    assert_eq(_wr_n(dd, "SELECT COUNT(*) FROM r"), 2, "fifo: so does a read");
+    assert(patra_begin(dd) != PATRA_OK, "fifo: BEGIN refuses it rather than block on a full pipe");
+    patra_close(dd);
+    xunlink(_wpath());
+    #endif
+
+    #ifdef CYRIUS_TARGET_LINUX
+    var a = _wr_setup();
+    assert_eq(_wr_crash(), 1, "recover: B left its WAL");
+    var ah = _db_hdr(a);
+    _alloc_fail(1);
+    var wr = wal_recover(_db_fd(a), _wpath(), load64(ah + HDR_DBID), load64(ah + HDR_PGCOUNT));
+    _alloc_ok();
+    assert_eq(wr, 0 - 1, "recover: an unreadable header is a failed replay (it was REFUSED)");
+    assert_eq(wal_exists(_wpath()), 1, "recover: the WAL is kept");
+    assert_eq(_wr_n(a, "SELECT COUNT(*) FROM t"), 1, "recover: the next statement replays it");
+    assert_eq(wal_exists(_wpath()), 0, "recover: and removes it");
+    patra_close(a);
+    #endif
+    cleanup();
+    xunlink(_wpath());
+    return 0;
+}
+
+# -- 1.16.2: the first writer gives an identity-less database one --
+#
+# patra_open assigns HDR_DBID only under a non-blocking LOCK_EX. A file written
+# before v1.13.8 and only ever opened while another process held a lock kept
+# id 0, so every WAL was bound to 0 — which wal_recover refuses by design — and
+# the file had no crash recovery. The first writer statement assigns it now.
+fn test_dbid_assigned_by_first_writer() {
+    test_group("a database opened only under contention gets its identity from the first writer (1.16.2)");
+    cleanup();
+    xunlink(_wpath());
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE i (a INT)");
+    patra_close(db);
+    # Zero the identity on disk, as a file from before v1.13.8 has it.
+    var f = _pt_file_open(_tpath);
+    var h = pg_alloc();
+    patra_hdr_read(f, h);
+    store64(h + HDR_DBID, 0);
+    patra_hdr_write(f, h);
+    # Open while another description holds LOCK_EX: patra_open's non-blocking
+    # lock fails, so it cannot assign the identity.
+    _pt_flock(f, LOCK_EX);
+    db = patra_open(_tpath);
+    _pt_flock(f, LOCK_UN);
+    assert(db != 0, "the contended open succeeds");
+    assert_eq(load64(_db_hdr(db) + HDR_DBID), 0, "without an identity");
+    assert_eq(patra_begin(db), PATRA_OK, "BEGIN");
+    patra_hdr_read(f, h);
+    var id = load64(h + HDR_DBID);
+    assert(id != 0, "the first writer assigned an identity, on disk");
+    var w = _pt_file_open(_wpath());
+    var vh = fl_alloc(24);
+    assert(_wal_hdr_verify(w, vh) >= 4, "the WAL is v4");
+    assert_eq(load64(vh + 16), id, "and bound to that identity (it was bound to 0, which recovery refuses)");
+    fl_free(vh);
+    sys_close(w);
+    assert_eq(patra_exec(db, "INSERT INTO i VALUES (1)"), PATRA_OK, "the transaction writes");
+    assert_eq(patra_rollback(db), PATRA_OK, "and rolls back");
+    patra_hdr_read(f, h);
+    assert_eq(load64(h + HDR_DBID), id, "the identity outlives the rollback");
+    assert_eq(_pc_dbid(_db_fd(db)), id, "and the handle joined the page cache with it");
+
+    # The assignment's sync fails: the statement is refused, but the id is
+    # already what every reader sees, so the handle is registered anyway — it
+    # would never come back to register. (found by the 1.16.2 review)
+    patra_close(db);
+    patra_hdr_read(f, h);
+    store64(h + HDR_DBID, 0);
+    patra_hdr_write(f, h);
+    _pt_flock(f, LOCK_EX);
+    db = patra_open(_tpath);
+    _pt_flock(f, LOCK_UN);
+    _sync_fail(_db_fd(db), 0);
+    assert_eq(patra_exec(db, "INSERT INTO i VALUES (2)"), PATRA_ERR_IO, "a failed sync of the new identity fails the statement");
+    _sync_ok();
+    var id2 = load64(_db_hdr(db) + HDR_DBID);
+    assert(id2 != 0, "the identity was written");
+    assert_eq(_pc_dbid(_db_fd(db)), id2, "and the handle is registered with it (it never was)");
+    pg_free(h);
+    sys_close(f);
+    patra_close(db);
+    cleanup();
+    return 0;
+}
+
+# -- 1.16.2: a refused allocation anywhere in ALTER ADD / DROP COLUMN --
+#
+# ALTER allocated the table's new root after freeing the old pages, unchecked:
+# a refusal committed TBL_ROOT 0, and the header failed verification on every
+# statement and at the next open. Its staging buffers, page_alloc's own and
+# btree_create's were unchecked too (stores through 0). This sweeps the
+# allocation seam over every allocation the statement makes, one forked child
+# per refused allocation, until the statement succeeds: no child may crash,
+# the file must always reopen and read, and a success must keep every row.
+# A refusal after the old pages are freed may still lose rows (CHANGELOG
+# [1.14.0]: no undo outside a transaction); that is reported, not checked here.
+#ifdef CYRIUS_TARGET_LINUX
+fn _alter_alloc_child(k, drop, txn): i64 {
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE a (x INT, y STR, z TEXT)");
+    patra_exec(db, "CREATE INDEX ON a (x)");
+    var i = 0;
+    while (i < 40) {
+        patra_exec(db, "INSERT INTO a VALUES (7, 'yy', 'some text')");
+        i = i + 1;
+    }
+    # Drain this thread's page slab, so every pg_alloc reaches _pt_alloc and
+    # the seam can refuse it too (the child exits; nothing is returned).
+    while (thread_local_get(TLS_SLAB_TOP) > 0) { pg_alloc(); }
+    var pc0 = load64(_db_hdr(db) + HDR_PGCOUNT);
+    if (txn != 0) { patra_begin(db); }
+    _alloc_fail(k);
+    var r = 0;
+    if (drop == 0) { r = patra_exec(db, "ALTER TABLE a ADD COLUMN w INT"); }
+    else { r = patra_exec(db, "ALTER TABLE a DROP COLUMN z"); }
+    _alloc_ok();
+    if (txn != 0) {
+        var cr = patra_commit(db);
+        # A refusal before anything was freed changed nothing — the commit
+        # must not write the abandoned allocation's page count either.
+        if (r == PATRA_ERR_FULL) {
+            if (cr == PATRA_OK) {
+                if (_wr_disk_pgcount() != pc0) { return 5; }
+            }
+        }
+        # A refused COMMIT rolled the whole transaction back: every row, and
+        # the old three columns.
+        if (cr != PATRA_OK) {
+            if (_wr_n(db, "SELECT COUNT(*) FROM a") != 40) { return 6; }
+            var q = patra_query(db, "SELECT * FROM a");
+            if (patra_result_cols(q) != 3) { return 7; }
+            patra_result_free(q);
+        }
+    }
+    patra_close(db);
+    db = patra_open(_tpath);
+    if (db == 0) { return 2; }
+    var n = _wr_n(db, "SELECT COUNT(*) FROM a");
+    if (n < 0) { return 3; }
+    if (r == PATRA_OK) {
+        if (n != 40) { return 4; }
+        return 0;
+    }
+    return 1;
+}
+
+# Returns the number of children that crashed, left a file that would not
+# reopen, or lost rows on success; -1 if no refusal count let it succeed.
+fn _wr_disk_pgcount(): i64 {
+    var fd = _pt_file_open(_tpath);
+    if (fd < 0) { return 0 - 1; }
+    var h = pg_alloc();
+    var c = 0 - 1;
+    if (patra_hdr_read(fd, h) == PATRA_OK) { c = load64(h + HDR_PGCOUNT); }
+    pg_free(h);
+    sys_close(fd);
+    return c;
+}
+
+fn _alter_alloc_sweep(drop, txn): i64 {
+    var bad = 0;
+    var k = 0;
+    var done = 0;
+    while (done == 0) {
+        var pid = sys_fork();
+        if (pid == 0) { sys_exit(_alter_alloc_child(k, drop, txn)); }
+        var st[8];
+        sys_waitpid(pid, &st, 0);
+        var code = load64(&st) & 65535;
+        if (code == 0) { done = 1; }
+        elif (code != 256) { bad = bad + 1; }
+        k = k + 1;
+        if (k > 400) {
+            done = 1;
+            bad = 0 - 1;
+        }
+    }
+    return bad;
+}
+#endif
+
+fn test_alter_survives_refused_allocations() {
+    test_group("ALTER ADD / DROP COLUMN survive a refused allocation anywhere (1.16.2)");
+    #ifdef CYRIUS_TARGET_LINUX
+    assert_eq(_alter_alloc_sweep(0, 0), 0, "ADD COLUMN: no crash, the file always reopens, a success keeps every row");
+    assert_eq(_alter_alloc_sweep(1, 0), 0, "DROP COLUMN: the same");
+    # Inside a transaction: wal_log_page's record buffer was unchecked too, and
+    # a refusal before anything was freed left the header's page count
+    # advanced for COMMIT to write. (1.16.2 review)
+    assert_eq(_alter_alloc_sweep(0, 1), 0, "ADD COLUMN in a transaction: the same, and an abandoned refusal leaks no page");
+    assert_eq(_alter_alloc_sweep(1, 1), 0, "DROP COLUMN in a transaction: the same");
+    cleanup();
+    #endif
+    return 0;
+}
+
 fn test_wal_recovery_outside_open() {
     test_group("a crashed writer's WAL is replayed before the next statement, not only at open (1.16.0)");
     var a = 0;
@@ -7613,8 +8383,18 @@ fn main() {
     test_pcache_evict_fails_open();
     test_pcache_alloc_refused();
     test_identifier_length();
+    test_zero_handles_and_cells();
+    test_failed_sync_reported();
+    test_create_column_list_checks();
+    test_row_count_never_negative();
+    test_row_count_drift_low();
+    test_rename_column_and_vacuum_commit();
     test_create_exists_at_table_cap();
     test_create_with_corrupt_table_count();
+    test_header_judged_after_recovery();
+    test_unreadable_wal_kept();
+    test_dbid_assigned_by_first_writer();
+    test_alter_survives_refused_allocations();
     test_add_column_exists_at_column_cap();
     test_close_rolls_back_open_transaction();
     test_tbl_open_contract();

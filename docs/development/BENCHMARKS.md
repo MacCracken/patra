@@ -11,10 +11,20 @@ Benches under `/tmp` (tmpfs, fdatasync is a no-op) are noted explicitly.
 The group-commit comparison uses a real-disk path (`./bench_groupcommit.patra`,
 btrfs/NVMe under the repo) to avoid hiding the win.
 
-> **Currency note (updated 2026-10-14, v1.16.1).** The bulk of this table is
-> still the v1.9.5 / cyrius 6.0.1 baseline. Patra is now at **v1.16.1** (cyrius
+> **Currency note (updated 2026-10-14, v1.16.2).** The bulk of this table is
+> still the v1.9.5 / cyrius 6.0.1 baseline. Patra is now at **v1.16.2** (cyrius
 > pin **6.7.10**) and the suite stands at **43 benchmarks** (`insert_2k_in_txn`
 > added at v1.14.0; `select_point_10k` and `update_point_10k` at v1.16.0).
+>
+> - **v1.16.2: flat, and `insert_2k_in_txn` is bimodal on this disk.** Six
+>   interleaved runs each of 1.16.1 and 1.16.2 from a real-disk directory,
+>   medians: every row within 4 % but `select_idx_eq_unique_500` +8.8 % (75 more
+>   instructions per lookup, +0.04 %: placement) and `insert_2k_in_txn`
+>   90.3 → 108.0 us, where both builds land at about 89 or about 128 us per run
+>   (one slow run in six for 1.16.1, three for 1.16.2) with the same 70 WAL and
+>   2 commit syncs — read that row as the disk's fsync latency, not the code.
+>   +240 instructions per INSERT in a transaction (+0.13 %), mostly the header
+>   verification every statement now does.
 >
 > - **v1.16.1: flat across the pin move and the code.** Three interleaved runs
 >   each of 1.16.0 on 6.7.5, 1.16.0 on 6.7.10 and 1.16.1 on 6.7.10, medians,

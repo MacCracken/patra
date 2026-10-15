@@ -80,6 +80,9 @@ fn tbl_find(hdr, name, nlen): i64 {
 # Create table with schema and data pages
 fn tbl_create(fd, hdr, name, nlen, col_names, col_types, ncols, autoinc): i64 {
     if (ncols > MAX_COLS) { return PATRA_ERR_COLCOUNT; }
+    # 1.16.2: at least one column — patra_hdr_verify rejects a directory entry
+    # with none, so creating one made the file unopenable.
+    if (ncols < 1) { return PATRA_ERR_COLCOUNT; }
     # 1.16.0: a name that does not fit its slot is refused, before anything is
     # allocated, rather than clamped to 31 bytes below — the parser refuses it
     # first (sql.cyr _ident_fits); this keeps a direct caller honest too. A
@@ -87,6 +90,18 @@ fn tbl_create(fd, hdr, name, nlen, col_names, col_types, ncols, autoinc): i64 {
     if (nlen > TBL_NAME_MAX - 1) { return PATRA_ERR_SYNTAX; }
     for (var cl_i = 0; cl_i < ncols; cl_i = cl_i + 1) {
         if (load64(col_names + cl_i * 16 + 8) > SCH_CNAME_MAX - 1) { return PATRA_ERR_SYNTAX; }
+    }
+    # 1.16.2: column names are distinct, compared as _wh_resolve_col compares
+    # them (exact bytes). A repeat was accepted and left a column no statement
+    # could name, where ADD COLUMN / RENAME COLUMN refuse one with EXISTS.
+    for (var dj = 1; dj < ncols; dj = dj + 1) {
+        var dlen = load64(col_names + dj * 16 + 8);
+        var dptr = load64(col_names + dj * 16);
+        for (var dk = 0; dk < dj; dk = dk + 1) {
+            if (load64(col_names + dk * 16 + 8) == dlen) {
+                if (memeq(load64(col_names + dk * 16), dptr, dlen)) { return PATRA_ERR_EXISTS; }
+            }
+        }
     }
     if (tbl_find(hdr, name, nlen) >= 0) { return PATRA_ERR_EXISTS; }
     # 1.16.1: the cap is tested AFTER the name. It came first, so in a file
@@ -379,9 +394,37 @@ fn tbl_scan(fd, hdr, idx, out, row_sz, cap): i64 {
     return written;
 }
 
-# Filtered scan — copies matching rows into out. Returns count.
-# Scan rows matching WHERE into output, returns count
-fn tbl_scan_where(fd, hdr, idx, out, row_sz, schema, ncols, pr, cap): i64 {
+# Rows in table `idx`'s data chain, counted page by page (1.16.2), or -1 when
+# no page buffer can be had. TBL_NROWS is a running count that can read LOW:
+# after a power loss in autocommit a data page can reach the disk ahead of the
+# header that counts it. The callers that must not lose a row — ALTER's
+# staging, and a scan whose buffer was sized from TBL_NROWS — count here. Each
+# page's count is clamped as the readers clamp it.
+fn tbl_chain_rows(fd, hdr, idx, row_sz): i64 {
+    var entry = _tbl_entry(hdr, idx);
+    var cur = load64(entry + TBL_ROOT);
+    var buf = pg_alloc();
+    if (buf == 0) { return 0 - 1; }
+    var total = 0;
+    var hops = 0;
+    var maxhops = load64(hdr + HDR_PGCOUNT);
+    if (maxhops < 1) { maxhops = 1; }
+    while (cur != 0) {
+        hops = hops + 1;
+        if (hops > maxhops) { cur = 0; continue; }
+        page_read(fd, cur, buf);
+        total = total + _dp_nrows_clamped(buf, row_sz);
+        cur = load64(buf + DP_NEXT);
+    }
+    pg_free(buf);
+    return total;
+}
+
+# Filtered scan — copies matching rows into out, up to `cap`. Returns the
+# count. 1.16.2: when a matching row did not fit, stores 1 at `ovf` (if not 0)
+# — the caller sized `cap` from TBL_NROWS, which can read low, and a full
+# buffer used to end the scan silently short.
+fn tbl_scan_where(fd, hdr, idx, out, row_sz, schema, ncols, pr, cap, ovf): i64 {
     var entry = _tbl_entry(hdr, idx);
     var cur = load64(entry + TBL_ROOT);
     var buf = pg_alloc();
@@ -403,11 +446,13 @@ fn tbl_scan_where(fd, hdr, idx, out, row_sz, schema, ncols, pr, cap): i64 {
             # The result buffer is sized from the table directory's TBL_NROWS
             # while this loop was bounded only by the sum of per-page DP_NROWS,
             # and nothing reconciled the two. (audit 2026-08-18 S0-5)
-            if (kept < cap) {
-                var rptr = buf + DP_DATA + i * row_sz;
-                if (where_eval(rptr, schema, ncols, pr)) {
+            var rptr = buf + DP_DATA + i * row_sz;
+            if (where_eval(rptr, schema, ncols, pr)) {
+                if (kept < cap) {
                     memcpy(out + kept * row_sz, rptr, row_sz);
                     kept = kept + 1;
+                } else {
+                    if (ovf != 0) { store64(ovf, 1); }
                 }
             }
         }
@@ -671,8 +716,13 @@ fn tbl_delete(fd, hdr, idx, row_sz, schema, ncols, pr): i64 {
         cur = next;
     }
 
-    var rc = load64(entry + TBL_NROWS);
-    store64(entry + TBL_NROWS, rc - deleted);
+    # 1.16.2: never below zero. After a power loss in autocommit a data page
+    # can reach the disk ahead of the header that counts it, so the count can
+    # read low; `rc - deleted` then went negative, and patra_hdr_verify —
+    # which since 1.16.2 runs on every statement — refuses a negative count.
+    var rc = load64(entry + TBL_NROWS) - deleted;
+    if (rc < 0) { rc = 0; }
+    store64(entry + TBL_NROWS, rc);
     _tbl_rows_affected = deleted;
 
     pg_free(prevbuf);

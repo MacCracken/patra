@@ -5,6 +5,183 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.16.2] - 2026-10-14 — failures are reported, not taken for success; headers verified on every statement
+
+Patch release: the two follow-ups the 1.16.1 review recorded (a 0 handle, an unverified header
+re-read), the two older roadmap items of patra's own (`wal_rollback` giving up a WAL it could not
+read, a database without an identity having no crash recovery), and what turned up on the way —
+most of it a failed `fdatasync`, a refused allocation or a refused write reported as success,
+three ways to lose acknowledged rows, and one statement that made a database unopenable. Two
+adversarial reviews of the change found twenty-one more defects in it and around it; eighteen
+are fixed here and three recorded below. Each fix landed with a regression test that fails
+without it.
+
+Gates: **1,594 assertions** (was 1,413) · `patra_uninit.tcyr` 18 / 18 · raw-include 6 / 6 · 8 / 8
+fuzz · 43 benchmarks · libro 15/15 · vidya 19/19 · fmt + lint 0-warn · no raw syscalls · a new
+dangling-link gate · `dist/` in sync, sidecar **14** leaves == 14 declared. On aarch64 under
+`qemu-aarch64`: 1,594 / 1,594, 18 / 18, 8 / 8 fuzz, 3 / 3 programs. Mach-O x86_64 / arm64, agnos
+and Windows PE compile warning-free; the Windows open path was run under wine. Binary
+**255,488 B** DCE-on / 394,752 B DCE-off (1.16.1: 247,128 / 386,392). Toolchain unchanged
+(cyrius 6.7.10).
+
+### Fixed — lost rows and unopenable files
+
+- **`CREATE TABLE t ()` made the database unopenable.** It returned `PATRA_OK` and wrote a
+  directory entry with no columns, which `patra_hdr_verify` rejects, so the next `patra_open` of
+  the file failed. It is `PATRA_ERR_SYNTAX` now, and `tbl_create` refuses
+  `ncols < 1` with `PATRA_ERR_COLCOUNT`. ⚠ A file that already holds such a table still does not
+  open (roadmap); nothing in the tree creates one. **Test:** `test_create_column_list_checks` (8).
+- **A transaction that could not log a write was committed in part.** `page_write` refuses a page
+  whose before-image `wal_log_page` could not log, its callers carry on, and `patra_commit`
+  committed the rest — returning `PATRA_ERR_FULL` when the log's list could not grow, and
+  `PATRA_OK` after any other logging failure. Every logging failure now marks the transaction,
+  and `patra_commit` rolls a marked one back — the refused page was never written, so the
+  rollback is exact — returning `PATRA_ERR_FULL` or `PATRA_ERR_IO`. `wal_log_page`'s record
+  buffer was unchecked too.
+- **`patra_commit` reported a commit whose data had not reached the disk, and deleted its undo
+  record.** `wal_commit` ignored a failed sync of the committed pages and unlinked the WAL, and
+  `patra_commit` ignored that and its own header write. Now `wal_commit` keeps the WAL, and
+  `patra_commit` rolls the transaction back and returns `PATRA_ERR_IO`; if that rollback cannot
+  finish, the WAL stays and the next statement on any handle replays it.
+- **A row count that drifted low lost rows.** After a power loss in autocommit a data page can
+  reach the disk ahead of the header that counts it. `ALTER TABLE … ADD / DROP COLUMN` staged only
+  `TBL_NROWS` rows and then freed the chain, so the newest — acknowledged — rows were gone, with
+  `PATRA_OK`; `SELECT *` sized its result from the count and returned a short answer while
+  `COUNT(*)` walked the chain; and `DELETE` drove the count negative. ALTER now counts the chain,
+  a scan whose buffer overflows recounts and scans again (only then), and the count stops at 0.
+  **Tests:** `test_row_count_drift_low` (8), `test_row_count_never_negative` (4).
+- **`ALTER TABLE … ADD / DROP COLUMN` could commit a table root of 0.** The new root was
+  allocated, unchecked, after the old pages — and in DROP the dropped column's TEXT / BYTES chains —
+  were freed; a refusal (ENOSPC extending the file) committed `TBL_ROOT` 0 with the rows only in
+  memory. Both now allocate the new data and index roots first, in an order where a refusal has
+  written nothing, give back what it advanced in the header (inside a transaction COMMIT writes
+  that header), and return `PATRA_ERR_FULL` (`PATRA_ERR_IO` for a refused buffer) with the table
+  as it was. Their staging buffers, `page_alloc`'s own two (a refused one read as a corrupt free
+  list and dropped it, leaking every page on it) and `btree_create`'s were unchecked;
+  `btree_create` also ignored its page write. **Test:** `test_alter_survives_refused_allocations`
+  (4) refuses each allocation the statement makes in turn, one forked child each, in autocommit
+  and inside a transaction: no child crashes, the file always reopens, a success keeps every row,
+  a refused COMMIT keeps every row and the old schema, and an abandoned refusal leaks no page.
+- **`wal_rollback` gave up a WAL it could not read** (roadmap item since 1.16.0), and recovery
+  read the same failure as a refused WAL. A failed read or a refused allocation of the WAL header
+  was "bad magic", and `wal_rollback` answers that by unlinking the WAL; a refused record buffer
+  ended its restore as a clean end of log, after which the WAL was unlinked too. Now the WAL is
+  kept and `PATRA_ERR_IO` returned; both restore loops treat a read error as a failed restore;
+  `wal_recover` treats an unreadable header as a failed replay (statement fails, the next
+  retries); a sync that fails after a restore is an incomplete restore. A directory, or a FIFO, at
+  the WAL path is still no WAL; a FIFO used to hang `patra_open` under `LOCK_EX` (the WAL is now
+  opened `O_NONBLOCK`, and `BEGIN` refuses a WAL path it cannot seek). **Test:**
+  `test_unreadable_wal_kept` (21).
+- **A database without an identity had no crash recovery** (roadmap item since 1.16.0).
+  `patra_open` assigns `HDR_DBID` only under a non-blocking `LOCK_EX`, so a file written before
+  v1.13.8 and only ever opened under contention kept id 0, and every WAL was bound to 0, which
+  `wal_recover` refuses by design. The first writer statement now assigns it under its `LOCK_EX`
+  (a `BEGIN` before `wal_start`) and joins the page cache with it. **Test:**
+  `test_dbid_assigned_by_first_writer` (13).
+
+### Fixed — failures reported as success
+
+- **A failed `fdatasync` was reported as durability.** `patra_hdr_write`, where every autocommit
+  statement in FULL mode ends, ignored it, and **all ten callers of `_db_hdr_commit` discarded its
+  status** (inside a transaction that included a failed `wal_log_hdr`). The BATCH auto-flush,
+  `patra_flush`, `patra_set_sync_mode` and `patra_close` ignored it too. All report
+  `PATRA_ERR_IO` now. ⚠ An autocommit statement that fails this way **has been applied**
+  (autocommit has no undo) and is not known to be durable — a caller that retries an `INSERT` on
+  that error inserts it twice.
+  - **The failure is sticky on the handle** (`DB_SYNC_ERR`): Linux reports a writeback error to a
+    file once and marks the failed pages clean, so a retried `fdatasync` returns 0 over the lost
+    writes. After a failed sync of acknowledged autocommit writes, `patra_flush`,
+    `patra_set_sync_mode` and `patra_close` keep returning `PATRA_ERR_IO` until the database is
+    reopened. `BEGIN` syncs BATCH writes acknowledged before it, so a sync failure inside a
+    transaction concerns only the transaction, which its rollback covers; and inside a transaction
+    the BATCH auto-flush no longer runs (COMMIT syncs). `patra_set_sync_mode` changes the mode even
+    when its flush fails, and reports the failure.
+  - `jsonl_append` checks the line's write, the newline's and the sync (an fd with nothing to sync
+    — a pipe or terminal, EINVAL on Linux — is fine; macOS, see *Not fixed*);
+    `jsonl_append_obj(_lens)` returns that status (it returned 0) and checks its buffer.
+  - Two syncs stay unchecked on purpose: the WAL fd's in `wal_commit` (each record was synced as it
+    was logged) and the directory's in `_pt_sync_dir` (best-effort, documented there).
+  **Test:** `test_failed_sync_reported` (52).
+- **A header re-read by a statement was never verified.** `patra_hdr_verify` ran only in
+  `patra_open` — its comment said "on every patra_hdr_read" — so a table count or directory written
+  after the open reached `tbl_find`, `DROP TABLE`'s directory compaction (which faulted on a count
+  past 63) and the schema reads as it was, and a failed header read was ignored. `_pc_refresh` now
+  returns the failure, and statements act on it **after WAL recovery**, which can repair a header a
+  dead writer left; `patra_open` likewise judges the header under its lock after recovery (it
+  refused such a file outright; a wrong magic or version still refuses before), and, where no lock
+  can be had at all (Windows), judges it unlocked, as before. The statement fails with its lock
+  released. Cost: see *Validation*. **Tests:** `test_create_with_corrupt_table_count` (19, was 5)
+  and `test_header_judged_after_recovery` (10: a forked writer leaves a bad header plus its WAL; an
+  open handle and a fresh `patra_open` both recover).
+- **`RENAME COLUMN` and `VACUUM` skipped `_db_hdr_commit`**: no sync in FULL mode, and no
+  `HDR_COMMITGEN` bump, so another process's page cache kept the old schema page, resolved the old
+  name and wrote that page back on its next `UPDATE`. `RENAME COLUMN` also reported a refused
+  schema-page write as done. **Test:** `test_rename_column_and_vacuum_commit` (9).
+- **A 0 handle or result set was dereferenced.** `patra_begin`, `patra_commit`, `patra_rollback`,
+  `patra_flush`, `patra_set_sync_mode`, `patra_get_sync_mode`, `patra_insert_row` and
+  `patra_insert_row_or_ignore` crashed on the 0 a failed `patra_open` returns (`patra_begin(0)`
+  exited 139); they return `PATRA_ERR_IO` (`patra_get_sync_mode`: `PATRA_SYNC_FULL`), as
+  `patra_exec` always has. Every `patra_result_*` accessor crashed on the 0 a failed query returns
+  and read past the buffer for a row or column outside it; they return 0, or -1 where -1 already
+  meant "not that type" (`get_str_len`, `get_bytes_len`, `get_text_len`, and `col_type`, where 0
+  is `COL_INT`), and `read_bytes` / `read_text` `PATRA_ERR_PARAM`. **Test:**
+  `test_zero_handles_and_cells` (38).
+- **`CREATE TABLE t (a INT, a INT)` was accepted**, after which `SELECT a` read the second column,
+  while `ADD COLUMN` / `RENAME COLUMN` already refused a duplicate. It is `PATRA_ERR_EXISTS`.
+- **`patra_open` used its allocations unchecked** (the WAL path, the handle, its header buffer).
+
+### Added
+
+- **Test-only fault seams** in `src/file.cyr`: `_pt_sync_fail_on` / `_fd` / `_skip` make the sync
+  of one fd fail, and `_pt_alloc_fail_on` / `_skip` / `_once` make `_pt_alloc` refuse, after a
+  countdown. Defaults are 0; nothing outside `tests/` arms them
+  ([architecture note 004](docs/architecture/004-test-fault-seams.md)).
+- **CI:** no dangling links between the repo's docs (relative links in tracked `.md` files must
+  name a file; links that leave the repository are skipped; four historical ones allowlisted, as
+  `docs/doc-health.md` records), and `cyrius test --timeout 300`, so a regression that hangs fails
+  the job.
+
+### Changed
+
+- **`patra_commit` that cannot make the transaction whole and durable rolls it back** and returns
+  `PATRA_ERR_FULL` or `PATRA_ERR_IO`. It used to commit what it had and return `PATRA_ERR_FULL`,
+  or report a commit that was not durable. Treat a failed commit as rolled back.
+- **Return values that used to be fixed:** `patra_close` returns the rollback's or a sync failure
+  (it returned 0); `patra_flush`, `patra_set_sync_mode` and `jsonl_append_obj(_lens)` can return
+  `PATRA_ERR_IO`; any statement can return `PATRA_ERR_PAGE` / `PATRA_ERR_MAGIC` for a header that
+  fails verification, or `PATRA_ERR_IO` for one it cannot read; `ALTER … ADD / DROP COLUMN` can
+  return `PATRA_ERR_FULL` / `PATRA_ERR_IO` with nothing changed.
+- `BEGIN` syncs pending BATCH writes first.
+- The DB handle is 96 bytes (was 88): `DB_SYNC_ERR`.
+
+### Not fixed — recorded
+
+- **Outside a transaction, `page_write`'s result is still discarded at most call sites, and some
+  70 allocation results are unchecked across `src/`.** In autocommit `page_write` fails only on a
+  real seek or write error; there is no undo there. The allocation seam makes each statement
+  sweepable the way the ALTER test is. Roadmap items.
+- **Two copies of one database corrupt each other under the opt-in page cache** (`cp` copies
+  `HDR_DBID`, the cache's key). Pre-existing; the cache is off by default. Roadmap item.
+- **On macOS a JSONL append to a pipe still returns `PATRA_ERR_IO`**: XNU answers ENOTSUP, which
+  the stdlib's errno table lacks and patra may not copy in. Written up to file with cyrius.
+
+### Validation
+
+- **Performance: unchanged within noise.** Six interleaved runs each of 1.16.1 and 1.16.2, medians,
+  run from a real-disk directory. Every row is within 4 % but two. `select_idx_eq_unique_500`
+  25.8 → 28.1 us (+8.8 %) is code placement: an indexed one-row lookup retires 75 more user-space
+  instructions (+0.04 %, counted as below). `insert_2k_in_txn` 90.3 → 108.0 us is the disk: both
+  builds are bimodal at about 89 and about 128 us per run (1.16.1 one slow run in six, 1.16.2
+  three; the fast runs agree to 0.3 us), and the path issues the same 70 WAL syncs and 2 commit
+  syncs in both, counted through the sync seam. `insert_500_sync_full` 1,062 → 1,056 us,
+  `select_point_10k` 26.6 → 26.2 us, `update_point_10k` 20.6 → 20.8 us,
+  `read_scan_4t_par` 143.1 → 143.1 us.
+- **Instruction counts** (`perf_event_open`, 2,000- and 4,000-insert drivers differenced): 240 more
+  user-space instructions per INSERT inside a transaction (178,808 → 179,048, +0.13 %), almost all
+  of it the header verification on each statement. Counted through the sync seam, 1.16.2 issues
+  exactly the syncs 1.16.1 did on the benchmarked paths — one per autocommit INSERT, none per
+  INSERT inside a transaction, two per commit.
+
 ## [1.16.1] - 2026-10-14 — `patra_open` refuses before `patra_init`; `EXISTS` no longer depends on how full the file is
 
 Patch release: the two bugs libro 2.10.8 filed on 2026-10-14, each with a twin fixed alongside
