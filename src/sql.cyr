@@ -214,12 +214,21 @@ fn _set_lexerr(v): i64 { thread_local_set(TLS_LEXERR, v); return 0; }
 # "not yet"). Called at the head of tokenize / prepared-statement restore — both  #skip-lint
 # under _patra_lock today, so the fl_alloc is serialized (S3 adds an allocator
 # mutex before the read lock is dropped).
+#
+# 1.16.2: PATRA_ERR_IO when either buffer is refused, and the statement fails;
+# both were unchecked, so a thread whose first statement met a refusal
+# tokenized into address 0. The parse buffer is taken only once the token
+# array exists, so a set TLS_PR still means both are there — the fast path
+# is the one load it always was — and a retry keeps the array if it was granted.
 fn _sql_ensure(): i64 {
     _patra_tls_ensure();     # v6.4.65: claim the slot indices before any get/set
-    if (thread_local_get(TLS_PR) == 0) {
+    if (thread_local_get(TLS_PR) != 0) { return 0; }
+    if (thread_local_get(TLS_TOKS) == 0) {
         thread_local_set(TLS_TOKS, _pt_alloc(MAX_TOKENS * TOK_SZ));
-        thread_local_set(TLS_PR, _pt_alloc(4096));
+        if (thread_local_get(TLS_TOKS) == 0) { return PATRA_ERR_IO; }
     }
+    thread_local_set(TLS_PR, _pt_alloc(4096));
+    if (thread_local_get(TLS_PR) == 0) { return PATRA_ERR_IO; }
     return 0;
 }
 
@@ -333,7 +342,13 @@ fn _classify_ident(ptr, len): i64 {
 
 # Tokenize SQL string into token array
 fn sql_tokenize(input): i64 {
-    _sql_ensure();
+    # No scratch (1.16.2): no tokens, and lexer error 2, which sql_parse
+    # refuses like any other and the statement entry points report as
+    # PATRA_ERR_IO (a refused allocation, not a syntax error).
+    if (_sql_ensure() != PATRA_OK) {
+        _set_lexerr(2);
+        return 0;
+    }
     _set_lexerr(0);
     var pos = 0;
     var n = 0;

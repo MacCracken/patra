@@ -24,7 +24,13 @@ btrfs/NVMe under the repo) to avoid hiding the win.
 >   (one slow run in six for 1.16.1, three for 1.16.2) with the same 70 WAL and
 >   2 commit syncs — read that row as the disk's fsync latency, not the code.
 >   +240 instructions per INSERT in a transaction (+0.13 %), mostly the header
->   verification every statement now does.
+>   verification every statement now does. The allocation sweep and the
+>   writer-state fix that followed, against that first half, by instruction
+>   count: INSERT in a transaction +345 (+0.16 %), indexed point SELECT +361
+>   (+0.20 %), one-row UPDATE +524 (+0.10 %), a 1,000-row UPDATE −0.59 % (SET
+>   columns resolved once per statement), parser +0.00 %. Wall clock on a quiet
+>   host: within ±2.5 % but `update_where` +7.8 % before that last change and
+>   `jsonl_append_1k` +5.7 % (unchanged code); a run at load 12 was discarded.
 >
 > - **v1.16.1: flat across the pin move and the code.** Three interleaved runs
 >   each of 1.16.0 on 6.7.5, 1.16.0 on 6.7.10 and 1.16.1 on 6.7.10, medians,

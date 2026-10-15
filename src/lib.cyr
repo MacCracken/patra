@@ -184,6 +184,11 @@ fn patra_init(): i64 {
     # a consumer that skipped patra_init no longer gets that far (1.16.1:
     # patra_open refuses).
     var wr = wal_slots_init();
+    # 1.16.2: the reserved failure-path pages (file.cyr _pt_spare_free,
+    # btree.cyr _bt_spare).
+    if (_pt_spare_free == 0) { _pt_spare_free = alloc(PAGE_SIZE); }
+    if (_pt_spare_scratch == 0) { _pt_spare_scratch = alloc(PAGE_SIZE); }
+    if (_bt_spare == 0) { _bt_spare = alloc(PAGE_SIZE * BT_MAX_DEPTH); }
 
     # A missing mutex is a fault at its first lock (`_pc_mtx`) or a statement
     # path that silently runs unlocked (`_patra_mtx`, `_pt_alloc_mtx`).
@@ -192,6 +197,9 @@ fn patra_init(): i64 {
     if (_pc_mtx == 0) { ok = 0; }
     if (_patra_mtx == 0) { ok = 0; }
     if (wr != 0) { ok = 0; }
+    if (_pt_spare_free == 0) { ok = 0; }
+    if (_pt_spare_scratch == 0) { ok = 0; }
+    if (_bt_spare == 0) { ok = 0; }
     if (ok == 0) {
         _pt_err("patra: patra_init failed: allocation refused");
         return PATRA_ERR_IO;
@@ -312,6 +320,11 @@ fn patra_open(path): i64 {
         }
     } else {
         var tmp = pg_alloc();
+        if (tmp == 0) {                         # 1.16.2: checked
+            sys_close(fd);
+            _pt_err("patra: out of memory");
+            return 0;
+        }
         var ok = patra_hdr_read(fd, tmp);
         if (ok != PATRA_OK) {
             pg_free(tmp);
@@ -372,14 +385,18 @@ fn patra_open(path): i64 {
         if (_pt_flock_contended(fl) == 0) {
             var uh = pg_alloc();
             hv = PATRA_ERR_IO;
-            if (patra_hdr_read(fd, uh) == PATRA_OK) { hv = patra_hdr_verify(uh); }
-            pg_free(uh);
+            if (uh != 0) {
+                if (patra_hdr_read(fd, uh) == PATRA_OK) { hv = patra_hdr_verify(uh); }
+                pg_free(uh);
+            }
         }
     }
     if (fl == 0) {
         var ohdr = pg_alloc();
         hv = PATRA_ERR_IO;
-        if (patra_hdr_read(fd, ohdr) == PATRA_OK) {
+        var ohr = PATRA_ERR_IO;
+        if (ohdr != 0) { ohr = patra_hdr_read(fd, ohdr); }
+        if (ohr == PATRA_OK) {
             _pt_recover_held(fd, wpath, ohdr);
             # Assign this database its identity if it does not have one — a
             # freshly created file, or any file written before v1.13.8. Done
@@ -397,7 +414,7 @@ fn patra_open(path): i64 {
                 }
             }
         }
-        pg_free(ohdr);
+        if (ohdr != 0) { pg_free(ohdr); }
         patra_unlock(fd);
     }
     if (hv != PATRA_OK) {
@@ -686,6 +703,13 @@ fn _exec_create(db): i64 {
     var ncols = load64(_spr() + PR_COUNT);
     var names = _pt_alloc(ncols * 16);
     var types = _pt_alloc(ncols * 8);
+    # 1.16.2: checked (a refusal was a store through 0).
+    if (names == 0) { _pt_free(types); types = 0; }
+    if (types == 0) {
+        _pt_free(names);
+        _tx_unlock(db, fd);
+        return PATRA_ERR_IO;
+    }
 
     for (var i = 0; i < ncols; i = i + 1) {
         var item = _spr() + PR_ITEMS + i * CR_SZ;
@@ -709,13 +733,15 @@ fn _exec_create(db): i64 {
 # Largest i64 in column `col` across all of table `entry`'s data pages, or 0 if
 # empty. Drives AUTOINCREMENT (next id = max + 1). O(n) scan; the auto column is
 # the indexed first INT, so a btree-rightmost walk could make this O(log n) later
-# if an insert-rate-bound consumer asks.
-fn _max_int_col(fd, entry, schema, ncols, col): i64 {
+# if an insert-rate-bound consumer asks. 1.16.2: `okp` is set to 0 when its
+# page buffer is refused (the result is then meaningless), else left alone.
+fn _max_int_col(fd, entry, schema, ncols, col, okp): i64 {
     var row_sz = row_compute_size(schema, ncols);
     var coff = row_field_offset(schema, ncols, col);
     var mx = 0;
     var cur = load64(entry + TBL_ROOT);
     var buf = pg_alloc();
+    if (buf == 0) { store64(okp, 0); return 0; }
     # 1.14.0: bounded chain walk — a cyclic DP_NEXT otherwise hangs this
     # statement with its flock held. See tbl_drop in table.cyr. This helper is
     # not handed the header, so the bound is the largest page number the format
@@ -822,8 +848,17 @@ fn _exec_insert(db): i64 {
 
     var rsz = row_compute_size(schema, ncols);
     var row = _pt_alloc(rsz);
+    if (row == 0) {      # 1.16.2: checked (it was a memset through 0)
+        pg_free(schema);
+        _tx_unlock(db, fd);
+        return PATRA_ERR_IO;
+    }
     memset(row, 0, rsz);
 
+    # 1.16.2: every refusal inside this loop gives back the TEXT chains already
+    # written for the row. They returned without, and the header was not
+    # committed, so the next statement re-read a free list whose head was now a
+    # TEXT page; the next allocation followed it and lost the rest of the list.
     for (var i = 0; i < nvals; i = i + 1) {
         var item = _spr() + PR_ITEMS + i * IR_SZ;
         var vtype = load64(item + IR_TYPE);
@@ -835,6 +870,7 @@ fn _exec_insert(db): i64 {
             var citem = _spr() + PR_INS_COLS + i * INSCOL_SZ;
             ci = _wh_resolve_col(schema, ncols, load64(citem + INSCOL_PTR), load64(citem + INSCOL_LEN));
             if (ci < 0) {
+                _tbl_free_row_bytes(fd, hdr, row, schema, ncols);
                 _pt_free(row);
                 pg_free(schema);
                 _tx_unlock(db, fd);
@@ -846,6 +882,7 @@ fn _exec_insert(db): i64 {
 
         if (vtype == COL_INT) {
             if (ctype != COL_INT) {
+                _tbl_free_row_bytes(fd, hdr, row, schema, ncols);
                 _pt_free(row);
                 pg_free(schema);
                 _tx_unlock(db, fd);
@@ -861,6 +898,7 @@ fn _exec_insert(db): i64 {
                 # silently made two distinct values indistinguishable on disk.
                 # (audit 2026-08-18 S2-8)
                 if (load64(item + IR_SLEN) > COL_STR_SZ - 1) {
+                    _tbl_free_row_bytes(fd, hdr, row, schema, ncols);
                     _pt_free(row);
                     pg_free(schema);
                     _tx_unlock(db, fd);
@@ -870,8 +908,21 @@ fn _exec_insert(db): i64 {
             } elif (ctype == COL_TEXT) {
                 var tlen = load64(item + IR_SLEN);
                 var thead = _bytes_write_chain(fd, hdr, load64(item + IR_SPTR), tlen);
+                # 1.16.2: checked. A refused chain stored a reference to page 0
+                # with the text's length, which no read could follow. The
+                # chain gave its own pages back; free the row's earlier ones.
+                if (tlen > 0) {
+                    if (thead == 0) {
+                        _tbl_free_row_bytes(fd, hdr, row, schema, ncols);
+                        _pt_free(row);
+                        pg_free(schema);
+                        _tx_unlock(db, fd);
+                        return PATRA_ERR_IO;
+                    }
+                }
                 row_write_bytes_ref(row, off, thead, tlen);
             } else {
+                _tbl_free_row_bytes(fd, hdr, row, schema, ncols);
                 _pt_free(row);
                 pg_free(schema);
                 _tx_unlock(db, fd);
@@ -891,7 +942,16 @@ fn _exec_insert(db): i64 {
         if (acol < ncols) {
             var aoff = row_field_offset(schema, ncols, acol);
             if (row_read_int(row, aoff) == 0) {
-                row_write_int(row, aoff, _max_int_col(fd, entry, schema, ncols, acol) + 1);
+                var aok = 1;
+                var amax = _max_int_col(fd, entry, schema, ncols, acol, &aok);
+                if (aok == 0) {
+                    _tbl_free_row_bytes(fd, hdr, row, schema, ncols);
+                    _pt_free(row);
+                    pg_free(schema);
+                    _tx_unlock(db, fd);
+                    return PATRA_ERR_IO;
+                }
+                row_write_int(row, aoff, amax + 1);
             }
         }
     }
@@ -968,6 +1028,16 @@ fn _exec_insert(db): i64 {
                         _pt_free(rncell);
                         var icoff = row_field_offset(schema, ncols, iic);
                         var pbuf = pg_alloc();
+                        # 1.16.2: checked. Without it the probe cannot decide,
+                        # which refuses, as a refs refusal above does.
+                        if (pbuf == 0) {
+                            _pt_free(refs);
+                            _tbl_free_row_bytes(fd, hdr, row, schema, ncols);
+                            _pt_free(row);
+                            pg_free(schema);
+                            _tx_unlock(db, fd);
+                            return PATRA_ERR_FULL;
+                        }
                         var lpg = 0 - 1;
                         for (var ri = 0; ri < nrefs; ri = ri + 1) {
                             if (ihit == 0) {
@@ -1011,10 +1081,15 @@ fn _exec_insert(db): i64 {
     }
 
     var r = tbl_insert(fd, hdr, idx, row, rsz, db + DB_LP_IDX);
+    # 1.16.2: a row that was not stored gives back the TEXT chains the bind
+    # loop wrote for it — they were leaked, and in autocommit the on-disk free
+    # list still named their pages.
+    if (r != PATRA_OK) { _tbl_free_row_bytes(fd, hdr, row, schema, ncols); }
 
     if (r == PATRA_OK) { _db_record_insert(db, schema, ncols, row); }
 
     # Maintain B-tree index
+    var ierr = 0;
     if (r == PATRA_OK) {
         var ic = load64(schema + SCH_IDX_COL);
         if (ic >= 0) {
@@ -1022,7 +1097,8 @@ fn _exec_insert(db): i64 {
                 var ir = load64(schema + SCH_IDX_ROOT);
                 if (ir != 0) {
                     var ikey = _idx_key_from_row(schema, ncols, ic, row);
-                    var nr = btree_insert(fd, hdr, ir, ikey, _tbl_last_ref);
+                    var nr = btree_insert(fd, hdr, ir, ikey, _tbl_last_ref_get());
+                    ierr = _bt_err_get();
                     if (nr != ir) {
                         store64(schema + SCH_IDX_ROOT, nr);
                         page_write(fd, spg, schema);
@@ -1031,11 +1107,25 @@ fn _exec_insert(db): i64 {
             }
         }
     }
+    # 1.16.2: the index could not take the row (_bt_err_get). It used to stay in
+    # the table and out of the index, which index lookups trust. Take it back,
+    # with its chains, and fail the statement; the header is still committed,
+    # because the pages the attempt allocated must not stay on the on-disk free
+    # list. A B-tree split that failed part-way can still have cost other keys
+    # their entries outside a transaction (roadmap); inside one, the statement's
+    # failure marks the transaction and COMMIT rolls it back.
+    if (ierr != 0) {
+        if (tbl_unappend(fd, hdr, idx, _tbl_last_ref_get(), rsz) == PATRA_OK) {
+            _tbl_free_row_bytes(fd, hdr, row, schema, ncols);
+            store64(db + DB_ROWS_AFFECTED, 0);
+        }
+    }
 
     _pt_free(row);
     pg_free(schema);
 
     if (r == PATRA_OK) { r = _db_hdr_commit(db, fd, hdr); }
+    if (r == PATRA_OK) { if (ierr != 0) { r = PATRA_ERR_IO; } }
     _tx_unlock(db, fd);
     return r;
 }
@@ -1063,13 +1153,16 @@ fn _exec_update(db): i64 {
     var rsz = row_compute_size(schema, ncols);
 
     var r = tbl_update(fd, hdr, idx, rsz, schema, ncols, _spr());
+    if (r == PATRA_OK) { store64(db + DB_ROWS_AFFECTED, _tbl_rows_affected_get()); }
 
-    # Write schema page if index root may have changed
-    if (r == PATRA_OK) {
-        store64(db + DB_ROWS_AFFECTED, _tbl_rows_affected);
-        page_write(fd, spg, schema);
-        r = _db_hdr_commit(db, fd, hdr);
-    }
+    # Write schema page if index root may have changed. 1.16.2: also after a
+    # failure — the rows updated before it are on disk, their chains came off
+    # the free list, and an index split may have moved the root; the header
+    # and schema that describe them must reach the disk too.
+    var sw = page_write(fd, spg, schema);
+    var hc = _db_hdr_commit(db, fd, hdr);
+    if (r == PATRA_OK) { r = sw; }
+    if (r == PATRA_OK) { r = hc; }
     pg_free(schema);
     _tx_unlock(db, fd);
     return r;
@@ -1098,7 +1191,7 @@ fn _exec_delete(db): i64 {
     var rsz = row_compute_size(schema, ncols);
 
     var r = tbl_delete(fd, hdr, idx, rsz, schema, ncols, _spr());
-    if (r == PATRA_OK) { store64(db + DB_ROWS_AFFECTED, _tbl_rows_affected); }
+    if (r == PATRA_OK) { store64(db + DB_ROWS_AFFECTED, _tbl_rows_affected_get()); }
     pg_free(schema);
 
     # DELETE compacts/frees data pages, so the cached tail page may be gone.
@@ -1442,18 +1535,32 @@ fn _exec_alter_add(db): i64 {
     # not, and silently dropping rows here is how the geometry bug destroyed
     # tables while reporting success.
     var reins_err = PATRA_OK;
+    var idx_err = 0;
     for (var ri = 0; ri < nrows; ri = ri + 1) {
         var rp = scratch + ri * rsz_new;
         var tir = tbl_insert(fd, hdr, idx, rp, rsz_new, db + DB_LP_IDX);
         if (tir != PATRA_OK) { if (reins_err == PATRA_OK) { reins_err = tir; } }
         if (ic >= 0) {
             var ir_now = load64(schema + SCH_IDX_ROOT);
-            if (ir_now != 0) {
+            # 1.16.2: only a row that was stored is indexed — a failed insert
+            # left the last ref naming the previous row, which got a second
+            # entry — and nothing more once the index has refused a row.
+            if (ir_now != 0 && tir == PATRA_OK && idx_err == 0) {
                 var ikey = _idx_key_from_row(schema, ncols_new, ic, rp);
-                var nr = btree_insert(fd, hdr, ir_now, ikey, _tbl_last_ref);
+                var nr = btree_insert(fd, hdr, ir_now, ikey, _tbl_last_ref_get());
                 if (nr != ir_now) { store64(schema + SCH_IDX_ROOT, nr); }
+                if (_bt_err_get() != 0) { idx_err = 1; }
             }
         }
+    }
+    # 1.16.2: an index the rebuild could not complete is dropped, not left
+    # missing the rows it could not take — lookups trust it, and a scan answers
+    # correctly without it. The statement fails; CREATE INDEX rebuilds it.
+    if (idx_err != 0) {
+        btree_free_all(fd, hdr, load64(schema + SCH_IDX_ROOT));
+        store64(schema + SCH_IDX_COL, 0 - 1);
+        store64(schema + SCH_IDX_ROOT, 0);
+        if (reins_err == PATRA_OK) { reins_err = PATRA_ERR_IO; }
     }
 
     page_write(fd, spg, schema);
@@ -1671,18 +1778,32 @@ fn _exec_alter_drop_col(db): i64 {
     # row so the page-geometry failure cannot arise here, but a page_alloc
     # failure mid-rebuild can, and this loop has already freed the originals.
     var reins_err2 = PATRA_OK;
+    var idx_err = 0;
     for (var ri = 0; ri < nrows; ri = ri + 1) {
         var rp = scratch + ri * rsz_new;
         var tir2 = tbl_insert(fd, hdr, idx, rp, rsz_new, db + DB_LP_IDX);
         if (tir2 != PATRA_OK) { if (reins_err2 == PATRA_OK) { reins_err2 = tir2; } }
         if (ic_new >= 0) {
             var ir_now = load64(schema + SCH_IDX_ROOT);
-            if (ir_now != 0) {
+            # 1.16.2: only a row that was stored is indexed — a failed insert
+            # left the last ref naming the previous row, which got a second
+            # entry — and nothing more once the index has refused a row.
+            if (ir_now != 0 && tir2 == PATRA_OK && idx_err == 0) {
                 var ikey = _idx_key_from_row(schema, ncols_new, ic_new, rp);
-                var nr = btree_insert(fd, hdr, ir_now, ikey, _tbl_last_ref);
+                var nr = btree_insert(fd, hdr, ir_now, ikey, _tbl_last_ref_get());
                 if (nr != ir_now) { store64(schema + SCH_IDX_ROOT, nr); }
+                if (_bt_err_get() != 0) { idx_err = 1; }
             }
         }
+    }
+    # 1.16.2: an index the rebuild could not complete is dropped, not left
+    # missing the rows it could not take — lookups trust it, and a scan answers
+    # correctly without it. The statement fails; CREATE INDEX rebuilds it.
+    if (idx_err != 0) {
+        btree_free_all(fd, hdr, load64(schema + SCH_IDX_ROOT));
+        store64(schema + SCH_IDX_COL, 0 - 1);
+        store64(schema + SCH_IDX_ROOT, 0);
+        if (reins_err2 == PATRA_OK) { reins_err2 = PATRA_ERR_IO; }
     }
 
     page_write(fd, spg, schema);
@@ -1757,13 +1878,16 @@ fn _exec_create_index(db): i64 {
     var ct = load64(schema + SCH_START + ci * SCH_ENTRY_SZ + SCH_CTYPE);
     if (_col_is_chain(ct)) { pg_free(schema); _tx_unlock(db, fd); return PATRA_ERR_TYPE; }
 
-    # 1.14.0: release the previous index before building a new one. Re-issuing
-    # CREATE INDEX on a table that already had one overwrote SCH_IDX_ROOT and
-    # leaked the entire old B-tree — every internal and leaf page, unreachable
-    # and never returned to the free list. The ALTER paths already do this;
-    # only this one did not.
+    # 1.14.0: release the previous index. Re-issuing CREATE INDEX on a table
+    # that already had one overwrote SCH_IDX_ROOT and leaked the entire old
+    # B-tree — every internal and leaf page, unreachable and never returned to
+    # the free list. The ALTER paths already do this; only this one did not.
+    #
+    # 1.16.2: released AFTER the new tree is built and the schema names it, not
+    # before. Freed first, a build that then failed (btree_create refused, out
+    # of space) returned with the schema still naming the old root, whose pages
+    # were now free-list nodes the next allocation would hand out.
     var ir_prev = load64(schema + SCH_IDX_ROOT);
-    if (ir_prev != 0) { btree_free_all(fd, hdr, ir_prev); }
 
     # Create B-tree and populate with existing rows
     var bt = btree_create(fd, hdr);
@@ -1771,6 +1895,8 @@ fn _exec_create_index(db): i64 {
     var rsz = row_compute_size(schema, ncols);
     var cur = load64(entry + TBL_ROOT);
     var pbuf = pg_alloc();
+    var berr = PATRA_OK;
+    if (pbuf == 0) { berr = PATRA_ERR_IO; cur = 0; }      # 1.16.2: checked
 
     var hops = 0;
     var maxhops = load64(hdr + HDR_PGCOUNT);
@@ -1783,21 +1909,42 @@ fn _exec_create_index(db): i64 {
         page_read(fd, cur, pbuf);
         var nrows = _dp_nrows_clamped(pbuf, rsz);
         for (var i = 0; i < nrows; i = i + 1) {
-            var rp = pbuf + DP_DATA + i * rsz;
-            var key = _idx_key_from_row(schema, ncols, ci, rp);
-            bt = btree_insert(fd, hdr, bt, key, _bt_mkref(cur, i));
+            if (berr == PATRA_OK) {
+                var rp = pbuf + DP_DATA + i * rsz;
+                var key = _idx_key_from_row(schema, ncols, ci, rp);
+                bt = btree_insert(fd, hdr, bt, key, _bt_mkref(cur, i));
+                # 1.16.2: a row the new index could not take fails the build;
+                # an index missing rows answers lookups wrongly.
+                if (_bt_err_get() != 0) { berr = PATRA_ERR_IO; }
+            }
         }
         cur = load64(pbuf + DP_NEXT);
+        if (berr != PATRA_OK) { cur = 0; }
     }
-    pg_free(pbuf);
+    if (pbuf != 0) { pg_free(pbuf); }
+
+    if (berr != PATRA_OK) {
+        # Give the half-built tree back and keep the old index. The header is
+        # committed: the build's pages came off the free list, and any it could
+        # not give back must not stay listed there on disk.
+        btree_free_all(fd, hdr, bt);
+        pg_free(schema);
+        _db_hdr_commit(db, fd, hdr);
+        _tx_unlock(db, fd);
+        return berr;
+    }
 
     # Store index in schema page
     store64(schema + SCH_IDX_COL, ci);
     store64(schema + SCH_IDX_ROOT, bt);
-    page_write(fd, spg, schema);
+    var sw = page_write(fd, spg, schema);
     pg_free(schema);
+    if (sw == PATRA_OK) {
+        if (ir_prev != 0) { btree_free_all(fd, hdr, ir_prev); }
+    }
 
     var hc = _db_hdr_commit(db, fd, hdr);
+    if (hc == PATRA_OK) { hc = sw; }
     _tx_unlock(db, fd);
     return hc;
 }
@@ -2110,12 +2257,44 @@ fn _stmt_unlock(db): i64 {
     return 0;
 }
 
+# ── A statement that fails part-way inside a transaction (1.16.2) ──────
+#
+# Outside a transaction a failed statement gives back what it allocated and
+# commits the header over what it could not (INSERT also takes its row back);
+# inside one there is no per-statement undo, so a statement that ran out of
+# space, memory or I/O AFTER it had written left part of itself in the
+# transaction — rows without their index entries, an index without its rows —
+# and COMMIT made that permanent. Such a statement now marks the transaction
+# the way a refused before-image does (wal_mark_failed), and patra_commit rolls
+# it back. Refusals of the statement itself (TYPE, NOTFOUND, EXISTS, …) leave
+# the transaction committable, as before: they happen before any write, or —
+# INSERT's TEXT chains — give back what they wrote.
+#
+# `_stmt_tx_mark` before the statement, `_stmt_tx_check` after; -1 = no transaction.
+fn _stmt_tx_mark(db): i64 {
+    if (db == 0) { return 0 - 1; }
+    if (load64(db + DB_TX) == 0) { return 0 - 1; }
+    return wal_writes(_db_fd(db));
+}
+
+fn _stmt_tx_check(db, mark, r): i64 {
+    if (mark < 0) { return r; }
+    var partial = 0;
+    if (r == PATRA_ERR_IO) { partial = 1; }
+    if (r == PATRA_ERR_FULL) { partial = 1; }
+    if (r == PATRA_ERR_PAGE) { partial = 1; }
+    if (partial == 0) { return r; }
+    if (wal_writes(_db_fd(db)) != mark) { wal_mark_failed(_db_fd(db), r); }
+    return r;
+}
+
 # Execute a DDL/DML SQL statement
 fn patra_exec(db, sql): i64 {
     var _tx = 0;
     if (db != 0) { _tx = load64(db + DB_TX); }
     _stmt_lock(db);
-    var r = _patra_exec_impl(db, sql);
+    var _mk = _stmt_tx_mark(db);
+    var r = _stmt_tx_check(db, _mk, _patra_exec_impl(db, sql));
     if (_tx == 0) { _patra_unlock(); }
     return r;
 }
@@ -2167,6 +2346,7 @@ fn _patra_exec_impl(db, sql): i64 {
     if (_sql_has_dq(sql) == 0) { return _exec_parsed(db, sql); }
     var slen = strlen(sql);
     var sbuf = _pt_alloc(slen + 1);
+    if (sbuf == 0) { return PATRA_ERR_IO; }      # 1.16.2: checked
     memcpy(sbuf, sql, slen);
     store8(sbuf + slen, 0);
     var er = _exec_parsed(db, sbuf);
@@ -2176,6 +2356,7 @@ fn _patra_exec_impl(db, sql): i64 {
 
 fn _exec_parsed(db, sql): i64 {
     sql_tokenize(sql);
+    if (_lexerr() == 2) { return PATRA_ERR_IO; }     # 1.16.2: no parse scratch
     var r = sql_parse();
     if (r != PATRA_OK) { return r; }
     # `?` placeholders require prepare + bind — they can't be executed directly.
@@ -2287,10 +2468,12 @@ fn _sort_result_multi(rs, ob_idxs, ob_types, ob_dirs, obn): i64 {
     #
     # Merge sort gives O(N log N) comparisons and is STABLE, which multi-column
     # ORDER BY depends on: the `<= 0` below keeps equal rows in input order.
+    # 1.16.2: a refusal (here or of `tmp` below) is PATRA_ERR_IO, and fails
+    # the query. It returned 0 and the rows went back unsorted under an ORDER BY.
     var idx = _pt_alloc(nrows * 8);
-    if (idx == 0) { return 0; }
+    if (idx == 0) { return PATRA_ERR_IO; }
     var buf = _pt_alloc(nrows * 8);
-    if (buf == 0) { _pt_free(idx); return 0; }
+    if (buf == 0) { _pt_free(idx); return PATRA_ERR_IO; }
     for (var i = 0; i < nrows; i = i + 1) { store64(idx + i * 8, i); }
 
     # Insertion-sort base runs before merging — the classic hybrid.
@@ -2376,7 +2559,7 @@ fn _sort_result_multi(rs, ob_idxs, ob_types, ob_dirs, obn): i64 {
     for (var i = 0; i < nrows; i = i + 1) { store64(buf + load64(idx + i * 8) * 8, i); }
 
     var tmp = _pt_alloc(rsz);
-    if (tmp == 0) { _pt_free(buf); _pt_free(idx); return 0; }
+    if (tmp == 0) { _pt_free(buf); _pt_free(idx); return PATRA_ERR_IO; }
     for (var i = 0; i < nrows; i = i + 1) {
         var cycling = 1;
         while (cycling == 1) {
@@ -2432,6 +2615,7 @@ fn _patra_query_impl(db, sql): i64 {
     if (_sql_has_dq(sql) == 0) { return _query_parsed(db, sql); }
     var slen = strlen(sql);
     var sbuf = _pt_alloc(slen + 1);
+    if (sbuf == 0) { return 0; }                 # 1.16.2: checked
     memcpy(sbuf, sql, slen);
     store8(sbuf + slen, 0);
     var qrs = _query_parsed(db, sbuf);
@@ -2441,6 +2625,7 @@ fn _patra_query_impl(db, sql): i64 {
 
 fn _query_parsed(db, sql): i64 {
     sql_tokenize(sql);
+    if (_lexerr() == 2) { return 0; }                # 1.16.2: no parse scratch
     var r = sql_parse();
     if (r != PATRA_OK) { return 0; }
     # `?` placeholders require prepare + bind — reject direct parameterized query.
@@ -2461,6 +2646,11 @@ fn _query_parsed(db, sql): i64 {
 # patra_result_free owns and frees these buffers. MUST run under patra_lock_sh,
 # before patra_unlock — it reads the payload pages.
 fn _rs_materialize(fd, hdr, rs): i64 {
+    # 1.16.2: a refused buffer fails the query (PATRA_ERR_IO). It emptied the
+    # cell, as for an unreadable chain, so the query answered with an empty
+    # value it had never read. Every cell after it is cleared too, so
+    # patra_result_free frees only payloads, never a page number.
+    var mfail = 0;
     var ncols = load64(rs + RS_NCOLS);
     var nrows = load64(rs + RS_NROWS);
     var types = load64(rs + RS_TYPES);
@@ -2488,14 +2678,17 @@ fn _rs_materialize(fd, hdr, rs): i64 {
                     len = 0;
                     store64(ref + BR_LEN, 0);
                 }
-                if (len > 0 && pg != 0) {
+                if (mfail != 0) {
+                    store64(ref + BR_PAGE, 0);
+                    store64(ref + BR_LEN, 0);
+                } elif (len > 0 && pg != 0) {
                     var buf = _pt_alloc(len);
-                    if (buf == 0) {
-                        store64(ref + BR_PAGE, 0);
-                        store64(ref + BR_LEN, 0);
-                    } elif (_bytes_read_chain(fd, hdr, pg, len, buf) == PATRA_OK) {
+                    var mr = PATRA_ERR_IO;
+                    if (buf != 0) { mr = _bytes_read_chain(fd, hdr, pg, len, buf); }
+                    if (mr == PATRA_OK) {
                         store64(ref + BR_PAGE, buf);
                     } else {
+                        if (mr == PATRA_ERR_IO) { mfail = 1; }
                         _pt_free(buf);
                         store64(ref + BR_PAGE, 0);
                         store64(ref + BR_LEN, 0);
@@ -2506,6 +2699,7 @@ fn _rs_materialize(fd, hdr, rs): i64 {
             }
         }
     }
+    if (mfail != 0) { return PATRA_ERR_IO; }
     return PATRA_OK;
 }
 
@@ -2661,6 +2855,7 @@ fn _patra_query_exec(db): i64 {
 
         var acur = load64(entry + TBL_ROOT);
         var abuf = pg_alloc();
+        if (abuf == 0) { pg_free(schema); _tx_unlock(db, fd); return 0; }    # 1.16.2
         var ahops = 0;
         var amaxhops = load64(hdr + HDR_PGCOUNT);
         if (amaxhops < 1) { amaxhops = 1; }
@@ -2693,6 +2888,7 @@ fn _patra_query_exec(db): i64 {
 
         # Build 1-row, 1-column result
         var ars = _pt_alloc(RS_HDR_SZ + 8 + 32 + 8);
+        if (ars == 0) { return 0; }                                         # 1.16.2
         memset(ars, 0, RS_HDR_SZ + 8 + 32 + 8);
         store64(ars + RS_NCOLS, 1);
         store64(ars + RS_NROWS, 1);
@@ -2714,6 +2910,7 @@ fn _patra_query_exec(db): i64 {
     }
 
     var plan_refs = _pt_alloc(8192);
+    if (plan_refs == 0) { pg_free(schema); _tx_unlock(db, fd); return 0; }  # 1.16.2
     var plan_n = _idx_plan(fd, hdr, schema, ncols, nrows, plan_refs);
     var alloc_rows = nrows;
     if (plan_n >= 0) { alloc_rows = plan_n; }
@@ -2734,6 +2931,12 @@ fn _patra_query_exec(db): i64 {
     var total = fixed + alloc_rows * rsz;
     if (total < RS_HDR_SZ + 64) { total = RS_HDR_SZ + 64; }
     var rs = _pt_alloc(total);
+    if (rs == 0) {                                                          # 1.16.2
+        _pt_free(plan_refs);
+        pg_free(schema);
+        _tx_unlock(db, fd);
+        return 0;
+    }
     memset(rs, 0, total);
 
     var types_ptr = rs + RS_HDR_SZ;
@@ -2762,6 +2965,13 @@ fn _patra_query_exec(db): i64 {
     if (plan_n >= 0) {
         used_index = 1;
         var rbuf = pg_alloc();
+        if (rbuf == 0) {                                                    # 1.16.2
+            _pt_free(plan_refs);
+            _pt_free(rs);
+            pg_free(schema);
+            _tx_unlock(db, fd);
+            return 0;
+        }
         var lpg = 0 - 1;
         for (var ri = 0; ri < plan_n; ri = ri + 1) {
             var ref = load64(plan_refs + ri * 8);
@@ -2790,6 +3000,8 @@ fn _patra_query_exec(db): i64 {
     if (used_index == 0) {
         var ovf = 0;
         actual = tbl_scan_where(fd, hdr, idx, data_ptr, rsz, schema, ncols, _spr(), alloc_rows, &ovf);
+        # 1.16.2: the scan's page buffer was refused.
+        if (actual < 0) { ovf = 0; }
         # 1.16.2: a matching row did not fit. alloc_rows came from TBL_NROWS,
         # which reads low after a power loss left a data page ahead of its
         # header; the result ended silently short (COUNT(*) walks the chain and
@@ -2817,6 +3029,12 @@ fn _patra_query_exec(db): i64 {
             rs = rs2;
             actual = tbl_scan_where(fd, hdr, idx, data_ptr, rsz, schema, ncols, _spr(), real, 0);
         }
+        if (actual < 0) {
+            _pt_free(rs);
+            pg_free(schema);
+            _tx_unlock(db, fd);
+            return 0;
+        }
     }
     store64(rs + RS_NROWS, actual);
 
@@ -2835,6 +3053,12 @@ fn _patra_query_exec(db): i64 {
         var ob_dirs = _pt_alloc(obn * 8);
         var np = load64(rs + RS_NAMES);
         var ob_valid = 1;
+        # 1.16.2: checked; a refusal (here or in the sort) fails the query.
+        var ob_ok = 1;
+        if (ob_idxs == 0) { ob_ok = 0; }
+        if (ob_types == 0) { ob_ok = 0; }
+        if (ob_dirs == 0) { ob_ok = 0; }
+        if (ob_ok == 0) { obn = 0; ob_valid = 0; }
         for (var oi = 0; oi < obn; oi = oi + 1) {
             var ob = _spr() + PR_ORDERBY_COLS + oi * OB_SZ;
             var ob_p = load64(ob + OB_PTR);
@@ -2863,11 +3087,16 @@ fn _patra_query_exec(db): i64 {
             store64(ob_dirs + oi * 8, ob_d);
         }
         if (ob_valid != 0) {
-            _sort_result_multi(rs, ob_idxs, ob_types, ob_dirs, obn);
+            if (_sort_result_multi(rs, ob_idxs, ob_types, ob_dirs, obn) != PATRA_OK) { ob_ok = 0; }
         }
         _pt_free(ob_idxs);
         _pt_free(ob_types);
         _pt_free(ob_dirs);
+        if (ob_ok == 0) {
+            _pt_free(rs);
+            _tx_unlock(db, fd);
+            return 0;
+        }
     }
 
     # LIMIT
@@ -2888,6 +3117,11 @@ fn _patra_query_exec(db): i64 {
         var pj_names_src = load64(rs + RS_NAMES);
         var pj_types_src = load64(rs + RS_TYPES);
         var pj_valid = 1;
+        # 1.16.2: checked; a refusal fails the query below, as a bad column does.
+        if (pj_idxs == 0) { pj_valid = 0; }
+        if (pj_types == 0) { pj_valid = 0; }
+        if (pj_offs == 0) { pj_valid = 0; }
+        if (pj_valid == 0) { pjn = 0; }
         for (var pji = 0; pji < pjn; pji = pji + 1) {
             var pj_item = _spr() + PR_ITEMS + pji * SEL_SZ;
             var pj_p = load64(pj_item + SEL_PTR);
@@ -2924,6 +3158,14 @@ fn _patra_query_exec(db): i64 {
         var pj_total = RS_HDR_SZ + pjn * 8 + pjn * SCH_CNAME_MAX + pj_out_n * pj_new_rsz;
         if (pj_total < RS_HDR_SZ + 64) { pj_total = RS_HDR_SZ + 64; }
         var rs2 = _pt_alloc(pj_total);
+        if (rs2 == 0) {                                                     # 1.16.2
+            _pt_free(pj_idxs);
+            _pt_free(pj_types);
+            _pt_free(pj_offs);
+            _pt_free(rs);
+            _tx_unlock(db, fd);
+            return 0;
+        }
         memset(rs2, 0, pj_total);
         var pj_t = rs2 + RS_HDR_SZ;
         var pj_nm = pj_t + pjn * 8;
@@ -2961,14 +3203,16 @@ fn _patra_query_exec(db): i64 {
         _pt_free(pj_offs);
         _pt_free(rs);
         # Snapshot TEXT/BYTES payloads of the projected result, then drop the lock.
-        _rs_materialize(fd, hdr, rs2);
+        var pmr = _rs_materialize(fd, hdr, rs2);
         _tx_unlock(db, fd);
+        if (pmr != PATRA_OK) { patra_result_free(rs2); return 0; }
         return rs2;
     }
 
     # Snapshot TEXT/BYTES payloads of the (unprojected) result, then drop the lock.
-    _rs_materialize(fd, hdr, rs);
+    var mr = _rs_materialize(fd, hdr, rs);
     _tx_unlock(db, fd);
+    if (mr != PATRA_OK) { patra_result_free(rs); return 0; }
     return rs;
 }
 
@@ -3020,11 +3264,19 @@ fn _patra_prepare_impl(db, sql): i64 {
     var slen = strlen(sql);
     var stmt = _pt_alloc(STMT_TOTAL_SZ);
     var sbuf = _pt_alloc(slen + 1);
+    # 1.16.2: checked (a refusal was a copy through 0).
+    if (stmt == 0) { _pt_free(sbuf); return 0; }
+    if (sbuf == 0) { _pt_free(stmt); return 0; }
     memcpy(sbuf, sql, slen);
     store8(sbuf + slen, 0);
     store64(stmt + STMT_SQL, sbuf);
     store64(stmt + STMT_SQL_LEN, slen);
 
+    if (_sql_ensure() != PATRA_OK) {                              # 1.16.2
+        _pt_free(sbuf);
+        _pt_free(stmt);
+        return 0;
+    }
     sql_tokenize(sbuf);
     if (sql_parse() != PATRA_OK) {
         _pt_free(sbuf);
@@ -3138,7 +3390,8 @@ fn patra_exec_prepared(db, stmt): i64 {
     var _tx = 0;
     if (db != 0) { _tx = load64(db + DB_TX); }
     _stmt_lock(db);
-    var r = _patra_exec_prepared_impl(db, stmt);
+    var _mk = _stmt_tx_mark(db);
+    var r = _stmt_tx_check(db, _mk, _patra_exec_prepared_impl(db, stmt));
     if (_tx == 0) { _patra_unlock(); }
     return r;
 }
@@ -3167,7 +3420,8 @@ fn patra_insert_returning(db, stmt, out_id): i64 {
     var _txi = 0;
     if (db != 0) { _txi = load64(db + DB_TX); }
     _stmt_lock(db);
-    var r = _patra_exec_prepared_impl(db, stmt);
+    var _mk = _stmt_tx_mark(db);
+    var r = _stmt_tx_check(db, _mk, _patra_exec_prepared_impl(db, stmt));
     if (out_id != 0) {
         var id = 0;
         if (r == PATRA_OK) { id = load64(db + DB_LAST_ID); }
@@ -3185,7 +3439,8 @@ fn patra_exec_returning(db, stmt, out_affected): i64 {
     var _txe = 0;
     if (db != 0) { _txe = load64(db + DB_TX); }
     _stmt_lock(db);
-    var r = _patra_exec_prepared_impl(db, stmt);
+    var _mk = _stmt_tx_mark(db);
+    var r = _stmt_tx_check(db, _mk, _patra_exec_prepared_impl(db, stmt));
     if (out_affected != 0) {
         var n = 0;
         if (r == PATRA_OK) { n = load64(db + DB_ROWS_AFFECTED); }
@@ -3198,6 +3453,7 @@ fn patra_exec_returning(db, stmt, out_affected): i64 {
 fn _patra_exec_prepared_impl(db, stmt): i64 {
     if (db == 0) { return PATRA_ERR_IO; }
     if (stmt == 0) { return PATRA_ERR_SYNTAX; }
+    if (_sql_ensure() != PATRA_OK) { return PATRA_ERR_IO; }      # 1.16.2
     _stmt_restore(stmt);
     _apply_binds(stmt);
     var st = load64(_spr() + PR_STMT);
@@ -3228,6 +3484,7 @@ fn patra_query_prepared(db, stmt): i64 {
 fn _patra_query_prepared_impl(db, stmt): i64 {
     if (db == 0) { return 0; }
     if (stmt == 0) { return 0; }
+    if (_sql_ensure() != PATRA_OK) { return 0; }                 # 1.16.2
     _stmt_restore(stmt);
     _apply_binds(stmt);
     if (load64(_spr() + PR_STMT) != STMT_SELECT) { return 0; }
@@ -3463,7 +3720,9 @@ fn patra_insert_row(db, tname, tnlen, ncols, types, ivals, sptrs, slens, bptrs, 
     var _tx = 0;
     if (db != 0) { _tx = load64(db + DB_TX); }
     _stmt_lock(db);
-    var r = _patra_insert_row_impl(db, tname, tnlen, ncols, types, ivals, sptrs, slens, bptrs, blens, 0);
+    var _mk = _stmt_tx_mark(db);
+    var r = _stmt_tx_check(db, _mk,
+      _patra_insert_row_impl(db, tname, tnlen, ncols, types, ivals, sptrs, slens, bptrs, blens, 0));
     if (_tx == 0) { _patra_unlock(); }
     return r;
 }
@@ -3481,7 +3740,9 @@ fn patra_insert_row_or_ignore(db, tname, tnlen, ncols, types, ivals, sptrs, slen
     var _tx = 0;
     if (db != 0) { _tx = load64(db + DB_TX); }
     _stmt_lock(db);
-    var r = _patra_insert_row_impl(db, tname, tnlen, ncols, types, ivals, sptrs, slens, bptrs, blens, 1);
+    var _mk = _stmt_tx_mark(db);
+    var r = _stmt_tx_check(db, _mk,
+      _patra_insert_row_impl(db, tname, tnlen, ncols, types, ivals, sptrs, slens, bptrs, blens, 1));
     if (_tx == 0) { _patra_unlock(); }
     return r;
 }
@@ -3539,7 +3800,12 @@ fn _patra_insert_row_impl(db, tname, tnlen, ncols, types, ivals, sptrs, slens, b
             if (load64(schema + SCH_START + acolr * SCH_ENTRY_SZ + SCH_CTYPE) == COL_INT) {
                 if (load64(ivals + acolr * 8) == 0) {
                     auto_col = acolr;
-                    auto_val = _max_int_col(fd, entry, schema, scols, acolr) + 1;
+                    var aokr = 1;
+                    auto_val = _max_int_col(fd, entry, schema, scols, acolr, &aokr) + 1;
+                    if (aokr == 0) {
+                        _pt_free(row); pg_free(schema); _tx_unlock(db, fd);
+                        return PATRA_ERR_IO;
+                    }
                 }
             }
         }
@@ -3610,6 +3876,14 @@ fn _patra_insert_row_impl(db, tname, tnlen, ncols, types, ivals, sptrs, slens, b
                         var nrefs = load64(rncell);
                         _pt_free(rncell);
                         var pbuf = pg_alloc();
+                        # 1.16.2: checked; undecidable, so refused (as above).
+                        if (pbuf == 0) {
+                            _pt_free(refs);
+                            _pt_free(row);
+                            pg_free(schema);
+                            _tx_unlock(db, fd);
+                            return PATRA_ERR_FULL;
+                        }
                         var lpg = 0 - 1;
                         for (var ri = 0; ri < nrefs; ri = ri + 1) {
                             if (ihit == 0) {
@@ -3649,11 +3923,10 @@ fn _patra_insert_row_impl(db, tname, tnlen, ncols, types, ivals, sptrs, slens, b
         }
     }
 
-    # Write the row. BLOB payloads write their chains here; if the insert
-    # fails after any chain has been laid down, those pages will orphan.
-    # Consumers should treat patra_insert_row as atomic at the row level
-    # only — failure after the first BLOB chain leaks pages until the next
-    # VACUUM-ish cleanup lands.
+    # Write the row. BLOB payloads write their chains here. 1.16.2: every
+    # failure after the first chain gives the row's chains back
+    # (_tbl_free_row_bytes) — they used to be left written, and in autocommit
+    # the on-disk free list still named their pages.
     for (var j = 0; j < ncols; j = j + 1) {
         var ctj = load64(schema + SCH_START + j * SCH_ENTRY_SZ + SCH_CTYPE);
         var off = row_field_offset(schema, scols, j);
@@ -3661,6 +3934,7 @@ fn _patra_insert_row_impl(db, tname, tnlen, ncols, types, ivals, sptrs, slens, b
             row_write_int(row, off, load64(ivals + j * 8));
         } elif (ctj == COL_STR) {
             if (load64(slens + j * 8) > COL_STR_SZ - 1) {
+                _tbl_free_row_bytes(fd, hdr, row, schema, scols);
                 _pt_free(row);
                 pg_free(schema);
                 _tx_unlock(db, fd);
@@ -3671,6 +3945,16 @@ fn _patra_insert_row_impl(db, tname, tnlen, ncols, types, ivals, sptrs, slens, b
             var bp = load64(bptrs + j * 8);
             var bl = load64(blens + j * 8);
             var head = _bytes_write_chain(fd, hdr, bp, bl);
+            # 1.16.2: checked (a refused chain stored a reference to page 0).
+            if (bl > 0) {
+                if (head == 0) {
+                    _tbl_free_row_bytes(fd, hdr, row, schema, scols);
+                    _pt_free(row);
+                    pg_free(schema);
+                    _tx_unlock(db, fd);
+                    return PATRA_ERR_IO;
+                }
+            }
             row_write_bytes_ref(row, off, head, bl);
         }
     }
@@ -3682,9 +3966,11 @@ fn _patra_insert_row_impl(db, tname, tnlen, ncols, types, ivals, sptrs, slens, b
     }
 
     var r = tbl_insert(fd, hdr, idx, row, rsz, db + DB_LP_IDX);
+    if (r != PATRA_OK) { _tbl_free_row_bytes(fd, hdr, row, schema, scols); }
 
     if (r == PATRA_OK) { _db_record_insert(db, schema, scols, row); }
 
+    var ierr = 0;
     if (r == PATRA_OK) {
         var ic = load64(schema + SCH_IDX_COL);
         if (ic >= 0) {
@@ -3692,7 +3978,8 @@ fn _patra_insert_row_impl(db, tname, tnlen, ncols, types, ivals, sptrs, slens, b
                 var ir = load64(schema + SCH_IDX_ROOT);
                 if (ir != 0) {
                     var ikey = _idx_key_from_row(schema, scols, ic, row);
-                    var nr = btree_insert(fd, hdr, ir, ikey, _tbl_last_ref);
+                    var nr = btree_insert(fd, hdr, ir, ikey, _tbl_last_ref_get());
+                    ierr = _bt_err_get();
                     if (nr != ir) {
                         store64(schema + SCH_IDX_ROOT, nr);
                         page_write(fd, spg, schema);
@@ -3701,11 +3988,19 @@ fn _patra_insert_row_impl(db, tname, tnlen, ncols, types, ivals, sptrs, slens, b
             }
         }
     }
+    # 1.16.2: as in _exec_insert — a row the index could not take is taken back.
+    if (ierr != 0) {
+        if (tbl_unappend(fd, hdr, idx, _tbl_last_ref_get(), rsz) == PATRA_OK) {
+            _tbl_free_row_bytes(fd, hdr, row, schema, scols);
+            store64(db + DB_ROWS_AFFECTED, 0);
+        }
+    }
 
     _pt_free(row);
     pg_free(schema);
 
     if (r == PATRA_OK) { r = _db_hdr_commit(db, fd, hdr); }
+    if (r == PATRA_OK) { if (ierr != 0) { r = PATRA_ERR_IO; } }
     _tx_unlock(db, fd);
     return r;
 }

@@ -28,11 +28,25 @@ the authoritative map:
 | 3 | `src/file.cyr` (`TLS_LEXERR`) | lexer/parser error flag (**v1.13.6**) |
 | 4 | `src/file.cyr` (`TLS_SLAB_STACK`) | page-slab LIFO array ptr |
 | 5 | `src/file.cyr` (`TLS_SLAB_TOP`) | page-slab top index |
-| 6–15 | — | free |
+| 6 | `src/btree.cyr` (`TLS_BTERR`) | the last B-tree mutation could not apply (**v1.16.2**) |
+| 7 | `src/table.cyr` (`TLS_LASTREF`) | (page, slot) ref of the row `tbl_insert` stored last (**v1.16.2**) |
+| 8 | `src/table.cyr` (`TLS_AFFECTED`) | rows matched by the last UPDATE / DELETE (**v1.16.2**) |
 
 Accessors: `_stoks()` / `_spr()` / `_sntoks()` read the first three,
-`_set_sntoks()` writes the third; `_lexerr()` / `_set_lexerr()` the fourth.
-The slab uses the last two directly.
+`_set_sntoks()` writes the third; `_lexerr()` / `_set_lexerr()` the fourth
+(lexer error 2 means the parse scratch could not be allocated, v1.16.2). The
+slab uses the next two directly. `_bt_err_get` / `_bt_err_set`,
+`_tbl_last_ref_get` / `_set` and `_tbl_rows_affected_get` / `_set` the last
+three.
+
+**Why the writer's results are per-thread (v1.16.2).** They were process
+globals, along with the B-tree insert's path, on the assumption that writers
+are serialized by the statement mutex. A statement **inside a transaction does
+not take that mutex** (`_stmt_lock`, `src/lib.cyr`), so two threads each in a
+transaction on its own database ran writers concurrently and destroyed each
+other's indexes. The insert's path and split reservation now live on
+`btree_insert`'s stack (`BtSplitCtx`, `src/btree.cyr`), and these three
+results here. [ADR-0005](../adr/0005-writer-state-per-call-or-thread.md).
 
 **Why `TLS_LEXERR` is per-thread and not a global.** v1.12.0 dropped the
 statement mutex on the read path, so readers tokenize and parse concurrently. A
@@ -62,8 +76,12 @@ statement mutex (writers still take it; readers don't — see
   `thread_local_init()` exactly once before its first patra call.
 
 Buffers are allocated **lazily per thread on first use** — `_sql_ensure`
-(`src/sql.cyr:196`) and `_pg_slab_init` (`src/file.cyr:273`) each key off a
-zero slot meaning "not yet". A fresh thread's slots all read 0.
+(`src/sql.cyr`) and `_pg_slab_init` (`src/file.cyr`) each key off a
+zero slot meaning "not yet". A fresh thread's slots all read 0. Since
+v1.16.2 a refusal of either is handled: `_sql_ensure` returns
+`PATRA_ERR_IO` (the parse buffer is taken only after the token array, so a
+set `TLS_PR` still means both exist), and `pg_free` hands a buffer to the
+allocator when the thread has no slab stack.
 
 ## Platform note
 

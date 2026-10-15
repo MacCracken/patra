@@ -7878,6 +7878,888 @@ fn test_alter_survives_refused_allocations() {
     return 0;
 }
 
+# The table's index against its rows, read directly: every row in the data
+# chain has exactly one live entry under its key naming it, and the tree holds
+# no other live entry. A query cannot show this — it re-evaluates WHERE on each
+# row an index entry names, so a stale entry or a missing one for some key
+# reads back as the right count. 1 = consistent (or no such table / index).
+fn _sw_index_ok(db, name, nlen): i64 {
+    var fd = _db_fd(db);
+    var hdr = _db_hdr(db);
+    var idx = 0;
+    var spg = 0;
+    var schema = 0;
+    if (_tbl_open(fd, hdr, name, nlen, &idx, &spg, &schema) != PATRA_OK) { return 1; }
+    var ncols = _sch_ncols_clamped(schema);
+    var ic = load64(schema + SCH_IDX_COL);
+    var root = load64(schema + SCH_IDX_ROOT);
+    var ok = 1;
+    if (ic >= 0 && root != 0) {
+        var rsz = row_compute_size(schema, ncols);
+        var out = fl_alloc(8 * 4096);
+        var buf = fl_alloc(PAGE_SIZE);
+        var rows = 0;
+        var cur = load64(_tbl_entry(hdr, idx) + TBL_ROOT);
+        var hops = 0;
+        while (cur != 0) {
+            hops = hops + 1;
+            if (hops > 100000) {
+                ok = 0;
+                cur = 0;
+                continue;
+            }
+            page_read(fd, cur, buf);
+            var nr = _dp_nrows_clamped(buf, rsz);
+            for (var i = 0; i < nr; i = i + 1) {
+                var key = _idx_key_from_row(schema, ncols, ic, buf + DP_DATA + i * rsz);
+                var n = btree_search(fd, hdr, root, key, out, 4096);
+                var hits = 0;
+                for (var j = 0; j < n; j = j + 1) {
+                    if (load64(out + j * 8) == _bt_mkref(cur, i)) { hits = hits + 1; }
+                }
+                if (hits != 1) { ok = 0; }
+                rows = rows + 1;
+            }
+            cur = load64(buf + DP_NEXT);
+        }
+        var lo = 0 - 0x7FFFFFFFFFFFFFFF - 1;
+        var n2 = _bt_range(fd, hdr, root, lo, 0x7FFFFFFFFFFFFFFF, out, 4096);
+        var live = 0;
+        for (var j2 = 0; j2 < n2; j2 = j2 + 1) {
+            if (load64(out + j2 * 8) != (0 - 1)) { live = live + 1; }
+        }
+        if (live != rows) { ok = 0; }
+        fl_free(out);
+        fl_free(buf);
+    }
+    pg_free(schema);
+    return ok;
+}
+
+# -- 1.16.2: a refused allocation anywhere in any statement --
+#
+# About 70 allocation results across src/ were unchecked, and the failure paths
+# that were checked often left damage behind: a TEXT chain written and not
+# given back while the on-disk free list still named its pages, a B-tree split
+# abandoned half-written, an UPDATE that freed a row's text before writing the
+# new one, a CREATE INDEX that freed the old index before building the new.
+# This sweeps the allocation seam (architecture note 004) over every allocation
+# a statement makes — page buffers too (`_pt_alloc_fail_pages`) — one forked
+# child per refusal point, in autocommit and in a transaction, refusing from the
+# k-th allocation on or only the k-th, until the statement meets no refusal.
+# No child may crash; the file must reopen with a well-formed free list; every
+# table must read whole — count, scan, index and TEXT / BYTES agreeing — and a
+# transaction whose COMMIT was refused must be exactly as before BEGIN.
+#ifdef CYRIUS_TARGET_LINUX
+fn _sw_rows(db, sql): i64 {
+    var rs = patra_query(db, sql);
+    if (rs == 0) { return 0 - 1; }
+    var n = patra_result_count(rs);
+    patra_result_free(rs);
+    return n;
+}
+
+# "INSERT INTO a VALUES (NNN, 'yy', 'some text NNN')"
+fn _sw_ins_a(db, i): i64 {
+    var b = fl_alloc(128);
+    memcpy(b, "INSERT INTO a VALUES (000, 'yy', 'some text 000')", 50);
+    store8(b + 50, 0);
+    store8(b + 22, 48 + i / 100);
+    store8(b + 23, 48 + (i / 10) % 10);
+    store8(b + 24, 48 + i % 10);
+    store8(b + 44, 48 + i / 100);
+    store8(b + 45, 48 + (i / 10) % 10);
+    store8(b + 46, 48 + i % 10);
+    var r = patra_exec(db, b);
+    fl_free(b);
+    return r;
+}
+
+# A row of b through patra_insert_row: key k, a 6000-byte BYTES value.
+fn _sw_ins_b(db, k): i64 {
+    var types = fl_alloc(16);
+    var ivals = fl_alloc(16);
+    var bptrs = fl_alloc(16);
+    var blens = fl_alloc(16);
+    var blob = fl_alloc(6000);
+    store64(types, COL_INT);
+    store64(types + 8, COL_BYTES);
+    store64(ivals, k);
+    memset(blob, 65 + k % 26, 6000);
+    store64(bptrs + 8, blob);
+    store64(blens + 8, 6000);
+    var r = patra_insert_row(db, "b", 1, 2, types, ivals, 0, 0, bptrs, blens);
+    fl_free(blob);
+    fl_free(types);
+    fl_free(ivals);
+    fl_free(bptrs);
+    fl_free(blens);
+    return r;
+}
+
+# a: 60 rows (one INT key short of a leaf split), indexed except for scenario 5;
+# b: 3 BYTES rows, indexed. Scenario 7 deletes half of a first, for VACUUM.
+# Last, a table of two-page TEXT values is made and dropped, so the free list
+# holds about 60 pages and the statements take their pages from it: a page a
+# failed statement wrote and left on the on-disk list is the damage to find,
+# and pages from growing the file can never be on it.
+fn _sw_setup(db, sc): i64 {
+    patra_exec(db, "CREATE TABLE a (x INT, y STR, z TEXT)");
+    if (sc != 5) { patra_exec(db, "CREATE INDEX ON a (x)"); }
+    for (var i = 0; i < 60; i = i + 1) { _sw_ins_a(db, i); }
+    patra_exec(db, "CREATE TABLE b (k INT, data BYTES)");
+    patra_exec(db, "CREATE INDEX ON b (k)");
+    for (var j = 0; j < 3; j = j + 1) { _sw_ins_b(db, j); }
+    if (sc == 7) { patra_exec(db, "DELETE FROM a WHERE x < 30"); }
+    patra_exec(db, "CREATE TABLE f (t TEXT)");
+    var sql = fl_alloc(8192);
+    memcpy(sql, "INSERT INTO f VALUES ('", 23);
+    memset(sql + 23, 102, 6000);
+    memcpy(sql + 6023, "')", 2);
+    store8(sql + 6025, 0);
+    for (var fi = 0; fi < 30; fi = fi + 1) { patra_exec(db, sql); }
+    fl_free(sql);
+    patra_exec(db, "DROP TABLE f");
+    return 0;
+}
+
+# Read every cell of a query, TEXT included: 0 = fine (or the query refused
+# cleanly), 1 = a TEXT cell would not read back, or read back as a value no
+# scenario writes. Every TEXT value written here is non-empty, and an empty one
+# is how a cell whose chain was freed or overwritten reads back (_rs_materialize
+# empties a chain it cannot follow).
+fn _sw_text_ok(p, n): i64 {
+    if (n == 19) { if (memeq(p, "a longer text value", 19)) { return 1; } }
+    if (n == 13) { if (memeq(p, "some text ", 10)) { return 1; } }
+    if (n == 8) { if (memeq(p, "prepared", 8)) { return 1; } }
+    if (n == 2) { if (memeq(p, "dd", 2)) { return 1; } }
+    if (n == 4) { if (memeq(p, "it's", 4)) { return 1; } }
+    return 0;
+}
+
+fn _sw_readall(db, sql): i64 {
+    var rs = patra_query(db, sql);
+    if (rs == 0) { return 0; }
+    var n = patra_result_count(rs);
+    var nc = patra_result_cols(rs);
+    var buf = fl_alloc(4096);
+    var bad = 0;
+    for (var r = 0; r < n; r = r + 1) {
+        for (var c = 0; c < nc; c = c + 1) {
+            if (patra_result_col_type(rs, c) == COL_TEXT) {
+                var tl = patra_result_get_text_len(rs, r, c);
+                if (tl > 4096) { bad = 1; }
+                elif (patra_result_read_text(db, rs, r, c, buf) != PATRA_OK) { bad = 1; }
+                elif (_sw_text_ok(buf, tl) == 0) { bad = 1; }
+            }
+        }
+    }
+    fl_free(buf);
+    patra_result_free(rs);
+    return bad;
+}
+
+fn _sw_act(db, sc): i64 {
+    if (sc == 1) { for (var i = 60; i < 75; i = i + 1) { _sw_ins_a(db, i); } }
+    if (sc == 2) { for (var k = 10; k < 14; k = k + 1) { _sw_ins_b(db, k); } }
+    if (sc == 3) { patra_exec(db, "UPDATE a SET x = 500, y = 'zz', z = 'a longer text value' WHERE x < 30"); }
+    if (sc == 4) {
+        patra_exec(db, "DELETE FROM a WHERE x < 20");
+        patra_exec(db, "DELETE FROM b WHERE k = 1");
+    }
+    if (sc == 5) { patra_exec(db, "CREATE INDEX ON a (x)"); }
+    if (sc == 6) {
+        patra_exec(db, "DROP TABLE a");
+        patra_exec(db, "DROP TABLE b");
+    }
+    if (sc == 7) { patra_exec(db, "VACUUM a"); }
+    if (sc == 8) {
+        _sw_readall(db, "SELECT * FROM a");
+        _sw_readall(db, "SELECT * FROM a WHERE x = 7");
+        _sw_readall(db, "SELECT * FROM a WHERE x > 10 AND x < 40");
+        _sw_readall(db, "SELECT z, x FROM a ORDER BY x DESC LIMIT 20");
+        _sw_readall(db, "SELECT * FROM a WHERE y LIKE 'y%' ORDER BY y, x");
+        _wr_n(db, "SELECT COUNT(*) FROM a");
+        _wr_n(db, "SELECT SUM(x) FROM a WHERE x > 5");
+        _sw_rows(db, "SELECT * FROM b");
+    }
+    if (sc == 9) {
+        var st = patra_prepare(db, "INSERT INTO a VALUES (?, ?, 'prepared')");
+        if (st != 0) {
+            for (var p = 0; p < 5; p = p + 1) {
+                patra_bind_int(st, 0, 200 + p);
+                patra_bind_text(st, 1, "pp", 2);
+                patra_exec_prepared(db, st);
+            }
+            patra_finalize(st);
+        }
+        var sq = patra_prepare(db, "SELECT * FROM a WHERE x = ?");
+        if (sq != 0) {
+            patra_bind_int(sq, 0, 7);
+            var rq = patra_query_prepared(db, sq);
+            if (rq != 0) { patra_result_free(rq); }
+            patra_finalize(sq);
+        }
+    }
+    if (sc == 10) {
+        patra_exec(db, "ALTER TABLE a RENAME COLUMN y TO w");
+        patra_exec(db, "ALTER TABLE b RENAME TO bb");
+        patra_exec(db, "CREATE TABLE d (p INT AUTOINCREMENT, q TEXT)");
+        patra_exec(db, "INSERT INTO d (q) VALUES ('dd')");
+        # An escaped quote: the statement runs from a copy of its text.
+        patra_exec(db, "INSERT INTO d (q) VALUES ('it''s')");
+    }
+    if (sc == 11) {
+        patra_exec(db, "CREATE INDEX ON a (x)");
+        patra_exec(db, "CREATE INDEX ON b (k)");
+    }
+    # One ALTER per scenario: a DROP COLUMN after an ADD rebuilds the table
+    # and its index from scratch, and would hide what the ADD left.
+    if (sc == 12) { patra_exec(db, "ALTER TABLE a ADD COLUMN w INT"); }
+    if (sc == 14) { patra_exec(db, "ALTER TABLE a DROP COLUMN y"); }
+    return 0;
+}
+
+# The on-disk free list: every page on it in range and of type PAGE_FREE, and
+# no cycle. A page a failed statement wrote and left listed fails this.
+fn _sw_freelist_ok(db): i64 {
+    var fd = _db_fd(db);
+    var h = fl_alloc(PAGE_SIZE);
+    var b = fl_alloc(PAGE_SIZE);
+    patra_hdr_read(fd, h);
+    var pc = load64(h + HDR_PGCOUNT);
+    var cur = load64(h + HDR_FREEHEAD);
+    var n = 0;
+    var ok = 1;
+    while (cur != 0) {
+        n = n + 1;
+        if (n > pc) { ok = 0; cur = 0; continue; }
+        if (cur >= pc) { ok = 0; cur = 0; continue; }
+        page_read(fd, cur, b);
+        if (load64(b + FP_TYPE) != PAGE_FREE) { ok = 0; cur = 0; continue; }
+        cur = load64(b + FP_NEXT);
+    }
+    fl_free(h);
+    fl_free(b);
+    return ok;
+}
+
+# b (bb after scenario 10's rename), if it is there: count == scan, index ==
+# chain, every value reads back; 3 rows after a refused COMMIT. 1 = fine.
+fn _sw_check_b(db, tx, cr): i64 {
+    var nb = _wr_n(db, "SELECT COUNT(*) FROM b");
+    var isb = 1;
+    if (nb < 0) {
+        nb = _wr_n(db, "SELECT COUNT(*) FROM bb");
+        isb = 0;
+    }
+    if (nb < 0) { return 1; }
+    if (tx != 0) { if (cr != PATRA_OK) { if (nb != 3) { return 7; } } }
+    if (isb == 0) { return 1; }
+    if (_sw_rows(db, "SELECT * FROM b") != nb) { return 4; }
+    if (_sw_rows(db, "SELECT * FROM b WHERE k >= 0") != _wr_n(db, "SELECT COUNT(*) FROM b WHERE k >= 0")) { return 5; }
+    if (_sw_index_ok(db, "b", 1) == 0) { return 5; }
+    var code = 1;
+    var rs = patra_query(db, "SELECT * FROM b");
+    if (rs == 0) { return 3; }
+    var bb = fl_alloc(8192);
+    for (var r = 0; r < patra_result_count(rs); r = r + 1) {
+        if (patra_result_read_bytes(db, rs, r, 1, bb) != PATRA_OK) { code = 6; }
+    }
+    fl_free(bb);
+    patra_result_free(rs);
+    return code;
+}
+
+# 1 = consistent; 2 reopen, 3 query, 4 count != scan, 5 index != chain,
+# 6 TEXT / BYTES unreadable, 7 a refused COMMIT changed something, 8 free list,
+# 10 a committed transaction holds part of a statement. Outside a transaction a
+# multi-row UPDATE / DELETE that fails part-way keeps the rows it reached, and an
+# ALTER the rows it re-inserted (there is no undo there); inside one, a
+# statement that fails after writing makes COMMIT roll back, so what commits is
+# each statement whole or not at all.
+fn _sw_check(sc, tx, cr, base): i64 {
+    var db = patra_open(_tpath);
+    if (db == 0) { return 2; }
+    if (_sw_freelist_ok(db) == 0) {
+        patra_close(db);
+        return 8;
+    }
+    var code = 1;
+    var na = _wr_n(db, "SELECT COUNT(*) FROM a");
+    if (na < 0) {
+        if (sc != 6) { code = 3; }
+    } else {
+        if (_sw_rows(db, "SELECT * FROM a") != na) { code = 4; }
+        if (_sw_rows(db, "SELECT * FROM a WHERE x >= 0") != _wr_n(db, "SELECT COUNT(*) FROM a WHERE x >= 0")) { code = 5; }
+        if (_sw_rows(db, "SELECT * FROM a WHERE x = 25") != _wr_n(db, "SELECT COUNT(*) FROM a WHERE x = 25")) { code = 5; }
+        if (_sw_index_ok(db, "a", 1) == 0) { code = 5; }
+        if (_sw_readall(db, "SELECT * FROM a") != 0) { code = 6; }
+        if (tx != 0) { if (cr != PATRA_OK) { if (na != base) { code = 7; } } }
+        if (tx != 0) {
+            if (cr == PATRA_OK) {
+                if (sc == 3) {
+                    var nz = _wr_n(db, "SELECT COUNT(*) FROM a WHERE y = 'zz'");
+                    if (nz != 0 && nz != 30) { code = 10; }
+                }
+                if (sc == 4) {
+                    var nd = _wr_n(db, "SELECT COUNT(*) FROM a WHERE x < 20");
+                    if (nd != 0 && nd != 20) { code = 10; }
+                }
+                if (sc == 12) { if (na != base) { code = 10; } }
+                if (sc == 14) { if (na != base) { code = 10; } }
+            }
+        }
+    }
+    if (code == 1) { code = _sw_check_b(db, tx, cr); }
+    if (code == 1) {
+        var nd = _wr_n(db, "SELECT COUNT(*) FROM d");
+        if (nd >= 0) {
+            if (_sw_rows(db, "SELECT * FROM d") != nd) { code = 4; }
+            if (_sw_readall(db, "SELECT * FROM d") != 0) { code = 6; }
+        }
+    }
+    patra_close(db);
+    return code;
+}
+
+# The scenario's database after _sw_setup, built once and copied into place by
+# every child — rebuilding it per child cost most of the sweep's time.
+var _sw_tpl = 0;
+var _sw_tpl_len = 0;
+
+fn _sw_template(sc): i64 {
+    cleanup();
+    xunlink(_wpath());
+    var db = patra_open(_tpath);
+    if (db == 0) { return 0; }
+    _sw_setup(db, sc);
+    var ok = 1;
+    if (_wr_n(db, "SELECT COUNT(*) FROM b") != 3) { ok = 0; }
+    if (_fl_disk_count(db) < 50) { ok = 0; }
+    patra_close(db);
+    if (_sw_tpl == 0) { _sw_tpl = fl_alloc(1048576); }
+    _sw_tpl_len = file_read_all(_tpath, _sw_tpl, 1048576);
+    if (_sw_tpl_len <= 0) { ok = 0; }
+    if (_sw_tpl_len >= 1048576) { ok = 0; }
+    return ok;
+}
+
+fn _sw_open_copy(): i64 {
+    cleanup();
+    xunlink(_wpath());
+    if (file_write_all(_tpath, _sw_tpl, _sw_tpl_len) != _sw_tpl_len) { return 0; }
+    return patra_open(_tpath);
+}
+
+# One refusal point: 0 = the seam never fired (the sweep is done), 1 = fine,
+# >= 2 a defect (_sw_check), 98 the setup itself failed.
+fn _sw_child(sc, tx, once, k): i64 {
+    var db = _sw_open_copy();
+    if (db == 0) { return 98; }
+    var base = _wr_n(db, "SELECT COUNT(*) FROM a");
+    var cr = PATRA_OK;
+    # Scenario 13 opens under the seam: the database, then a new one.
+    if (sc == 13) { patra_close(db); }
+    if (sc == 13) { cleanup2(); }
+    if (tx != 0) { if (sc != 13) { patra_begin(db); } }
+    _pt_alloc_fail_hits = 0;
+    _pt_alloc_fail_pages = 1;
+    if (once != 0) { _alloc_fail_once(k); } else { _alloc_fail(k); }
+    if (sc == 13) {
+        db = patra_open(_tpath);
+        var db2 = patra_open(_tpath2);
+        if (db2 != 0) { patra_close(db2); }
+    } else { _sw_act(db, sc); }
+    _alloc_ok();
+    if (tx != 0) { if (sc != 13) { cr = patra_commit(db); } }
+    var fired = _pt_alloc_fail_hits;
+    if (db != 0) { patra_close(db); }
+    if (sc == 13) {
+        # The new database, if it was made, opens; if not, nothing is in the way.
+        var d2 = patra_open(_tpath2);
+        if (d2 == 0) { return 2; }
+        patra_close(d2);
+        cleanup2();
+    }
+    var code = _sw_check(sc, tx, cr, base);
+    if (code == 1) { if (fired == 0) { code = 0; } }
+    return code;
+}
+
+# Children that crashed or found damage, over all four modes (autocommit / a
+# transaction, refused from k on / only at k); -1 if a sweep never finished.
+fn _sw_all(sc): i64 {
+    if (_sw_template(sc) == 0) { return 0 - 2; }
+    var bad = 0;
+    for (var mode = 0; mode < 4; mode = mode + 1) {
+        var k = 0;
+        var done = 0;
+        while (done == 0) {
+            var pid = sys_fork();
+            if (pid == 0) { sys_exit(_sw_child(sc, mode % 2, mode / 2, k)); }
+            var st[8];
+            sys_waitpid(pid, &st, 0);
+            var w = load64(&st) & 65535;
+            var code = w >> 8;
+            if ((w & 127) != 0) { code = 100 + (w & 127); }
+            if (code == 0) { done = 1; }
+            if (code >= 2) {
+                bad = bad + 1;
+                println("  sweep: scenario / mode / k / code:");
+                fmt_int(sc); print(" ", 1); fmt_int(mode); print(" ", 1);
+                fmt_int(k); print(" ", 1); fmt_int(code); println("");
+            }
+            k = k + 1;
+            if (k > 3000) {
+                done = 1;
+                bad = 0 - 1;
+            }
+        }
+        if (bad < 0) { mode = 4; }
+    }
+    return bad;
+}
+
+# A query refused part-way must fail, never answer wrongly: an ORDER BY whose
+# sort buffer was refused returned its rows unsorted, and a TEXT / BYTES cell
+# whose snapshot buffer was refused came back empty. Checksum of a result's
+# every cell, in order.
+fn _sw_qsum(db, rs): i64 {
+    var h = patra_result_count(rs);
+    var nc = patra_result_cols(rs);
+    var buf = fl_alloc(8192);
+    for (var r = 0; r < patra_result_count(rs); r = r + 1) {
+        for (var c = 0; c < nc; c = c + 1) {
+            var t = patra_result_col_type(rs, c);
+            var p = 0;
+            var n = 0;
+            if (t == COL_INT) { h = h * 31 + patra_result_get_int(rs, r, c); }
+            if (t == COL_STR) {
+                p = patra_result_get_str(rs, r, c);
+                n = patra_result_get_str_len(rs, r, c);
+            }
+            if (t == COL_TEXT) {
+                n = patra_result_get_text_len(rs, r, c);
+                if (patra_result_read_text(db, rs, r, c, buf) != PATRA_OK) { n = 0 - 1; }
+                p = buf;
+            }
+            if (t == COL_BYTES) {
+                n = patra_result_get_bytes_len(rs, r, c);
+                if (patra_result_read_bytes(db, rs, r, c, buf) != PATRA_OK) { n = 0 - 1; }
+                p = buf;
+            }
+            h = h * 31 + n;
+            for (var i = 0; i < n; i = i + 1) { h = h * 31 + load8(p + i); }
+        }
+    }
+    fl_free(buf);
+    return h;
+}
+
+# A thread's first statement allocates its parse scratch (_sql_ensure) and its
+# page-slab stack (_pg_slab_init); a child forked from the suite has both, so
+# the statement sweep never reaches them. A fresh thread does. Both were
+# unchecked: a refused scratch was tokenized into, a refused stack pushed into.
+# ctx: [0] db, [8] 1 = refuse the slab stack (ALLOC_MAX), [16] result codes.
+fn _sw_thr_worker(ctx): i64 {
+    var db = load64(ctx);
+    var cap0 = ALLOC_MAX;
+    if (load64(ctx + 8) != 0) { ALLOC_MAX = 8; }
+    var r1 = patra_exec(db, "INSERT INTO a VALUES (500, 'yy', 'some text 500')");
+    var rs = patra_query(db, "SELECT * FROM a WHERE x = 500");
+    ALLOC_MAX = cap0;
+    var bad = 0;
+    if (r1 == PATRA_OK) {
+        if (rs != 0) { if (patra_result_count(rs) != 1) { bad = 1; } }
+    }
+    if (rs != 0) { patra_result_free(rs); }
+    store64(ctx + 16, bad);
+    return 0;
+}
+
+fn _sw_tchild(k, slab, once): i64 {
+    var db = _sw_open_copy();
+    if (db == 0) { return 98; }
+    var base = _wr_n(db, "SELECT COUNT(*) FROM a");
+    var ctx = fl_alloc(24);
+    store64(ctx, db);
+    store64(ctx + 8, slab);
+    store64(ctx + 16, 0);
+    _pt_alloc_fail_hits = 0;
+    _pt_alloc_fail_pages = 1;
+    if (slab == 0) {
+        if (once != 0) { _alloc_fail_once(k); } else { _alloc_fail(k); }
+    }
+    var th = thread_create(&_sw_thr_worker, ctx);
+    thread_join(th);
+    _alloc_ok();
+    var fired = _pt_alloc_fail_hits;
+    var wrong = load64(ctx + 16);
+    patra_close(db);
+    var code = _sw_check(1, 0, PATRA_OK, base);
+    if (wrong != 0) { code = 9; }
+    if (code == 1) { if (fired == 0) { code = 0; } }
+    return code;
+}
+
+# Refused from k on, then (the scratch case) only at k: the parse buffer is
+# taken after the token array, and refusing both hides a refused array.
+fn _sw_thread(slab): i64 {
+    if (_sw_template(8) == 0) { return 0 - 2; }
+    var bad = _sw_thread1(slab, 0);
+    if (slab == 0) {
+        var b2 = _sw_thread1(slab, 1);
+        if (bad < 0) { return bad; }
+        if (b2 < 0) { return b2; }
+        bad = bad + b2;
+    }
+    return bad;
+}
+
+fn _sw_thread1(slab, once): i64 {
+    var bad = 0;
+    var k = 0;
+    var done = 0;
+    while (done == 0) {
+        var pid = sys_fork();
+        if (pid == 0) { sys_exit(_sw_tchild(k, slab, once)); }
+        var st[8];
+        sys_waitpid(pid, &st, 0);
+        var w = load64(&st) & 65535;
+        var code = w >> 8;
+        if ((w & 127) != 0) { code = 100 + (w & 127); }
+        if (code == 0) { done = 1; }
+        if (slab != 0) { if (code == 1) { done = 1; } }
+        if (code >= 2) { bad = bad + 1; }
+        k = k + 1;
+        if (k > 3000) {
+            done = 1;
+            bad = 0 - 1;
+        }
+    }
+    return bad;
+}
+
+# jsonl_read / jsonl_count under the seam: 0 or the right answer, never a crash.
+fn _sw_jchild(k): i64 {
+    cleanup();
+    var fd = jsonl_open(_tpath);
+    for (var i = 0; i < 20; i = i + 1) { jsonl_append(fd, "{\"a\":1}", 7); }
+    _pt_alloc_fail_hits = 0;
+    _alloc_fail(k);
+    var lr = jsonl_read(fd);
+    var nc = jsonl_count(fd);
+    _alloc_ok();
+    var fired = _pt_alloc_fail_hits;
+    var code = 1;
+    if (lr != 0) { if (jsonl_lines_count(lr) != 20) { code = 9; } }
+    if (nc != (0 - 1)) { if (nc != 20) { code = 9; } }
+    jsonl_lines_free(lr);
+    jsonl_close(fd);
+    if (code == 1) { if (fired == 0) { code = 0; } }
+    return code;
+}
+
+fn _sw_jsonl(): i64 {
+    var bad = 0;
+    var k = 0;
+    var done = 0;
+    while (done == 0) {
+        var pid = sys_fork();
+        if (pid == 0) { sys_exit(_sw_jchild(k)); }
+        var st[8];
+        sys_waitpid(pid, &st, 0);
+        var w = load64(&st) & 65535;
+        var code = w >> 8;
+        if ((w & 127) != 0) { code = 100 + (w & 127); }
+        if (code == 0) { done = 1; }
+        if (code >= 2) { bad = bad + 1; }
+        k = k + 1;
+        if (k > 100) {
+            done = 1;
+            bad = 0 - 1;
+        }
+    }
+    return bad;
+}
+
+fn _sw_qchild(q, k, once): i64 {
+    var db = _sw_open_copy();
+    if (db == 0) { return 98; }
+    var rs = patra_query(db, q);
+    if (rs == 0) { return 98; }
+    var want = _sw_qsum(db, rs);
+    patra_result_free(rs);
+    _pt_alloc_fail_hits = 0;
+    _pt_alloc_fail_pages = 1;
+    if (once != 0) { _alloc_fail_once(k); } else { _alloc_fail(k); }
+    rs = patra_query(db, q);
+    _alloc_ok();
+    var fired = _pt_alloc_fail_hits;
+    if (rs == 0) { return 1; }
+    var got = _sw_qsum(db, rs);
+    patra_result_free(rs);
+    patra_close(db);
+    if (got != want) { return 9; }
+    if (fired == 0) { return 0; }
+    return 1;
+}
+
+# Refused from k on, then only at k: a later refusal fails the query and would
+# hide an earlier one that was answered wrongly.
+fn _sw_query(q): i64 {
+    if (_sw_template(8) == 0) { return 0 - 2; }
+    var bad = _sw_query1(q, 0);
+    var b2 = _sw_query1(q, 1);
+    if (bad < 0) { return bad; }
+    if (b2 < 0) { return b2; }
+    return bad + b2;
+}
+
+fn _sw_query1(q, once): i64 {
+    var bad = 0;
+    var k = 0;
+    var done = 0;
+    while (done == 0) {
+        var pid = sys_fork();
+        if (pid == 0) { sys_exit(_sw_qchild(q, k, once)); }
+        var st[8];
+        sys_waitpid(pid, &st, 0);
+        var w = load64(&st) & 65535;
+        var code = w >> 8;
+        if ((w & 127) != 0) { code = 100 + (w & 127); }
+        if (code == 0) { done = 1; }
+        if (code >= 2) { bad = bad + 1; }
+        k = k + 1;
+        if (k > 3000) {
+            done = 1;
+            bad = 0 - 1;
+        }
+    }
+    return bad;
+}
+#endif
+
+fn test_statements_survive_refused_allocations() {
+    test_group("every statement survives a refused allocation anywhere (1.16.2)");
+    #ifdef CYRIUS_TARGET_LINUX
+    assert_eq(_sw_all(1), 0, "INSERT: TEXT rows into an indexed table, through a leaf split");
+    assert_eq(_sw_all(2), 0, "patra_insert_row: BYTES rows into an indexed table");
+    assert_eq(_sw_all(3), 0, "UPDATE: the indexed key, a STR and a TEXT column");
+    assert_eq(_sw_all(4), 0, "DELETE: TEXT rows from one table, a BYTES row from another");
+    assert_eq(_sw_all(5), 0, "CREATE INDEX over existing rows");
+    assert_eq(_sw_all(6), 0, "DROP TABLE, with TEXT and BYTES chains and an index");
+    assert_eq(_sw_all(7), 0, "VACUUM");
+    assert_eq(_sw_all(8), 0, "queries: scan, index, range, ORDER BY, projection, LIKE, aggregates, BYTES");
+    assert_eq(_sw_all(9), 0, "prepared INSERT and SELECT");
+    assert_eq(_sw_all(10), 0, "RENAME COLUMN, RENAME TO, CREATE TABLE, AUTOINCREMENT, escaped quotes");
+    assert_eq(_sw_all(11), 0, "CREATE INDEX over an existing index");
+    assert_eq(_sw_all(12), 0, "ALTER ADD COLUMN on an indexed table");
+    assert_eq(_sw_all(14), 0, "ALTER DROP COLUMN on an indexed table");
+    assert_eq(_sw_all(13), 0, "patra_open of a database, and of a new one");
+    assert_eq(_sw_jsonl(), 0, "jsonl_read and jsonl_count");
+    assert_eq(_sw_thread(0), 0, "a new thread's first statements: its parse scratch refused");
+    assert_eq(_sw_thread(1), 0, "and its page-slab stack refused");
+    assert_eq(_sw_query("SELECT z, x FROM a ORDER BY x DESC LIMIT 20"), 0,
+      "a refused query fails, never answers wrongly: ORDER BY, LIMIT, projection, TEXT");
+    assert_eq(_sw_query("SELECT * FROM a WHERE y LIKE 'y%' ORDER BY y, x DESC"), 0,
+      "multi-column ORDER BY over a scan");
+    assert_eq(_sw_query("SELECT * FROM a WHERE x > 10 AND x < 40"), 0, "an index range");
+    assert_eq(_sw_query("SELECT SUM(x) FROM a WHERE x > 5"), 0, "an aggregate");
+    assert_eq(_sw_query("SELECT * FROM b"), 0, "BYTES");
+    cleanup();
+    xunlink(_wpath());
+    #endif
+    return 0;
+}
+
+# -- 1.16.2: an INSERT refused after writing a TEXT chain gives the chain back --
+#
+# INSERT writes a TEXT column's chain when its value is bound. A later value
+# that failed its check — a type mismatch, a STR too long, an unknown name in a
+# column list — returned without freeing that chain and without committing the
+# header, so the next statement re-read a free list whose head was now a TEXT
+# page. Its next allocation took FP_NEXT from the page's contents and lost the
+# rest of the list (and page_alloc did not check that the page was free).
+fn _fl_disk_count(db): i64 {
+    var fd = _db_fd(db);
+    var h = fl_alloc(PAGE_SIZE);
+    var b = fl_alloc(PAGE_SIZE);
+    patra_hdr_read(fd, h);
+    var cur = load64(h + HDR_FREEHEAD);
+    var n = 0;
+    while (cur != 0) {
+        page_read(fd, cur, b);
+        if (load64(b + FP_TYPE) != PAGE_FREE) {
+            n = 0 - 1;
+            cur = 0;
+            continue;
+        }
+        n = n + 1;
+        if (n > 100000) {
+            n = 0 - 1;
+            cur = 0;
+            continue;
+        }
+        cur = load64(b + FP_NEXT);
+    }
+    fl_free(h);
+    fl_free(b);
+    return n;
+}
+
+fn test_insert_refusal_gives_text_back() {
+    test_group("an INSERT refused after its TEXT chain is written gives the chain back (1.16.2)");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (a TEXT, b STR)");
+    # 6000 bytes of text: a two-page chain.
+    var sql = fl_alloc(8192);
+    memcpy(sql, "INSERT INTO t VALUES ('", 23);
+    memset(sql + 23, 120, 6000);
+    memcpy(sql + 6023, "', 'ok')", 8);
+    store8(sql + 6031, 0);
+    for (var i = 0; i < 4; i = i + 1) { patra_exec(db, sql); }
+    patra_exec(db, "DELETE FROM t");
+    var f0 = _fl_disk_count(db);
+    assert(f0 >= 4, "the deleted rows' chains are on the free list");
+    memcpy(sql + 6023, "', 5)", 5);
+    store8(sql + 6028, 0);
+    assert_eq(patra_exec(db, sql), PATRA_ERR_TYPE, "a type mismatch after the TEXT value is refused");
+    assert(_fl_disk_count(db) > 0, "and the on-disk free list is still all free pages");
+    # A STR value over 255 bytes, after the TEXT value.
+    memcpy(sql + 6023, "', '", 4);
+    memset(sql + 6027, 121, 300);
+    memcpy(sql + 6327, "')", 2);
+    store8(sql + 6329, 0);
+    assert_eq(patra_exec(db, sql), PATRA_ERR_ROWSZ, "a STR too long after the TEXT value is refused");
+    assert(_fl_disk_count(db) > 0, "the free list is still whole");
+    memcpy(sql, "INSERT INTO t (a, nope) VALUES ('", 33);
+    memset(sql + 33, 120, 6000);
+    memcpy(sql + 6033, "', 'ok')", 8);
+    store8(sql + 6041, 0);
+    assert_eq(patra_exec(db, sql), PATRA_ERR_NOTFOUND, "an unknown column after the TEXT value is refused");
+    assert(_fl_disk_count(db) > 0, "the free list is still whole");
+    memcpy(sql, "INSERT INTO t VALUES ('", 23);
+    memset(sql + 23, 120, 6000);
+    memcpy(sql + 6023, "', 'ok')", 8);
+    store8(sql + 6031, 0);
+    assert_eq(patra_exec(db, sql), PATRA_OK, "a good INSERT after them");
+    assert(_fl_disk_count(db) > 0, "takes its pages from the list and leaves the rest listed");
+    patra_close(db);
+    db = patra_open(_tpath);
+    var rs = patra_query(db, "SELECT * FROM t");
+    assert_eq(patra_result_count(rs), 1, "one row");
+    var out = fl_alloc(8192);
+    assert_eq(patra_result_read_text(db, rs, 0, 0, out), PATRA_OK, "and its text reads back");
+    assert_eq(load8(out + 5999), 120, "whole");
+    fl_free(out);
+    patra_result_free(rs);
+    fl_free(sql);
+    patra_close(db);
+    cleanup();
+    return 0;
+}
+
+# -- 1.16.2: two transactions on two databases, on two threads --
+#
+# A statement inside a transaction does not take the statement mutex (lib.cyr
+# _stmt_lock), so two threads each in a transaction on its own database run
+# their statements at once — the shape ADR-0002 and the per-database WAL slots
+# exist for. The B-tree insert kept its path in process globals, and the last
+# inserted ref and the rows-affected count were globals too: the two inserts
+# split each other's trees, and of 4,000 rows each index kept 82 and 144. And
+# patra_begin claimed its WAL slot with a plain scan-then-store, so two at once
+# could take the same slot and one transaction went unlogged.
+var _ctx_n = 1500;
+
+fn _ctx_ins(db, k): i64 {
+    var b = fl_alloc(64);
+    memcpy(b, "INSERT INTO t VALUES (00000, 1, 'tx')", 37);
+    store8(b + 37, 0);
+    store8(b + 22, 48 + (k / 10000) % 10);
+    store8(b + 23, 48 + (k / 1000) % 10);
+    store8(b + 24, 48 + (k / 100) % 10);
+    store8(b + 25, 48 + (k / 10) % 10);
+    store8(b + 26, 48 + k % 10);
+    var r = patra_exec(db, b);
+    fl_free(b);
+    return r;
+}
+
+# ctx: [0] the database, [8] statements that went wrong (set by the worker),
+# [16] the thread's number. The two threads' small UPDATEs match 3 and 7 rows,
+# so a rows-affected count read from the other thread's statement is visible.
+fn _ctx_worker(ctx): i64 {
+    var db = load64(ctx);
+    var bad = 0;
+    if (patra_begin(db) != PATRA_OK) { bad = bad + 1; }
+    for (var i = 0; i < _ctx_n; i = i + 1) {
+        if (_ctx_ins(db, (i * 7919) % _ctx_n) != PATRA_OK) { bad = bad + 1; }
+    }
+    var m = 3;
+    var upd = "UPDATE t SET v = 5 WHERE k < 3";
+    if (load64(ctx + 16) != 0) {
+        m = 7;
+        upd = "UPDATE t SET v = 5 WHERE k < 7";
+    }
+    for (var u = 0; u < 100; u = u + 1) {
+        if (patra_exec(db, upd) != PATRA_OK) { bad = bad + 1; }
+        if (patra_rows_affected(db) != m) { bad = bad + 1; }
+    }
+    if (patra_exec(db, "UPDATE t SET k = 99999 WHERE k < 10") != PATRA_OK) { bad = bad + 1; }
+    if (patra_rows_affected(db) != 10) { bad = bad + 1; }
+    if (patra_exec(db, "DELETE FROM t WHERE k >= 1000 AND k < 5000") != PATRA_OK) { bad = bad + 1; }
+    if (patra_rows_affected(db) != 500) { bad = bad + 1; }
+    if (patra_commit(db) != PATRA_OK) { bad = bad + 1; }
+    store64(ctx + 8, bad);
+    return 0;
+}
+
+fn test_concurrent_transactions_two_databases() {
+    test_group("two transactions on two databases, on two threads (1.16.2)");
+    var bad_stmt = 0;
+    var bad_index = 0;
+    var bad_count = 0;
+    for (var round = 0; round < 3; round = round + 1) {
+        cleanup();
+        cleanup2();
+        var d1 = patra_open(_tpath);
+        var d2 = patra_open(_tpath2);
+        patra_exec(d1, "CREATE TABLE t (k INT, v INT, s TEXT)");
+        patra_exec(d1, "CREATE INDEX ON t (k)");
+        patra_exec(d2, "CREATE TABLE t (k INT, v INT, s TEXT)");
+        patra_exec(d2, "CREATE INDEX ON t (k)");
+        var c1 = fl_alloc(24);
+        var c2 = fl_alloc(24);
+        store64(c1, d1);
+        store64(c2, d2);
+        store64(c1 + 16, 0);
+        store64(c2 + 16, 1);
+        var t1 = thread_create(&_ctx_worker, c1);
+        var t2 = thread_create(&_ctx_worker, c2);
+        thread_join(t1);
+        thread_join(t2);
+        bad_stmt = bad_stmt + load64(c1 + 8) + load64(c2 + 8);
+        if (_sw_index_ok(d1, "t", 1) == 0) { bad_index = bad_index + 1; }
+        if (_sw_index_ok(d2, "t", 1) == 0) { bad_index = bad_index + 1; }
+        if (_wr_n(d1, "SELECT COUNT(*) FROM t") != 1000) { bad_count = bad_count + 1; }
+        if (_wr_n(d2, "SELECT COUNT(*) FROM t") != 1000) { bad_count = bad_count + 1; }
+        if (_wr_n(d1, "SELECT COUNT(*) FROM t WHERE k = 99999") != 10) { bad_count = bad_count + 1; }
+        fl_free(c1);
+        fl_free(c2);
+        patra_close(d1);
+        patra_close(d2);
+    }
+    assert_eq(bad_stmt, 0, "every statement and commit succeeds, with its own rows-affected count");
+    assert_eq(bad_index, 0, "each index holds exactly its own table's rows (it kept 82 of 4,000)");
+    assert_eq(bad_count, 0, "and each table its own rows");
+    cleanup();
+    cleanup2();
+    return 0;
+}
+
 fn test_wal_recovery_outside_open() {
     test_group("a crashed writer's WAL is replayed before the next statement, not only at open (1.16.0)");
     var a = 0;
@@ -8395,6 +9277,9 @@ fn main() {
     test_unreadable_wal_kept();
     test_dbid_assigned_by_first_writer();
     test_alter_survives_refused_allocations();
+    test_statements_survive_refused_allocations();
+    test_insert_refusal_gives_text_back();
+    test_concurrent_transactions_two_databases();
     test_add_column_exists_at_column_cap();
     test_close_rolls_back_open_transaction();
     test_tbl_open_contract();

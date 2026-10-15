@@ -84,6 +84,8 @@ cyrius distlib                               # regenerate dist/patra.cyr from [l
 - **Do not copy a stdlib ABI constant into patra** (`SYS_*`, `O_*`, `LOCK_*`, flag bits) — include the stdlib module that defines it; per-target values differ and a private copy is correct on one target only
 - **Do not use `break` in while loops with `var` declarations** — unreliable; use flag + `continue` instead
 - **Do not hardcode toolchain versions in CI YAML** — the `cyrius = "X.Y.Z"` pin in `cyrius.cyml` is the only source of truth
+- **Do not add a mutable process global to a writer path** — statements inside a transaction skip the statement mutex, so writers on different databases run concurrently. Per-call state goes on the stack, per-statement results in a TLS slot ([ADR-0005](docs/adr/0005-writer-state-per-call-or-thread.md))
+- **A failure path that wrote a page must commit the header or give the page back** — every statement re-reads the header, and a written page left on the on-disk free list is handed out again. Giving a page back must not allocate ([architecture note 005](docs/architecture/005-failed-statement-free-list.md)); the statement sweep in `tests/tcyr/patra.tcyr` checks it
 
 ## Process
 

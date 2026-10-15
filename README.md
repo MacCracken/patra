@@ -92,7 +92,11 @@ that fails verification fails the statement (`PATRA_ERR_PAGE`; a query returns
 `0`). The 0 that a failed `patra_open` or `patra_query` returns is safe to pass
 on: handle calls return `PATRA_ERR_IO`, and `patra_result_*` accessors return 0,
 or -1 where -1 already meant "not that type", for a 0 result set or a row or
-column outside it.
+column outside it. A statement whose memory is refused fails (`PATRA_ERR_IO`; a
+query returns `0`, never a partial answer) and leaves the file whole; outside a
+transaction a multi-row `UPDATE` / `DELETE` or an `ALTER` keeps the rows it
+reached, and inside one a statement that fails after writing makes `COMMIT` roll
+back.
 
 ### Dependencies
 
@@ -151,7 +155,9 @@ disagree.
 Concurrent `SELECT`s on one shared handle are *not* safe: see the ⚠ note under
 *Concurrent readers* below. Auto-commit *writes* on a shared handle are
 serialized across threads (and tested); explicit `patra_begin … patra_commit`
-spans are *not*, so keep a transaction on one thread. Across **processes** the span is protected: since v1.13.3 statements
+spans are *not*, so keep a transaction on one thread. Two transactions on two
+databases, each on its own thread, run independently (since 1.16.2; before, their
+B-tree inserts could destroy each other's indexes). Across **processes** the span is protected: since v1.13.3 statements
 defer to the transaction's exclusive `flock` rather than releasing it, so a
 transaction holds its lock from `BEGIN` to `COMMIT`/`ROLLBACK`.
 

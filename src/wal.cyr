@@ -57,7 +57,8 @@ enum WalSlot {
     WS_SALT1 = 48;
     WS_SALT2 = 56;
     WS_DBID = 64;
-    WS_SZ = 72;
+    WS_WRITES = 72;      # page writes attempted this transaction (1.16.2)
+    WS_SZ = 80;
     # Concurrent transactions on distinct databases in one process. Eight is
     # far past any consumer's shape; exhausting it is reported, never silently
     # ignored, because silently proceeding is precisely the old defect.
@@ -86,34 +87,42 @@ fn wal_slots_init(): i64 {
 }
 
 # The active WAL slot for this database fd, or 0 if it has no transaction.
+# 1.16.2: returns at the first match instead of walking all eight slots — it
+# runs on every page write, and since 1.16.2 once per statement inside a
+# transaction (lib.cyr _stmt_tx_mark).
 fn _wal_find(db_fd): i64 {
     if (_wal_slots == 0) { return 0; }
     if (db_fd < 0) { return 0; }
-    var found = 0;
     for (var i = 0; i < WAL_MAX_TX; i = i + 1) {
-        if (found == 0) {
-            var sl = _wal_slots + i * WS_SZ;
-            if (load64(sl + WS_DBFD) == db_fd) { found = sl; }
-        }
+        var sl = _wal_slots + i * WS_SZ;
+        if (load64(sl + WS_DBFD) == db_fd) { return sl; }
     }
-    return found;
+    return 0;
 }
 
 # Claim a free slot for this database fd, or 0 if the table is full.
+#
+# 1.16.2: claimed with a CAS on WS_DBFD. patra_begin takes no mutex, so two
+# threads beginning transactions on two databases at once could both find the
+# same slot free and both take it; the second overwrote the first, whose page
+# writes then found no slot (_wal_find) and went unlogged — a transaction its
+# rollback could not undo. _wal_release frees the slot last, for the same race.
 fn _wal_claim(db_fd): i64 {
     if (_wal_slots == 0) { return 0; }
     var found = 0;
     for (var i = 0; i < WAL_MAX_TX; i = i + 1) {
         if (found == 0) {
             var sl = _wal_slots + i * WS_SZ;
-            if (load64(sl + WS_DBFD) < 0) { found = sl; }
+            if (load64(sl + WS_DBFD) < 0) {
+                if (atomic_cas(sl + WS_DBFD, 0 - 1, db_fd) != 0) { found = sl; }
+            }
         }
     }
     if (found != 0) {
-        store64(found + WS_DBFD, db_fd);
         store64(found + WS_WALFD, 0 - 1);
         store64(found + WS_NLOG, 0);
         store64(found + WS_OVERFLOW, 0);
+        store64(found + WS_WRITES, 0);
     }
     return found;
 }
@@ -141,10 +150,14 @@ fn wal_forget(db_fd): i64 {
 # transaction on the same fd (it is freed with the handle in patra_close).
 fn _wal_release(slot): i64 {
     if (slot == 0) { return 0; }
-    store64(slot + WS_DBFD, 0 - 1);
     store64(slot + WS_WALFD, 0 - 1);
     store64(slot + WS_NLOG, 0);
     store64(slot + WS_OVERFLOW, 0);
+    store64(slot + WS_WRITES, 0);
+    # Free it last (1.16.2): once WS_DBFD is -1 another thread's _wal_claim can
+    # take the slot, and a store after that would land in its transaction.
+    atomic_fence();
+    atomic_store(slot + WS_DBFD, 0 - 1);
     return 0;
 }
 
@@ -294,6 +307,7 @@ fn wal_start(db_fd, wal_path, dbid): i64 {
     }
     store64(slot + WS_NLOG, 0);
     store64(slot + WS_OVERFLOW, 0);
+    store64(slot + WS_WRITES, 0);
 
     if (_wal_gen_salts(slot) != 0) {
         sys_close(wfd); _wal_release(slot); return PATRA_ERR_IO;
@@ -339,6 +353,26 @@ fn wal_overflowed(db_fd): i64 {
     return load64(slot + WS_OVERFLOW);
 }
 
+# Page writes this database's open transaction has attempted (0 without one).
+# A statement compares it across its run: a change means it wrote (1.16.2).
+fn wal_writes(db_fd): i64 {
+    var slot = _wal_find(db_fd);
+    if (slot == 0) { return 0; }
+    return load64(slot + WS_WRITES);
+}
+
+# Mark the open transaction failed, as a refused before-image does (1.16.2):
+# patra_commit then rolls it back and returns PATRA_ERR_FULL for `r` FULL,
+# PATRA_ERR_IO otherwise. A mark already set is kept.
+fn wal_mark_failed(db_fd, r): i64 {
+    var slot = _wal_find(db_fd);
+    if (slot == 0) { return 0; }
+    if (load64(slot + WS_OVERFLOW) != 0) { return 0; }
+    if (r == PATRA_ERR_FULL) { store64(slot + WS_OVERFLOW, 1); }
+    else { store64(slot + WS_OVERFLOW, 2); }
+    return 0;
+}
+
 # Log before-image of a page (called from page_write).
 #
 # Returns PATRA_OK, or an error the caller MUST honour by not modifying the
@@ -356,6 +390,8 @@ fn _wal_log_page_inner(db_fd, page_num): i64 {
     if (slot == 0) { return PATRA_OK; }
     var wfd = load64(slot + WS_WALFD);
     if (wfd < 0) { return PATRA_OK; }
+    # Every attempt counts, logged before or not (wal_writes).
+    store64(slot + WS_WRITES, load64(slot + WS_WRITES) + 1);
     # Already logged this transaction — the first before-image is the one to keep.
     # Linear scan: O(n) per page, O(n^2) per transaction. Fine at realistic
     # transaction sizes; if a consumer ever runs very large transactions this

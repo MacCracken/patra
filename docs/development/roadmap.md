@@ -9,18 +9,22 @@
 > [`requests/`](requests/); upstream cyrius bugs in [`issues/`](issues/).
 
 > **Current**: **v1.16.2**, cyrius pin **6.7.10**, zero `[deps.*]` git blocks.
-> Gates green: **1594 tests** (+ 6 raw-include, + 18 in the no-`patra_init`
+> Gates green: **1631 tests** (+ 6 raw-include, + 18 in the no-`patra_init`
 > process), **8/8 fuzz**, 43 benchmarks, lint 0-warn, fmt clean, libro 15/15,
 > vidya 19/19, `dist/` in sync (**14** sidecar leaves), no raw syscalls or
-> numeric open flags, no dangling doc links. Binary **255,488 B** DCE-on /
-> 394,752 B DCE-off.
+> numeric open flags, no dangling doc links. Binary **272,008 B** DCE-on /
+> 411,272 B DCE-off.
 >
 > **v1.16.2 closed the 1.16.1 review's two follow-ups and both older items of
 > patra's own**, and what two adversarial reviews found around them: failed
 > syncs, refused writes and refused allocations reported rather than taken for
 > success (a transaction that cannot be made whole and durable is rolled back
 > at COMMIT), three row-loss paths, and a statement that made a file
-> unopenable. CHANGELOG [1.16.2].
+> unopenable. It then swept a refused allocation over every allocation of every
+> statement — closing the "about 70 unchecked allocations" item it had opened,
+> and the free-list, B-tree-split and wrong-answer defects behind them — and
+> fixed two transactions on two databases, on two threads, destroying each
+> other's indexes. CHANGELOG [1.16.2].
 >
 > **v1.16.1 closed the two bugs libro 2.10.8 filed** (both 2026-10-14):
 > `patra_open` without `patra_init` refuses instead of dying with SIGSEGV, and
@@ -62,7 +66,9 @@ resolved in agnos **1.57.7** and archived there
 
 - **v1.16.2** — failures reported, headers verified per statement, the 0
   handle; `wal_rollback` keeps a WAL it cannot read; the first writer assigns a
-  missing identity. CHANGELOG [1.16.2].
+  missing identity; every statement survives a refused allocation anywhere
+  (the item opened at the start of the cut); concurrent transactions on two
+  databases keep their indexes. CHANGELOG [1.16.2].
 - **v1.16.1** — [`issues/archive/2026-10-14-patra-open-faults-without-patra-init.md`](issues/archive/2026-10-14-patra-open-faults-without-patra-init.md)
   (`patra_open` / `patra_cache_enable(1)` refuse before `patra_init`, which
   fails closed; new `patra_initialized()`) and
@@ -81,7 +87,7 @@ resolved in agnos **1.57.7** and archived there
 **None scheduled.** Each states its trigger. v1.16.2 closed four that stood
 here — `wal_rollback` giving up a WAL it could not read, a database without an
 identity having no crash recovery, the unverified header re-read, the 0 handle
-(CHANGELOG [1.16.2]).
+— and one it opened itself, the unchecked allocations (CHANGELOG [1.16.2]).
 
 - **`page_write`'s result is discarded at most of its 30 call sites —
   outside a transaction** (found at v1.16.2). Inside a transaction this is
@@ -93,8 +99,20 @@ identity having no crash recovery, the unverified header re-read, the 0 handle
   still carries on and reports success; there is no undo there. 1.13.4 tried
   failing those writes outright and backed out (a half-written page hung
   `tbl_insert`'s tail walk), so this wants the statement paths to propagate
-  one site at a time, B-tree splits last. *Trigger*: the next change to
-  `page.cyr` or a statement path. *Medium; small bites.*
+  one site at a time, B-tree splits last. Since v1.16.2 a split takes every
+  page and buffer before its first write, so a refused *allocation* can no
+  longer leave it half-done; a failed *write* part-way up still can.
+  *Trigger*: the next change to `page.cyr` or a statement path. *Medium;
+  small bites.*
+- **Outside a transaction, a multi-row statement refused part-way keeps what
+  it did** (v1.16.2, by design for now). A multi-row UPDATE or DELETE that
+  meets a refused allocation or write keeps the rows it reached, and an ALTER
+  the rows it re-inserted; the database stays consistent and the statement
+  fails, but autocommit has no undo. Inside a transaction COMMIT rolls such a
+  statement back. Running each autocommit statement under the WAL would make
+  it atomic, at the cost of the WAL's syncs. *Trigger*: a consumer that needs
+  autocommit statements all-or-nothing under memory or disk pressure.
+  *Medium.*
 - **Two copies of one database corrupt each other under the page cache**
   (found by the 1.16.2 review, pre-existing). `cp a.patra b.patra` copies
   `HDR_DBID`, the page cache's key ([ADR-0004](../adr/0004-per-database-wal-and-cache-identity.md));
@@ -106,18 +124,6 @@ identity having no crash recovery, the unverified header re-read, the 0 handle
   write-back is lost before any later header sync, another handle in the
   process can assign a second id. *Trigger*: a consumer that enables the cache
   and copies databases. *Small.*
-- **About 70 allocation results are unchecked across `src/`** (found at v1.16.2,
-  a heuristic count: `var x = _pt_alloc(..)` / `pg_alloc()` with no test of
-  `x` in the next lines). A refusal is mostly a store or a `memset` through 0;
-  `pg_alloc` reaches `_pt_alloc` only when the thread's page slab is empty.
-  v1.16.2 fixed the ones on the paths it touched (`patra_open`, ALTER ADD / DROP
-  COLUMN, `page_alloc`, `btree_create`, `wal_rollback`, `jsonl_append_obj`). The
-  allocation seam (architecture note 004) makes the rest testable statement by
-  statement: `test_alter_survives_refused_allocations` drains the slab and
-  refuses each allocation in turn, one forked child each — the same sweep over
-  INSERT, UPDATE, DELETE, CREATE INDEX and the query path is the test for the
-  rest. *Trigger*: the next change to any of those paths. *Medium; one
-  statement at a time.*
 - **The per-statement WAL probe costs one failed `open(2)`** — about 2.5 us
   where one clock read costs 1.3 us; +12 % on `select_point_10k`, +26 % on
   `dedup_insert_row_or_ignore_500`. It can be made free: a header flag that a

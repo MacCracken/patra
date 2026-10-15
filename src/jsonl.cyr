@@ -221,7 +221,9 @@ fn jsonl_append_obj(fd, keys, vals, types, n): i64 {
 # lines: array of (ptr, len) pairs — 16 bytes each
 enum JlrOff { JLR_COUNT = 0; JLR_DATA = 8; JLR_LINES = 16; JLR_SZ = 24; }
 
-# Read all lines from JSONL file into indexed result
+# Read all lines from JSONL file into indexed result. 1.16.2: 0 when memory is
+# refused (every allocation here was unchecked, and a refusal was a store
+# through 0); jsonl_lines_free(0) is a no-op.
 fn jsonl_read(fd): i64 {
     patra_lock_sh(fd);
     var size = xlseek(fd, 0, 2);
@@ -230,11 +232,13 @@ fn jsonl_read(fd): i64 {
     if (size <= 0) {
         patra_unlock(fd);
         var lr = _pt_alloc(JLR_SZ);
+        if (lr == 0) { return 0; }
         memset(lr, 0, JLR_SZ);
         return lr;
     }
 
     var data = _pt_alloc(size + 1);
+    if (data == 0) { patra_unlock(fd); return 0; }
     var rd = 0;
     var eof = 0;
     while (eof == 0) {
@@ -257,6 +261,7 @@ fn jsonl_read(fd): i64 {
     }
 
     var lines = _pt_alloc(nlc * 16 + 16);
+    if (lines == 0) { _pt_free(data); return 0; }
     var li = 0;
     var start = 0;
     for (var i = 0; i <= size; i = i + 1) {
@@ -276,6 +281,7 @@ fn jsonl_read(fd): i64 {
     }
 
     var lr = _pt_alloc(JLR_SZ);
+    if (lr == 0) { _pt_free(lines); _pt_free(data); return 0; }
     store64(lr + JLR_COUNT, li);
     store64(lr + JLR_DATA, data);
     store64(lr + JLR_LINES, lines);
@@ -409,11 +415,13 @@ fn jsonl_get_int(line, llen, key, klen): i64 {
 
 # ── Count lines ────────────────────
 
-# Count lines in JSONL file
+# Count lines in JSONL file. 1.16.2: -1 when its buffer is refused (it was a
+# read into address 0).
 fn jsonl_count(fd): i64 {
+    var buf = _pt_alloc(4096);
+    if (buf == 0) { return 0 - 1; }
     patra_lock_sh(fd);
     xlseek(fd, 0, 0);
-    var buf = _pt_alloc(4096);
     var count = 0;
     var eof = 0;
     while (eof == 0) {

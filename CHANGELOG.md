@@ -13,15 +13,20 @@ read, a database without an identity having no crash recovery), and what turned 
 most of it a failed `fdatasync`, a refused allocation or a refused write reported as success,
 three ways to lose acknowledged rows, and one statement that made a database unopenable. Two
 adversarial reviews of the change found twenty-one more defects in it and around it; eighteen
-are fixed here and three recorded below. Each fix landed with a regression test that fails
-without it.
+are fixed here and three recorded below. A sweep of a refused allocation over every allocation of
+every statement then closed the item those reviews left open — about 70 unchecked allocations —
+and found what lay behind them: failure paths that left the on-disk free list naming a page they
+had written, a B-tree split that lost other rows' index entries when refused part-way, and
+queries that answered wrongly instead of failing; and, beside it, two transactions on two
+databases on two threads destroying each other's indexes. Each fix landed with a regression test
+that fails without it.
 
-Gates: **1,594 assertions** (was 1,413) · `patra_uninit.tcyr` 18 / 18 · raw-include 6 / 6 · 8 / 8
+Gates: **1,631 assertions** (was 1,413) · `patra_uninit.tcyr` 18 / 18 · raw-include 6 / 6 · 8 / 8
 fuzz · 43 benchmarks · libro 15/15 · vidya 19/19 · fmt + lint 0-warn · no raw syscalls · a new
 dangling-link gate · `dist/` in sync, sidecar **14** leaves == 14 declared. On aarch64 under
-`qemu-aarch64`: 1,594 / 1,594, 18 / 18, 8 / 8 fuzz, 3 / 3 programs. Mach-O x86_64 / arm64, agnos
-and Windows PE compile warning-free; the Windows open path was run under wine. Binary
-**255,488 B** DCE-on / 394,752 B DCE-off (1.16.1: 247,128 / 386,392). Toolchain unchanged
+`qemu-aarch64`: 1,631 / 1,631, 18 / 18, 8 / 8 fuzz, 3 / 3 programs. Mach-O x86_64 / arm64, agnos and Windows PE compile warning-free; the
+Windows open path, the demo and libro / vidya (15/15, 19/19) were run under wine. Binary
+**272,008 B** DCE-on / 411,272 B DCE-off (1.16.1: 247,128 / 386,392). Toolchain unchanged
 (cyrius 6.7.10).
 
 ### Fixed — lost rows and unopenable files
@@ -130,12 +135,90 @@ and Windows PE compile warning-free; the Windows open path was run under wine. B
   while `ADD COLUMN` / `RENAME COLUMN` already refused a duplicate. It is `PATRA_ERR_EXISTS`.
 - **`patra_open` used its allocations unchecked** (the WAL path, the handle, its header buffer).
 
+### Fixed — a refused allocation anywhere in a statement
+
+Closes the roadmap item opened earlier in this release. Every allocation a statement makes is
+checked, and its failure path leaves the database whole.
+
+- **Refusals were stores through 0** on the query path (the aggregate and fill buffers, the plan,
+  the result set, the ORDER BY and projection arrays, the projected result), at statement entry (the
+  copy of SQL holding `''`, a prepared statement, a thread's first parse scratch and page-slab
+  stack), in CREATE TABLE's name and type arrays, AUTOINCREMENT's scan, CREATE INDEX, `patra_open`'s
+  three header buffers, the chain readers and writers, the table scans, UPDATE / DELETE / DROP, the
+  B-tree walks and JSONL. Each now fails the statement (`PATRA_ERR_IO` or `PATRA_ERR_FULL`) or the
+  query (0).
+- **Two wrong answers**: an ORDER BY whose sort buffers were refused returned its rows unsorted,
+  and a TEXT or BYTES cell whose copy was refused came back empty. The query fails now.
+- **A failed statement could leave the free list naming a page it had written.** Every statement
+  re-reads the header, so what a failed autocommit statement did to it is dropped — but not the
+  pages it wrote, and the next allocation took the next free page out of one of them: a live page
+  handed out again, or the rest of the list lost. Every failure path now either commits the header
+  or gives each page back, and giving a page back cannot itself be refused (reserved pages,
+  claimed by CAS); `page_alloc` also refuses a list head that is not a free page, so such damage
+  would leak rather than hand a page out twice
+  ([architecture note 005](docs/architecture/005-failed-statement-free-list.md)). The same hole
+  needed no refused allocation: **an INSERT refused after binding a TEXT value** (a type mismatch,
+  a STR over 255 bytes, an unknown column after it) left that value's pages written and listed.
+  **Test:** `test_insert_refusal_gives_text_back` (12).
+- **A B-tree split refused part-way lost other rows' index entries.** It allocated each level after
+  writing the one below, so a refusal left a half-leaf no parent pointed to. A split now takes its
+  buffers and exactly the pages it will use before its first write.
+- **INSERT kept a row its index refused**, invisible to every index lookup; the row is taken back
+  with its chains and the statement fails. **UPDATE freed a row's old TEXT before writing the new
+  value**, unchecked; it now writes new values first, inserts the new index entry before removing
+  the old one (a removal cannot be refused), restores the row if the insert is refused, and commits
+  the header after a failure. **CREATE INDEX freed the old index before building the new one**; it
+  now builds first and keeps the old index if the build fails, and a row the build could not index
+  fails it. **ALTER ADD / DROP COLUMN gave a second index entry to the row before one it failed to
+  store**, and kept an index its rebuild could not finish; such an index is dropped (scans answer
+  correctly; CREATE INDEX rebuilds it). **DELETE** could leave an entry naming a moved or deleted
+  row when its index walk was refused; that walk now falls back to reserved pages.
+- **Inside a transaction, a statement that failed after writing left part of itself for COMMIT.**
+  It now marks the transaction, as a refused before-image does, and COMMIT rolls it back. A
+  refusal of the statement itself (`PATRA_ERR_TYPE`, `_NOTFOUND`, …) leaves the transaction
+  committable, as before.
+- **A database whose creation was refused part-way left an empty file**, and every later open of
+  the path failed "cannot read header". The file is removed.
+- **Tests:** `test_statements_survive_refused_allocations` (22) refuses each allocation in turn —
+  page buffers too — of fourteen statement scenarios (INSERT through a split, `patra_insert_row`
+  with BYTES, UPDATE of the indexed key and a TEXT, DELETE, CREATE INDEX new and over an old one,
+  DROP TABLE, VACUUM, the query path, prepared statements, RENAME / CREATE / AUTOINCREMENT / `''`,
+  ALTER ADD and DROP COLUMN, `patra_open`), JSONL and a new thread's first statements; refused from
+  the k-th allocation on and only the k-th, in autocommit and in a transaction; one forked child
+  each, 8,246 in all. No child may crash; the file must reopen with a well-formed free list
+  (seeded with 60 pages, so the statements allocate from it); every table must read whole, with its
+  index compared to its rows directly and its TEXT to what was written; a refused COMMIT must leave
+  the database as before BEGIN, and a committed one each statement whole. Five queries are swept
+  the same way for a wrong answer. Each fix was mutation-verified — removing it fails the sweep —
+  except `tbl_create`'s restore of the header it advanced, which only leaks a page.
+
+### Fixed — two transactions on two databases, on two threads
+
+- **Each destroyed the other's index.** A statement inside a transaction does not take the
+  statement mutex (1.14.0, to break a lock-order deadlock), so two threads each in a transaction on
+  its own database run statements at once — what the per-database WAL slots exist for
+  ([ADR-0004](docs/adr/0004-per-database-wal-and-cache-identity.md)). But a B-tree insert kept its
+  path in process globals, as did the last inserted row's ref and the rows-affected count. Measured
+  on 1.16.1's code: 4,000 indexed rows each, 82 and 144 index entries left. The split's state now
+  lives on `btree_insert`'s stack, and the three results are per thread (three more thread-local
+  slots, nine in all). And `patra_begin` claimed a WAL slot with a plain scan-then-store, so two at
+  once could take the same slot and one transaction went unlogged; the claim is a CAS, and a
+  release frees the slot last. **Test:** `test_concurrent_transactions_two_databases` (3): per
+  thread, 1,500 inserts through splits, an UPDATE of the indexed key, a DELETE and 100 small
+  UPDATEs, three rounds, each index compared to its rows. Mutation-verified for the split state (the
+  test crashes) and the last ref (an index fails); the rows-affected count and the WAL claim are
+  windows too narrow for a timing test, fixed by inspection.
+
 ### Added
 
 - **Test-only fault seams** in `src/file.cyr`: `_pt_sync_fail_on` / `_fd` / `_skip` make the sync
   of one fd fail, and `_pt_alloc_fail_on` / `_skip` / `_once` make `_pt_alloc` refuse, after a
   countdown. Defaults are 0; nothing outside `tests/` arms them
-  ([architecture note 004](docs/architecture/004-test-fault-seams.md)).
+  ([architecture note 004](docs/architecture/004-test-fault-seams.md)). `_pt_alloc_fail_hits`
+  counts refusals, so a sweep knows when it is done, and `_pt_alloc_fail_pages` makes an armed
+  seam reach page buffers the slab would otherwise serve.
+- **[Architecture note 005](docs/architecture/005-failed-statement-free-list.md)**: what a failed
+  statement must leave on disk, the reserved pages, and the split reservation.
 - **CI:** no dangling links between the repo's docs (relative links in tracked `.md` files must
   name a file; links that leave the repository are skipped; four historical ones allowlisted, as
   `docs/doc-health.md` records), and `cyrius test --timeout 300`, so a regression that hangs fails
@@ -151,21 +234,46 @@ and Windows PE compile warning-free; the Windows open path was run under wine. B
   `PATRA_ERR_IO`; any statement can return `PATRA_ERR_PAGE` / `PATRA_ERR_MAGIC` for a header that
   fails verification, or `PATRA_ERR_IO` for one it cannot read; `ALTER … ADD / DROP COLUMN` can
   return `PATRA_ERR_FULL` / `PATRA_ERR_IO` with nothing changed.
+- **A query refused part-way returns 0.** It could return rows unsorted under ORDER BY, or a TEXT /
+  BYTES value empty.
+- **Inside a transaction, a statement that fails with `PATRA_ERR_IO`, `_FULL` or `_PAGE` after
+  writing makes COMMIT roll back** and return that error.
+- **`ALTER … ADD / DROP COLUMN` whose index rebuild is refused drops the index** and fails.
+- `jsonl_read` returns 0 and `jsonl_count` -1 when memory is refused.
 - `BEGIN` syncs pending BATCH writes first.
-- The DB handle is 96 bytes (was 88): `DB_SYNC_ERR`.
+- The DB handle is 96 bytes (was 88): `DB_SYNC_ERR`. A WAL slot is 80 bytes (was 72):
+  `WS_WRITES`. `patra_init` reserves 48 KB more (two pages for failure paths, one per B-tree level
+  for the index walk), and patra claims nine thread-local slots (was six).
 
 ### Not fixed — recorded
 
-- **Outside a transaction, `page_write`'s result is still discarded at most call sites, and some
-  70 allocation results are unchecked across `src/`.** In autocommit `page_write` fails only on a
-  real seek or write error; there is no undo there. The allocation seam makes each statement
-  sweepable the way the ALTER test is. Roadmap items.
+- **Outside a transaction, `page_write`'s result is still discarded at most call sites.** In
+  autocommit `page_write` fails only on a real seek or write error; there is no undo there.
+  Roadmap item. (The allocation half of this item is closed above.)
+- **Outside a transaction, a multi-row UPDATE or DELETE, or an ALTER, refused part-way keeps what
+  it did**: the rows it reached, the rows it re-inserted. The database stays consistent and the
+  statement fails, but there is no undo in autocommit; inside a transaction COMMIT now rolls such a
+  statement back.
 - **Two copies of one database corrupt each other under the opt-in page cache** (`cp` copies
   `HDR_DBID`, the cache's key). Pre-existing; the cache is off by default. Roadmap item.
 - **On macOS a JSONL append to a pipe still returns `PATRA_ERR_IO`**: XNU answers ENOTSUP, which
   the stdlib's errno table lacks and patra may not copy in. Written up to file with cyrius.
 
 ### Validation
+
+- **The allocation sweep and the writer-state fix, against the committed first half of this
+  release**, in user-space instructions per operation (`perf_event_open`, drivers at two sizes
+  differenced): an INSERT inside a transaction **+345** (+0.16 %), a TEXT INSERT +31 (0.00 %), an
+  indexed point SELECT +361 (+0.20 %), a one-row UPDATE +524 (+0.10 %), and a 1,000-row UPDATE
+  setting an INT and a TEXT **−1.35 M (−0.59 %)** — UPDATE now resolves each SET column once per
+  statement instead of once per matching row; the tokenizer and parser +18 per statement pair
+  (0.00 %). Two costs were found and removed on the way, both by instruction count: a per-row
+  failure check in UPDATE's scan (+12,583 per 500-row UPDATE, moved inside the match) and
+  `_wal_find` walking all eight slots (it now returns at the first match). Wall clock, four
+  interleaved runs each on a quiet host before the last UPDATE change: every row within ±2.5 %
+  but `update_where` +7.8 % (the per-row resolve the change above removed) and `jsonl_append_1k`
+  +5.7 % (unchanged code). A later run with the host at load 12 moved untouched parser rows by
+  +15–20 % on both builds and was discarded.
 
 - **Performance: unchanged within noise.** Six interleaved runs each of 1.16.1 and 1.16.2, medians,
   run from a real-disk directory. Every row is within 4 % but two. `select_idx_eq_unique_500`

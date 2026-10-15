@@ -69,14 +69,22 @@ fn page_alloc(fd, hdr): i64 {
         if (buf == 0) { return 0; }
         # HDR_FREEHEAD is an on-disk pointer: bounds-check it like any other.
         var rr = page_read_checked(fd, hdr, fh, buf);
+        # 1.16.2: and it must be a free page. Every page kind keeps its type in
+        # word 0 (FP_TYPE, DP_TYPE, BT_TYPE, BY_TYPE), and only a free page has
+        # PAGE_FREE there. A list whose head was overwritten — a failed
+        # statement that left a page it wrote on the on-disk list — handed that
+        # live page out again and took FP_NEXT from its contents.
+        if (rr == PATRA_OK) {
+            if (load64(buf + FP_TYPE) != PAGE_FREE) { rr = PATRA_ERR_PAGE; }
+        }
         if (rr == PATRA_OK) {
             var next = load64(buf + FP_NEXT);
             store64(hdr + HDR_FREEHEAD, next);
             _pt_free(buf);
             return fh;
         }
-        # The free-list head is out of range or unreadable, so the list is
-        # corrupt. Drop it and extend the file instead of failing the
+        # The free-list head is out of range, unreadable or not free, so the
+        # list is corrupt. Drop it and extend the file instead of failing the
         # allocation — losing the free list leaks pages, which is far better
         # than returning 0 for a caller to use as a page number.
         _pt_free(buf);
@@ -102,7 +110,24 @@ fn page_alloc(fd, hdr): i64 {
 # Free a page (add to free list)
 fn page_free(fd, hdr, num): i64 {
     var buf = _pt_alloc(PAGE_SIZE);
-    if (buf == 0) { return PATRA_ERR_IO; }
+    # 1.16.2: a refused buffer falls back to the reserved page (see
+    # _pt_spare_free in file.cyr), so a free cannot fail for want of memory.
+    if (buf == 0) {
+        if (_pt_spare_free == 0) { return PATRA_ERR_IO; }
+        if (_pt_spare_claim(&_pt_spare_free_busy) == 0) { return PATRA_ERR_IO; }
+        var sr = page_free_buf(fd, hdr, num, _pt_spare_free);
+        _pt_spare_release(&_pt_spare_free_busy);
+        return sr;
+    }
+    var r = page_free_buf(fd, hdr, num, buf);
+    _pt_free(buf);
+    return r;
+}
+
+# page_free with the caller's PAGE_SIZE scratch buffer (1.16.2), which it
+# overwrites: for a failure path that must give pages back when no allocation
+# can be had (_bytes_write_chain's cleanup).
+fn page_free_buf(fd, hdr, num, buf): i64 {
     memset(buf, 0, PAGE_SIZE);
     store64(buf + FP_TYPE, PAGE_FREE);
     store64(buf + FP_NEXT, load64(hdr + HDR_FREEHEAD));
@@ -114,9 +139,8 @@ fn page_free(fd, hdr, num): i64 {
     # those bytes said: a live data page handed out as free, or a corrupt list.
     # Leaking the page is strictly better, and the caller is told.
     var w = page_write(fd, num, buf);
-    if (w != PATRA_OK) { _pt_free(buf); return w; }
+    if (w != PATRA_OK) { return w; }
     store64(hdr + HDR_FREEHEAD, num);
-    _pt_free(buf);
     return PATRA_OK;
 }
 

@@ -9,6 +9,9 @@ enum BtConst {
     # order-64 tree deep enough to matter holds billions of keys, so this
     # ceiling cannot reject a real query.
     BT_MAX_NODES = 1000000;
+    # The budget after a node could not get a buffer (1.16.2). The budget only
+    # counts down to 0, so this value never occurs otherwise.
+    BT_WALK_FAILED = 0 - 1;
 }
 
 enum BtOff {
@@ -54,9 +57,45 @@ fn _bt_row_ptr(buf, rsl, rsz): i64 {
     return buf + DP_DATA + rsl * rsz;
 }
 
-# Path stack for insert (max depth BT_MAX_DEPTH = 10)
-var _bt_path[80];
-var _bt_pdepth = 0;
+# An insert's split context (1.16.2): the path _bt_find_leaf walked, the key
+# count of each internal node on it, and what _bt_reserve took for the split.
+# It lives on btree_insert's stack and is passed down. It was a set of process
+# globals (the path and its depth) on the assumption that writers are
+# serialized, which they are not: a statement inside a transaction does not
+# take the statement mutex (lib.cyr _stmt_lock), so two threads each running a
+# transaction on its own database split their trees through one shared path,
+# and both indexes lost most of their entries (4,000 rows, 82 and 144 left).
+enum BtSplitCtx {
+    SX_PATH = 0;        # BT_MAX_DEPTH + 1 page numbers, root first, leaf last
+    SX_PNK = 88;        # BT_MAX_DEPTH key counts (internal nodes only)
+    SX_PDEPTH = 168;    # entries in SX_PATH
+    SX_RSV = 176;       # reserved page numbers, BT_MAX_DEPTH + 2 at most
+    SX_NRSV = 272;
+    SX_SB = 280;        # push-up page buffer
+    SX_SK = 288;        # its 64 temp keys
+    SX_SC = 296;        # its 65 temp children
+    SX_SZ = 304;
+}
+
+# 1.16.2: 1 when the last btree_insert / btree_remove_ref / btree_update_ref
+# could not apply its change — a refused allocation, an unreadable node, a
+# split abandoned for want of a page. Those paths always gave up quietly ("the
+# row itself is still stored; a scan finds it"), and an index lookup then
+# missed the row. Callers read it after the call and fail the statement; inside
+# a transaction that marks it, and COMMIT rolls it back. Per thread, for the
+# reason given above BtSplitCtx. Slot claimed by _patra_tls_ensure.  #skip-lint
+var TLS_BTERR = 0 - 1;
+
+fn _bt_err_get(): i64 {
+    if (TLS_BTERR < 0) { _patra_tls_ensure(); }
+    return thread_local_get(TLS_BTERR);
+}
+
+fn _bt_err_set(v): i64 {
+    if (TLS_BTERR < 0) { _patra_tls_ensure(); }
+    thread_local_set(TLS_BTERR, v);
+    return 0;
+}
 
 # ── Create ────────────────────
 
@@ -88,14 +127,16 @@ fn btree_create(fd, hdr): i64 {
 
 # ── Find leaf (records path) ────────────────────
 
-fn _bt_find_leaf(fd, hdr, root, key): i64 {
-    _bt_pdepth = 0;
+fn _bt_find_leaf(fd, hdr, root, key, sx): i64 {
+    var d = 0;
+    store64(sx + SX_PDEPTH, 0);
     var pg = root;
     var buf = pg_alloc();
+    if (buf == 0) { return 0; }        # 1.16.2: checked
     page_read(fd, pg, buf);
 
     while (load64(buf + BT_LEAF) == 0) {
-        if (_bt_pdepth >= BT_MAX_DEPTH) {
+        if (d >= BT_MAX_DEPTH) {
             # Depth cap reached: malformed tree or a cycle. Returning the
             # current page used to be described as harmless ("the caller's
             # key-match logic will find nothing") — but the caller is
@@ -106,10 +147,12 @@ fn _bt_find_leaf(fd, hdr, root, key): i64 {
             pg_free(buf);
             return 0;
         }
-        store64(&_bt_path + _bt_pdepth * 8, pg);
-        _bt_pdepth = _bt_pdepth + 1;
+        store64(sx + SX_PATH + d * 8, pg);
         var nk = load64(buf + BT_NKEYS);
         if (nk > BT_MAX_KEYS) { nk = BT_MAX_KEYS; }
+        store64(sx + SX_PNK + d * 8, nk);
+        d = d + 1;
+        store64(sx + SX_PDEPTH, d);
         var ci = nk;
         var ff = 0;
         for (var i = 0; i < nk; i = i + 1) {
@@ -129,8 +172,8 @@ fn _bt_find_leaf(fd, hdr, root, key): i64 {
             return 0;
         }
     }
-    store64(&_bt_path + _bt_pdepth * 8, pg);
-    _bt_pdepth = _bt_pdepth + 1;
+    store64(sx + SX_PATH + d * 8, pg);
+    store64(sx + SX_PDEPTH, d + 1);
     pg_free(buf);
     return pg;
 }
@@ -232,17 +275,91 @@ fn _bt_int_ins(buf, pos, key, rchild): i64 {
     store64(buf + BT_NKEYS, nk + 1);
 }
 
+# ── Split reservation (1.16.2) ───────────────
+#
+# A split used to allocate level by level, writing each level before asking for
+# the next one's buffers and page. A refusal part-way up abandoned the split
+# with the lower levels already written: the leaf's right half on a page its
+# parent never learned of, its keys gone from every lookup — other rows' index
+# entries, lost by an INSERT that failed. btree_insert now takes everything
+# the whole split needs before its first write: the push-up's buffers (one set
+# serves every level, used one level at a time) and exactly the pages it will
+# use — the leaf's right half, one per full ancestor, and a new root when every
+# ancestor is full. A refusal gives them back in reverse order, which restores
+# the free list exactly, and the tree is untouched. All of it is held in the
+# insert's split context (BtSplitCtx).
+# Give back what _bt_reserve took: unused pages in reverse order, then buffers.
+fn _bt_unreserve(fd, hdr, sx): i64 {
+    var n = load64(sx + SX_NRSV);
+    while (n > 0) {
+        n = n - 1;
+        page_free(fd, hdr, load64(sx + SX_RSV + n * 8));
+    }
+    store64(sx + SX_NRSV, 0);
+    pg_free(load64(sx + SX_SB));
+    _pt_free(load64(sx + SX_SK));
+    _pt_free(load64(sx + SX_SC));
+    store64(sx + SX_SB, 0);
+    store64(sx + SX_SK, 0);
+    store64(sx + SX_SC, 0);
+    return 0;
+}
+
+# Reserve a split of the leaf at the end of the path. 0 = reserved, 1 = refused
+# (and nothing is held).
+fn _bt_reserve(fd, hdr, sx): i64 {
+    store64(sx + SX_NRSV, 0);
+    store64(sx + SX_SB, pg_alloc());
+    store64(sx + SX_SK, _pt_alloc(520));
+    store64(sx + SX_SC, _pt_alloc(528));
+    var ok = 1;
+    if (load64(sx + SX_SB) == 0) { ok = 0; }
+    if (load64(sx + SX_SK) == 0) { ok = 0; }
+    if (load64(sx + SX_SC) == 0) { ok = 0; }
+    if (ok == 0) { _bt_unreserve(fd, hdr, sx); return 1; }
+    var need = 1;
+    var full = 1;
+    var lv = load64(sx + SX_PDEPTH) - 2;
+    while (lv >= 0) {
+        if (full == 1) {
+            if (load64(sx + SX_PNK + lv * 8) >= BT_MAX_KEYS) { need = need + 1; }
+            else { full = 0; }
+        }
+        lv = lv - 1;
+    }
+    if (full == 1) { need = need + 1; }
+    var n = 0;
+    while (n < need) {
+        var pg = page_alloc(fd, hdr);
+        if (pg == 0) { _bt_unreserve(fd, hdr, sx); return 1; }
+        store64(sx + SX_RSV + n * 8, pg);
+        n = n + 1;
+        store64(sx + SX_NRSV, n);
+    }
+    return 0;
+}
+
+# A reserved page, or page_alloc's if the reservation ran short (0 = none).
+fn _bt_take(fd, hdr, sx): i64 {
+    var n = load64(sx + SX_NRSV);
+    if (n == 0) { return page_alloc(fd, hdr); }
+    store64(sx + SX_NRSV, n - 1);
+    return load64(sx + SX_RSV + (n - 1) * 8);
+}
+
 # ── Push separator to parent ───────────────
 
-fn _bt_push_up(fd, hdr, root, left_pg, sep, right_pg): i64 {
-    if (_bt_pdepth <= 1) {
+fn _bt_push_up(fd, hdr, root, left_pg, sep, right_pg, sx): i64 {
+    var depth = load64(sx + SX_PDEPTH);
+    if (depth <= 1) {
         # left_pg is the root — create new root
         # 1.14.0: see btree_create. Returning `root` unchanged abandons the
         # split rather than writing a new root over the header page; the caller
         # keeps a consistent (if unsplit) tree.
-        var nr = page_alloc(fd, hdr);
-        if (nr == 0) { return root; }
-        var nb = pg_alloc();
+        # 1.16.2: buffer and page come from the split's reservation.
+        var nb = load64(sx + SX_SB);
+        var nr = _bt_take(fd, hdr, sx);
+        if (nr == 0) { _bt_err_set(1); return root; }
         memset(nb, 0, PAGE_SIZE);
         store64(nb + BT_TYPE, PAGE_BTREE);
         store64(nb + BT_LEAF, 0);
@@ -251,12 +368,11 @@ fn _bt_push_up(fd, hdr, root, left_pg, sep, right_pg): i64 {
         store64(nb + BT_VALS, left_pg);
         store64(nb + BT_VALS + 8, right_pg);
         page_write(fd, nr, nb);
-        pg_free(nb);
         return nr;
     }
 
-    var par_pg = load64(&_bt_path + (_bt_pdepth - 2) * 8);
-    var pb = pg_alloc();
+    var par_pg = load64(sx + SX_PATH + (depth - 2) * 8);
+    var pb = load64(sx + SX_SB);
     page_read(fd, par_pg, pb);
     var nk = load64(pb + BT_NKEYS);
     # CLAMP: BT_NKEYS is read off a disk page, so a torn write or a hostile
@@ -282,13 +398,12 @@ fn _bt_push_up(fd, hdr, root, left_pg, sep, right_pg): i64 {
     if (nk < BT_MAX_KEYS) {
         _bt_int_ins(pb, cpos, sep, right_pg);
         page_write(fd, par_pg, pb);
-        pg_free(pb);
         return root;
     }
 
     # Parent full — split internal node
-    var tk = _pt_alloc(520);
-    var tc = _pt_alloc(528);
+    var tk = load64(sx + SX_SK);
+    var tc = load64(sx + SX_SC);
 
     # Position for sep — same rule as the non-full path above: it belongs
     # immediately after the child that split, located by page number.
@@ -324,8 +439,8 @@ fn _bt_push_up(fd, hdr, root, left_pg, sep, right_pg): i64 {
     # 1.14.0: allocate before committing the truncated parent — same reasoning
     # as the leaf split above. Written after the page_write, the guard would
     # have left the parent with BT_NKEYS = 31 and orphaned children 32..64.
-    var rpg = page_alloc(fd, hdr);
-    if (rpg == 0) { _pt_free(tk); _pt_free(tc); pg_free(pb); return root; }
+    var rpg = _bt_take(fd, hdr, sx);
+    if (rpg == 0) { _bt_err_set(1); return root; }
 
     # Left stays in par_pg
     store64(pb + BT_NKEYS, mid);
@@ -351,31 +466,33 @@ fn _bt_push_up(fd, hdr, root, left_pg, sep, right_pg): i64 {
     }
     page_write(fd, rpg, pb);
 
-    _pt_free(tk);
-    _pt_free(tc);
-    pg_free(pb);
-
-    _bt_pdepth = _bt_pdepth - 1;
-    return _bt_push_up(fd, hdr, root, par_pg, mid_key, rpg);
+    store64(sx + SX_PDEPTH, depth - 1);
+    return _bt_push_up(fd, hdr, root, par_pg, mid_key, rpg, sx);
 }
 
 # ── Insert ────────────────────
 
 # Insert key-value into B-tree, returns (possibly new) root
 fn btree_insert(fd, hdr, root, key, val): i64 {
-    var leaf_pg = _bt_find_leaf(fd, hdr, root, key);
+    _bt_err_set(0);
+    var sx[304];                     # BtSplitCtx (SX_SZ)
+    store64(&sx + SX_NRSV, 0);
+    var leaf_pg = _bt_find_leaf(fd, hdr, root, key, &sx);
     # Descent failed (depth cap or an unreadable child): drop the index entry
     # rather than write leaf structure over an internal node. The row itself is
     # still stored; a scan finds it.
-    if (leaf_pg == 0) { return root; }
+    if (leaf_pg == 0) { _bt_err_set(1); return root; }
     var buf = pg_alloc();
+    if (buf == 0) { _bt_err_set(1); return root; }
     if (page_read_checked(fd, hdr, leaf_pg, buf) != PATRA_OK) {
         pg_free(buf);
+        _bt_err_set(1);
         return root;
     }
     # Belt and braces: only ever mutate an actual leaf.
     if (load64(buf + BT_LEAF) == 0) {
         pg_free(buf);
+        _bt_err_set(1);
         return root;
     }
     var nk = load64(buf + BT_NKEYS);
@@ -395,6 +512,8 @@ fn btree_insert(fd, hdr, root, key, val): i64 {
     # Leaf full — build sorted temp (64 entries)
     var tk = _pt_alloc(520);
     var tv = _pt_alloc(520);
+    if (tk == 0) { _pt_free(tv); pg_free(buf); _bt_err_set(1); return root; }
+    if (tv == 0) { _pt_free(tk); pg_free(buf); _bt_err_set(1); return root; }
     var ins = 0;
     var ff = 0;
     for (var i = 0; i < nk; i = i + 1) {
@@ -426,8 +545,16 @@ fn btree_insert(fd, hdr, root, key, val): i64 {
     # the very guard meant to protect page 0. Allocating first means the
     # failure path has modified nothing, and the tree stays exactly as it was.
     # (Also frees the two 520-byte temporaries, which the first cut leaked.)
-    var rpg = page_alloc(fd, hdr);
-    if (rpg == 0) { _pt_free(tk); _pt_free(tv); pg_free(buf); return root; }
+    #
+    # 1.16.2: and every level above it, through _bt_reserve.
+    if (_bt_reserve(fd, hdr, &sx) != 0) {
+        _pt_free(tk);
+        _pt_free(tv);
+        pg_free(buf);
+        _bt_err_set(1);
+        return root;
+    }
+    var rpg = _bt_take(fd, hdr, &sx);
 
     # Left half stays in leaf_pg
     store64(buf + BT_NKEYS, split);
@@ -453,7 +580,9 @@ fn btree_insert(fd, hdr, root, key, val): i64 {
     _pt_free(tv);
     pg_free(buf);
 
-    return _bt_push_up(fd, hdr, root, leaf_pg, sep, rpg);
+    var nroot = _bt_push_up(fd, hdr, root, leaf_pg, sep, rpg, &sx);
+    _bt_unreserve(fd, hdr, &sx);
+    return nroot;
 }
 
 # ── Search (all refs for key) ──────────────
@@ -481,6 +610,7 @@ fn btree_search_t(fd, hdr, root, key, out, max, tflag): i64 {
     store64(tflag, 0);
     var n = _bt_range(fd, hdr, root, key, key, out, max);
     if (n >= max) { store64(tflag, 1); }
+    if (n < 0) { store64(tflag, 1); }     # 1.16.2: a walk that could not finish
     return n;
 }
 
@@ -496,6 +626,10 @@ fn _bt_range(fd, hdr, root, lo, hi, out, max): i64 {
     # file. A real tree that fits a real file visits far fewer nodes than this.
     var budget = BT_MAX_NODES;
     _bt_rwalk(fd, hdr, root, lo, hi, out, max, &cnt, 0, &budget);
+    # 1.16.2: a node the walk could not get a buffer for leaves the budget at
+    # BT_WALK_FAILED (see _bt_rwalk): -1, so the caller does not take a short
+    # list of refs for the whole answer. _idx_plan then scans instead.
+    if (load64(&budget) == BT_WALK_FAILED) { return 0 - 1; }
     return cnt;
 }
 
@@ -506,6 +640,10 @@ fn _bt_rwalk(fd, hdr, pg, lo, hi, out, max, cp, depth, bp): i64 {
     if (left <= 0) { return 0; }
     store64(bp, left - 1);
     var buf = pg_alloc();
+    if (buf == 0) {
+        store64(bp, BT_WALK_FAILED);      # 1.16.2: stops the walk, and says why
+        return 0;
+    }
     if (page_read_checked(fd, hdr, pg, buf) != PATRA_OK) {
         pg_free(buf);
         return 0;
@@ -554,6 +692,17 @@ fn _bt_rwalk(fd, hdr, pg, lo, hi, out, max, cp, depth, bp): i64 {
     return 0;
 }
 
+# One reserved page per depth for _bt_mut_walk (1.16.2), allocated by
+# patra_init, each claimed through its word in `_bt_spare_busy` like the file.cyr
+# spares. BT_MAX_DEPTH pages: the walk keeps one buffer per level it is on.
+var _bt_spare = 0;
+var _bt_spare_busy[80];      # BT_MAX_DEPTH words
+
+fn _bt_mut_buf_free(buf, spare, depth): i64 {
+    if (spare != 0) { return _pt_spare_release(&_bt_spare_busy + depth * 8); }
+    return pg_free(buf);
+}
+
 # ── Remove ref (lazy delete — set value to 0) ──────────────
 
 # Lazy-delete: invalidate a specific ref for a key
@@ -579,8 +728,21 @@ fn _bt_rwalk(fd, hdr, pg, lo, hi, out, max, cp, depth, bp): i64 {
 fn _bt_mut_walk(fd, hdr, pg, key, oldref, newref, cp, depth): i64 {
     if (depth >= BT_MAX_DEPTH) { return 0; }
     var buf = pg_alloc();
+    # 1.16.2: a refused buffer falls back to this depth's reserved page, so
+    # DELETE / UPDATE never leave an index entry naming a row that moved or
+    # went away for want of memory (see _bt_spare).
+    var spare = 0;
+    if (buf == 0) {
+        if (_bt_spare != 0) {
+            if (_pt_spare_claim(&_bt_spare_busy + depth * 8) != 0) {
+                spare = 1;
+                buf = _bt_spare + depth * PAGE_SIZE;
+            }
+        }
+    }
+    if (buf == 0) { _bt_err_set(1); return 0; }
     if (page_read_checked(fd, hdr, pg, buf) != PATRA_OK) {
-        pg_free(buf);
+        _bt_mut_buf_free(buf, spare, depth);
         return 0;
     }
     var nk = load64(buf + BT_NKEYS);
@@ -619,7 +781,7 @@ fn _bt_mut_walk(fd, hdr, pg, key, oldref, newref, cp, depth): i64 {
             }
         }
     }
-    pg_free(buf);
+    _bt_mut_buf_free(buf, spare, depth);
     return 0;
 }
 
@@ -627,6 +789,7 @@ fn _bt_mut_walk(fd, hdr, pg, key, oldref, newref, cp, depth): i64 {
 # the -1 sentinel as its value.
 fn btree_remove_ref(fd, hdr, root, key, ref): i64 {
     var n = 0;
+    _bt_err_set(0);
     _bt_mut_walk(fd, hdr, root, key, ref, 0 - 1, &n, 0);
     return n;
 }
@@ -644,6 +807,7 @@ fn btree_remove_ref(fd, hdr, root, key, ref): i64 {
 # (audit 2026-08-18 S2-4)
 fn btree_update_ref(fd, hdr, root, key, oldref, newref): i64 {
     var n = 0;
+    _bt_err_set(0);
     _bt_mut_walk(fd, hdr, root, key, oldref, newref, &n, 0);
     return n;
 }
@@ -662,6 +826,7 @@ fn _bt_free_walk(fd, hdr, root, depth): i64 {
     if (root == 0) { return 0; }
     if (depth >= BT_MAX_DEPTH) { return 0; }
     var buf = pg_alloc();
+    if (buf == 0) { return 0; }        # 1.16.2: checked (the subtree leaks)
     if (page_read_checked(fd, hdr, root, buf) != PATRA_OK) {
         pg_free(buf);
         return 0;
@@ -691,6 +856,7 @@ fn _bt_free_walk(fd, hdr, root, depth): i64 {
 # docs/development/roadmap.md § Open backlog, "B-tree structural rebalancing".
 fn _bt_leaf_compact(fd, pg): i64 {
     var buf = pg_alloc();
+    if (buf == 0) { return 0; }        # 1.16.2: checked (nothing compacted)
     page_read(fd, pg, buf);
     var nk = load64(buf + BT_NKEYS);
     # CLAMP: BT_NKEYS is read off a disk page, so a torn write or a hostile
@@ -723,6 +889,7 @@ fn _bt_leaf_compact(fd, pg): i64 {
 fn _bt_compact_walk(fd, hdr, pg, depth): i64 {
     if (depth >= BT_MAX_DEPTH) { return 0; }
     var buf = pg_alloc();
+    if (buf == 0) { return 0; }        # 1.16.2: checked (nothing compacted)
     if (page_read_checked(fd, hdr, pg, buf) != PATRA_OK) {
         pg_free(buf);
         return 0;

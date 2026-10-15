@@ -369,12 +369,23 @@ fn _sch_ncols_clamped(schema): i64 {
 fn _pt_file_create(path): i64 {
     var fd = file_open(path, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, 420);
     if (fd < 0) { return 0 - 1; }
+    # 1.16.2: a file that could not be given its header is removed. It was
+    # left empty (or short), and every later open of the path then failed
+    # "cannot read header" instead of creating the database. O_EXCL made it
+    # ours, so nothing else is removed. The buffer is checked, too.
     var buf = pg_alloc();
-    patra_hdr_init(buf);
-    _pt_seek(fd, 0);
-    var r = sys_write(fd, buf, PAGE_SIZE);
-    pg_free(buf);
-    if (r != PAGE_SIZE) { sys_close(fd); return 0 - 1; }
+    var r = 0 - 1;
+    if (buf != 0) {
+        patra_hdr_init(buf);
+        _pt_seek(fd, 0);
+        r = sys_write(fd, buf, PAGE_SIZE);
+        pg_free(buf);
+    }
+    if (r != PAGE_SIZE) {
+        sys_close(fd);
+        xunlink(path);
+        return 0 - 1;
+    }
     return fd;
 }
 
@@ -456,11 +467,14 @@ var _pt_alloc_mtx = 0;
 var _pt_alloc_fail_on = 0;
 var _pt_alloc_fail_skip = 0;
 var _pt_alloc_fail_once = 0;
+var _pt_alloc_fail_hits = 0;       # refusals made, so a sweep knows when to stop
+var _pt_alloc_fail_pages = 0;      # 1 = pg_alloc bypasses the page slab while armed
 
 fn _pt_alloc(n): i64 {
     if (_pt_alloc_fail_on != 0) {
         if (_pt_alloc_fail_skip == 0) {
             if (_pt_alloc_fail_once != 0) { _pt_alloc_fail_on = 0; }
+            _pt_alloc_fail_hits = _pt_alloc_fail_hits + 1;
             return 0;
         }
         _pt_alloc_fail_skip = _pt_alloc_fail_skip - 1;
@@ -507,14 +521,16 @@ enum SlabConst { PG_SLAB_MAX = 32; }
 # literals, closing the shared-namespace collision class — a server linking patra
 # + sigil could otherwise clobber each other's per-thread state (cyrius issue
 # 2026-07-01-thread-local-slot-namespace). The three SQL-parse slots are defined
-# in src/sql.cyr; the two page-slab slots here. All five are allocated together,
-# exactly once, by _patra_tls_ensure(). -1 = not yet allocated.  #skip-lint
+# in src/sql.cyr, the lexer-error slot below, the two page-slab slots here, and
+# (1.16.2) the writer's three per-statement results in btree.cyr / table.cyr.
+# All nine are allocated together, exactly once, by _patra_tls_ensure(). -1 =
+# not yet allocated.  #skip-lint
 var TLS_SLAB_STACK = 0 - 1;
 var TLS_SLAB_TOP = 0 - 1;
-var _patra_tls_gate = 0;     # CAS gate: one thread allocates the five slots
-var _patra_tls_ready = 0;    # published once all five slot indices are assigned
+var _patra_tls_gate = 0;     # CAS gate: one thread allocates the slots
+var _patra_tls_ready = 0;    # published once every slot index is assigned
 
-# Claim patra's five thread-local slot indices from the cyrius allocator, once,
+# Claim patra's thread-local slot indices from the cyrius allocator, once,
 # at runtime (so thread_local's base counter is initialized regardless of include
 # order). A CAS gate elects one allocator; a concurrent caller spins the few
 # nanoseconds until it publishes. Called at the head of both TLS entry points
@@ -534,6 +550,10 @@ fn _patra_tls_ensure(): i64 {
         TLS_LEXERR = thread_local_alloc();
         TLS_SLAB_STACK = thread_local_alloc();
         TLS_SLAB_TOP = thread_local_alloc();
+        # 1.16.2: the writer's per-statement results (btree.cyr, table.cyr).
+        TLS_BTERR = thread_local_alloc();
+        TLS_LASTREF = thread_local_alloc();
+        TLS_AFFECTED = thread_local_alloc();
         _patra_tls_ready = 1;
     }
     while (_patra_tls_ready == 0) { }   # loser waits for the winner to publish
@@ -550,6 +570,12 @@ fn _pg_slab_init(): i64 {
 
 # Allocate a 4KB buffer from this thread's page slab, falling back to fl_alloc.
 fn pg_alloc(): i64 {
+    # Test seam (architecture note 004): with `_pt_alloc_fail_pages` set, an
+    # armed seam takes every page buffer from _pt_alloc, so any of them can be
+    # refused — one served by the slab never could be.
+    if (_pt_alloc_fail_on != 0) {
+        if (_pt_alloc_fail_pages != 0) { return _pt_alloc(PAGE_SIZE); }
+    }
     _pg_slab_init();
     var top = thread_local_get(TLS_SLAB_TOP);
     if (top > 0) {
@@ -561,10 +587,61 @@ fn pg_alloc(): i64 {
 }
 
 # Return a 4KB buffer to this thread's page slab, or to fl_free if it's full.
+# Two reserved pages for failure paths (1.16.2), allocated by patra_init. A
+# statement that fails part-way must give back the pages it wrote — in
+# autocommit the on-disk header still lists them as free — and the frees must
+# not themselves fail for want of memory: a page left written while the on-disk
+# free list names it is handed out again over its contents. page_free falls
+# back to `_pt_spare_free`, and _pt_scratch_page to `_pt_spare_scratch`.
+#
+# Each is claimed with a CAS on its `_busy` word and released by its user. An
+# autocommit writer holds the statement mutex, so its claim never meets
+# another and the guarantee above holds. Statements inside a transaction do not
+# take that mutex (lib.cyr _stmt_lock), so two transactions on two databases can
+# race for a spare; the loser fails as if there were none, which a transaction
+# survives — the statement's error marks it, and commit rolls back.
+var _pt_spare_free = 0;
+var _pt_spare_free_busy = 0;
+var _pt_spare_scratch = 0;
+var _pt_spare_scratch_busy = 0;
+
+# Claim a reserved page: 1 if this caller now owns it. `busy` is its _busy word.
+fn _pt_spare_claim(busy): i64 {
+    return atomic_cas(busy, 0, 1);
+}
+
+# Give a claimed reserved page back. The fence orders the owner's writes into
+# the page before the release, for the next claimer on another core.
+fn _pt_spare_release(busy): i64 {
+    atomic_fence();
+    atomic_store(busy, 0);
+    return 0;
+}
+
+# A page buffer for a cleanup path: pg_alloc, or the reserved scratch page when
+# that is refused (0 if it is claimed elsewhere). Release with _pt_scratch_free.
+fn _pt_scratch_page(): i64 {
+    var b = pg_alloc();
+    if (b != 0) { return b; }
+    if (_pt_spare_scratch == 0) { return 0; }
+    if (_pt_spare_claim(&_pt_spare_scratch_busy) == 0) { return 0; }
+    return _pt_spare_scratch;
+}
+
+fn _pt_scratch_free(b): i64 {
+    if (b == 0) { return 0; }
+    if (b == _pt_spare_scratch) { return _pt_spare_release(&_pt_spare_scratch_busy); }
+    return pg_free(b);
+}
+
 fn pg_free(buf): i64 {
     if (buf == 0) { return 0; }
     _pg_slab_init();
     var top = thread_local_get(TLS_SLAB_TOP);
+    # 1.16.2: no slab stack — its allocation in _pg_slab_init was refused, and
+    # is retried on the next call — means the buffer goes back to the
+    # allocator. It was pushed through address 0.
+    if (thread_local_get(TLS_SLAB_STACK) == 0) { top = PG_SLAB_MAX; }
     if (top < PG_SLAB_MAX) {
         store64(thread_local_get(TLS_SLAB_STACK) + top * 8, buf);
         thread_local_set(TLS_SLAB_TOP, top + 1);
