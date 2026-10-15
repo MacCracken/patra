@@ -114,6 +114,12 @@ jobs:
           set -o pipefail
           cyrius test tests/tcyr/patra.tcyr 2>&1 | tee build/test.out
 
+      - name: patra_open refuses before patra_init
+        # Its own process: patra.tcyr's main calls patra_init, and nothing
+        # un-runs it. Before 1.16.1 this exited 139 (SIGSEGV) at its first
+        # patra_open.
+        run: cyrius test tests/tcyr/patra_uninit.tcyr
+
       - name: dist/patra.cyr compiles when included alone
         # A consumer that vendors the bundle writes `include "dist/patra.cyr"`
         # and nothing else. Run from a staging dir with NO cyrius.cyml: in the

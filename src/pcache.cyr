@@ -230,8 +230,16 @@ fn _pc_alloc(): i64 {
 # allocates the pool on first use and flushes any stale entries; the generation
 # gate re-syncs on the next op. Returns PATRA_OK, or PATRA_ERR_IO when the 4 MB
 # pool cannot be allocated (1.16.0), in which case the cache stays off.
+#
+# Also PATRA_ERR_IO, with the cache off, when patra_init has not run (1.16.1):
+# `_pc_mtx` does not exist yet and mutex_lock(0) faulted. Enabling first and
+# initialising after would not have worked anyway — _pc_init turns the cache off.
 fn patra_cache_enable(on): i64 {
     if (on == 0) { _pc_on = 0; return PATRA_OK; }
+    if (patra_initialized() == 0) {
+        _pt_err("patra: patra_init() has not run");
+        return PATRA_ERR_IO;
+    }
     # The pool allocation is INSIDE the lock. It used to sit outside, so two
     # concurrent enables raced _pc_alloc: the second could observe a
     # half-published pool and then set `_pc_on = 1` over it, arming every cache

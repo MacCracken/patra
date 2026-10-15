@@ -386,8 +386,9 @@ fn _pt_sync_dir(path): i64 {
 # the freelist. So EVERY patra-issued fl_alloc/fl_free goes through _pt_alloc /
 # _pt_free, serialized by this process-global mutex. The critical section is
 # just the freelist splice (tiny), so contention is far below the old
-# whole-statement mutex. _pt_alloc_mtx is created in patra_init; 0 before then
-# means single-threaded (no lock) — the same no-op contract as _patra_mtx.
+# whole-statement mutex. _pt_alloc_mtx is created in patra_init; while it is 0
+# the two helpers skip the lock. Not a supported mode: patra_open refuses until
+# patra_init has run (1.16.1), so no database path allocates in that state.
 # LOCK-ORDER INVARIANT: the page cache (pcache.cyr, added later) must NEVER hold
 # its _pc_mtx across an _pt_alloc / _pt_free call — allocation is always done
 # outside the cache lock, so the two mutexes never nest.

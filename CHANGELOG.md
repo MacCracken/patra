@@ -5,6 +5,126 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.16.1] - 2026-10-14 — `patra_open` refuses before `patra_init`; `EXISTS` no longer depends on how full the file is
+
+Patch release: the two bugs libro 2.10.8 filed on 2026-10-14, each with a twin fixed alongside
+it, two defects the release's own review found in those fixes, and the cyrius **6.7.10** pin.
+Each fix landed with a regression test that fails without it.
+
+Gates: **1,413 assertions** (was 1,389) · new `patra_uninit.tcyr` **18 / 18** (its own process,
+own CI step) · raw-include 6 / 6 · 8 / 8 fuzz · 43 benchmarks · libro 15/15 · vidya 19/19 ·
+fmt + lint 0-warn · no raw syscalls · `dist/` in sync, sidecar **14** leaves == 14 declared. On
+aarch64 under `qemu-aarch64`: 1,413 / 1,413, 18 / 18, 8 / 8 fuzz, 3 / 3 programs. Mach-O x86_64 /
+arm64, agnos and Windows PE compile warning-free. Binary **247,128 B** DCE-on / 386,392 B
+DCE-off: the pin move alone took 1.16.0 from 247,600 / 382,768 to 247,048 / 382,216, and this
+release's code adds 80 B DCE-on. DCE-off its 568 B of text crossed a 4 KB boundary and pushed
+the data segment out one page (+4,176 B).
+
+### Fixed
+
+- **`patra_open` died with SIGSEGV when `patra_init` had not run**
+  ([issue](docs/development/issues/archive/2026-10-14-patra-open-faults-without-patra-init.md),
+  medium, from libro 2.10.8). There were two faults. `pg_alloc` reads the page slab through a TLS
+  block, and on x86_64 Linux `%fs` is 0 until `patra_init` installs one. With a block installed
+  by hand, `pc_register` then locked `_pc_mtx`, which only `patra_init` creates. The process
+  died with no diagnostic and no error return. For a new path the first fault came inside
+  `_pt_file_create`, after its `O_CREAT` open and before the header write, so it left a 0-byte
+  file that every later open refused as "cannot read header". Now `patra_init` sets
+  `_patra_inited` as its last step, and `patra_open` tests that flag before anything else.
+  Without it, `patra_open` logs `patra: patra_init() has not run`, returns 0 and creates nothing.
+  This fails closed instead of initialising lazily: `patra_init` installs a TLS block on the
+  calling thread, which a `thread_create` worker must not do; it replaces two mutexes that another
+  thread may hold; and it turns an armed page cache off.
+  - **Twin:** `patra_cache_enable(1)` locked the same missing `_pc_mtx`. This one was already on
+    record: the 1.13.11 page-cache fix noted it and deliberately left it out
+    ([2026-08-30 issue](docs/development/issues/archive/2026-08-30-pcache-publish-before-fill.md)).
+    Before `patra_init` it now logs the same line and returns `PATRA_ERR_IO` with the cache off.
+    Enabling first and initialising after never worked anyway, because `_pc_init` turns the cache
+    off.
+  - **Found by this release's review: `patra_init` set the flag even when its own allocations were
+    refused.** It ignored `thread_local_init`'s, `mutex_new`'s and `wal_slots_init`'s failures, so
+    under a refused allocation `patra_initialized()` said 1 and `patra_open` went on to the same
+    two faults (or a statement ran without its lock). `patra_init` now returns `PATRA_ERR_IO` and
+    leaves the flag 0 when any of them fails; a refused TLS block returns at once, because
+    `_sql_init` would fault without it. It returns `PATRA_OK` on success (it returned nothing
+    before).
+  - Four places that promised a supported init-less mode now say there is none: the comments on
+    `_patra_mtx` and `_pt_alloc_mtx`, the two `wal_slots_init` "consumer that skipped
+    patra_init" notes, and ADR-0002's *Consequences*.
+  - ⚠ **The flag is process-wide; a TLS block is per thread.** A thread with no block of its own
+    (a foreign thread that skipped `thread_local_init()`, or a main thread after `patra_init` ran
+    only on a worker) still faults in `patra_open`. Both break the documented contract — call
+    `patra_init` on the main thread before spawning workers — and neither is detected.
+  - **Test:** `tests/tcyr/patra_uninit.tcyr` (18 assertions). It must run in its own process,
+    because `patra.tcyr`'s `main` calls `patra_init`. It goes through four stages: no TLS block;
+    a TLS block without `patra_init`; `patra_init` with its allocation refused (`ALLOC_MAX`
+    lowered); then `patra_init`, after which the same calls succeed. CI runs it as its own step.
+    Mutation-verified: without either refusal it exits 139; without the `thread_local_init`
+    check, 3 assertions fail.
+- **`CREATE TABLE` of an existing table returned `PATRA_ERR_FULL` in a 63-table file**
+  ([issue](docs/development/issues/archive/2026-10-14-create-table-full-masks-exists.md), low,
+  from libro 2.10.8). `tbl_create` tested `MAX_TABLES` before `tbl_find`, so the same statement
+  answered `PATRA_ERR_EXISTS` below the cap and `PATRA_ERR_FULL` at it. Code that reads EXISTS
+  as "already there", such as libro's `patrastore_open`, broke at exactly 63 tables. The cap test
+  now follows the name test.
+  - **Twin, found while fixing this one:** `ALTER TABLE … ADD COLUMN` tested the 32-column cap
+    before the name, so on a full table adding an existing column returned `PATRA_ERR_COLCOUNT`.
+    That cap now follows the name test too. No other statement checks a cap before a name.
+  - **Found by this release's review: the reorder exposed `CREATE TABLE` to an unverified table
+    count.** `tbl_find` looped to `HDR_TBLCOUNT`, which every statement re-reads from disk and
+    only `patra_open` verifies. With a count written after the open (another process, corruption),
+    `CREATE TABLE` walked past the header page and died with SIGBUS, where 1.16.0's cap-first
+    order returned `PATRA_ERR_FULL`. `tbl_find` now scans at most the 63 slots that exist, as
+    `_sch_ncols_clamped` bounds a schema page. The same walk faulted in 1.16.0 for any statement
+    naming a table that is not in the directory (`INSERT INTO nope` died with SIGBUS, probed);
+    it now returns `PATRA_ERR_NOTFOUND`. `DROP TABLE` still faults on such a count, in its
+    directory compaction, as it did in 1.16.0. The wider gap — a re-read header is never
+    verified — is a roadmap item.
+  - **Tests:** `test_create_exists_at_table_cap` (10 assertions),
+    `test_add_column_exists_at_column_cap` (9) and `test_create_with_corrupt_table_count` (5).
+    With the old order the first two fail 3 and 2 rows (got 3 / 10, expected 4); without the
+    clamp the third dies with SIGBUS.
+
+### Added
+
+- `patra_initialized(): i64` returns 1 once `patra_init` has succeeded. It is for a library that
+  wraps patra and must refuse before it calls `patra_open`. libro 2.10.8 reads the private
+  `_patra_mtx` for this today. It cannot tell whether the calling thread has a TLS block.
+- `patra_init` returns `PATRA_OK`, or `PATRA_ERR_IO` when an allocation it needs is refused.
+
+### Changed
+
+- **On agnos and cx, `patra_open` without `patra_init` used to work, and now returns 0.** Those
+  targets have a process-global TLS fallback and a no-op `mutex_lock`, so neither fault occurred
+  there. Call `patra_init` first, as on every other target.
+- Error order at the caps. Through SQL only an existing name changes, at either cap: the parser
+  already refuses an over-wide or over-long `CREATE TABLE` before `tbl_create` runs. A direct
+  `tbl_create` caller at the table cap now gets `PATRA_ERR_COLCOUNT` / `PATRA_ERR_SYNTAX` for such
+  a statement before `PATRA_ERR_FULL`.
+- Toolchain pin **6.7.5 → 6.7.10**. It was verified before any source change: 1,389 / 1,389,
+  8 / 8 fuzz, libro / vidya green, and `dist/` byte-identical under the 6.7.10 `distlib`. 19 of
+  the 32 vendored `lib/` files changed. `cyrius.lock` is regenerated, and `cyrius deps --locked`
+  is clean.
+
+### Validation
+
+- **No performance change.** Three interleaved runs were made of each build: 1.16.0 on 6.7.5,
+  1.16.0 on 6.7.10, and 1.16.1 on 6.7.10, medians. These runs predate the `tbl_find` clamp,
+  which the instruction count below covers.
+  - **From a tmpfs directory**, where fdatasync does nothing, so `insert_500_sync_full` and
+    `insert_2k_in_txn` from these runs are not comparable with [1.16.0] / [1.15.0]. For the pin
+    move, the largest changes are `dedup_select_then_insert_row_500` +6.9 % and
+    `select_idx_eq_unique_500` +5.7 %, and both reverse at the next step (−7.0 %, −8.3 %). For the
+    code, the one row past 4 % is `insert_2k_in_txn`, 20.8 → 22.3 us (+7.2 %, in all three runs),
+    but that path retired **178,787 user-space instructions per INSERT on both trees**
+    (`perf_event_open`, 2,000- and 4,000-insert drivers differenced): code placement, consistent
+    with the v1.15.0 placement finding in `BENCHMARKS.md`. `select_point_10k` 26.5 → 26.0 us and
+    `update_point_10k` 20.6 → 20.6 us.
+  - **From a real disk**, for the rows that price fdatasync: `insert_500_sync_full` 915.3 →
+    918.3 → 914.7 us, `insert_500_sync_batch` 53.9 → 53.0 → 53.6 us, `insert_2k_in_txn`
+    87.9 → 89.0 → 94.7 us (spreads 88.4–96.6 and 89.3–95.5 overlap; same instruction count).
+  - **The `tbl_find` clamp** adds 21 instructions per INSERT (178,787 → 178,808, +0.012 %).
+
 ## [1.16.0] - 2026-10-08 — WAL recovery before every statement; five silent wrong answers become errors
 
 Minor release: the cyrius **6.7.5** pin, the fix for patra's one open high-severity bug, and

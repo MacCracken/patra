@@ -68,9 +68,10 @@ var _wal_slots = 0;
 var _wal_tx_counter = 0;
 
 # Allocate the slot table. Called from patra_init, and defensively from
-# wal_start for a consumer that skipped it. Builds into a local and publishes
-# _wal_slots LAST — the same publish-order rule v1.13.11 had to learn in
-# pcache.cyr, where a guard tested the very global it assigned first.
+# wal_start (a consumer that skipped patra_init no longer gets that far —
+# 1.16.1: patra_open refuses). Builds into a local and publishes _wal_slots
+# LAST — the same publish-order rule v1.13.11 had to learn in pcache.cyr, where
+# a guard tested the very global it assigned first.
 fn wal_slots_init(): i64 {
     if (_wal_slots != 0) { return 0; }
     var t = _pt_alloc(WAL_MAX_TX * WS_SZ);

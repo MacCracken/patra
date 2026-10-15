@@ -109,9 +109,11 @@ enum RsOff {
 # serialize the transaction span themselves (or keep transactions on one
 # thread). See roadmap § concurrency P1/P2.
 #
-# `mutex_new()` heap-allocates the 8-byte lock cell in patra_init; 0 before
-# init means "no concurrency contract requested" and the lock/unlock helpers
-# no-op (single-threaded callers pay nothing).
+# `mutex_new()` heap-allocates the 8-byte lock cell in patra_init. The
+# lock/unlock helpers no-op while it is 0. That is NOT a supported
+# single-threaded mode: patra_init must run before patra_open, which refuses
+# without it (1.16.1, `_patra_inited` below) — the page slab needs the TLS block
+# patra_init installs, and the page cache needs `_pc_mtx`.
 var _patra_mtx = 0;
 
 fn _patra_lock(): i64 {
@@ -128,22 +130,65 @@ fn _patra_unlock(): i64 {
 
 # ── Init ────────────────────
 
-# Initialize patra (call once before use, before spawning threads)
+# 1 once patra_init has succeeded (1.16.1). Without it patra_open died with
+# SIGSEGV and no diagnostic on Linux, macOS and Windows: pg_alloc reads the
+# per-thread page slab through a TLS block that only patra_init installs (`%fs`
+# base 0), and pc_register locks `_pc_mtx`, which only patra_init creates.
+# (agnos and cx have a process-global TLS fallback and a no-op mutex_lock, so
+# there it ran.) patra_open and patra_cache_enable(1) now refuse instead.
+#
+# A flag of its own, set as patra_init's last step, rather than a test of
+# `_patra_mtx`, so its meaning cannot drift with what patra_init allocates.
+# Not lazy init: patra_init installs a TLS block on the calling thread, which a
+# `thread_create` worker must not do; it replaces two mutexes another thread
+# may hold (`_pt_alloc_mtx`, `_patra_mtx`); and it turns an armed page cache
+# off. Called from patra_open, it would trade a loud crash for a quiet one.
+var _patra_inited = 0;
+
+# Public: has patra_init succeeded in this process? 1 or 0. For a library that
+# wraps patra and must refuse before calling patra_open (libro's
+# patrastore_open). Process-wide: it cannot tell whether the CALLING thread has
+# a TLS block — a foreign thread still needs its own thread_local_init().
+fn patra_initialized(): i64 { return _patra_inited; }
+
+# Initialize patra (call once before use, before spawning threads). Returns
+# PATRA_OK, or PATRA_ERR_IO when an allocation it needs is refused (1.16.1; it
+# returned nothing before). On failure `_patra_inited` stays 0, so patra_open
+# keeps refusing rather than reaching the faults this guards; a later call may
+# retry.
 fn patra_init(): i64 {
+    _patra_inited = 0;
     # Install this (main/foreign) thread's TLS block so the per-thread SQL
     # parse scratch (sql.cyr) resolves. Worker threads spawned via
     # lib/thread.cyr get their block free via CLONE_SETTLS — they must NOT
-    # call thread_local_init. Must precede _sql_init (which seeds slot state).
-    thread_local_init();
+    # call thread_local_init. Must precede _sql_init (which seeds slot state),
+    # so a refusal returns here: _sql_init would fault without the block.
+    if (thread_local_init() == 0) {
+        _pt_err("patra: patra_init failed: allocation refused");
+        return PATRA_ERR_IO;
+    }
     _pt_alloc_mtx = mutex_new();
     _pc_init();
     _sql_init();
     _patra_mtx = mutex_new();
     # 1.14.0: the per-database WAL slot table. Allocated once here so no
     # transaction path has to lazily initialise it under a race — the shape
-    # v1.13.11 had to fix in pcache.cyr. wal_start also calls this defensively
-    # for a consumer that skipped patra_init.
-    wal_slots_init();
+    # v1.13.11 had to fix in pcache.cyr. wal_start also calls it, defensively;
+    # a consumer that skipped patra_init no longer gets that far (1.16.1:
+    # patra_open refuses).
+    var wr = wal_slots_init();
+
+    # A missing mutex is a fault at its first lock (`_pc_mtx`) or a statement
+    # path that silently runs unlocked (`_patra_mtx`, `_pt_alloc_mtx`).
+    var ok = 1;
+    if (_pt_alloc_mtx == 0) { ok = 0; }
+    if (_pc_mtx == 0) { ok = 0; }
+    if (_patra_mtx == 0) { ok = 0; }
+    if (wr != 0) { ok = 0; }
+    if (ok == 0) {
+        _pt_err("patra: patra_init failed: allocation refused");
+        return PATRA_ERR_IO;
+    }
 
     # ⚠ **Do not set the log level here.** Until 1.13.10 this ended with
     # `sakshi_set_level(SK_WARN)`, which is process-global: a host that had
@@ -159,6 +204,9 @@ fn patra_init(): i64 {
     #
     # If patra ever grows chatty, the control belongs to patra — an internal
     # level, or a `patra_set_log_level` a host opts into — never the host's.
+
+    _patra_inited = 1;
+    return PATRA_OK;
 }
 
 # ── Open / Close ────────────────────
@@ -228,6 +276,14 @@ fn _db_recover_held(db, fd, hdr): i64 {
 
 # Open or create a .patra database file
 fn patra_open(path): i64 {
+    # 1.16.1: before anything else. A missing file is created below, and the
+    # first fault was inside _pt_file_create, after its O_CREAT open and before
+    # the header write, so it left a 0-byte file that every later open refused
+    # as "cannot read header".
+    if (_patra_inited == 0) {
+        _pt_err("patra: patra_init() has not run");
+        return 0;
+    }
     var fd = _pt_file_open(path);
     if (fd < 0) {
         fd = _pt_file_create(path);
@@ -1061,11 +1117,6 @@ fn _exec_alter_add(db): i64 {
     if (tor != PATRA_OK) { _tx_unlock(db, fd); return tor; }
     var entry = _tbl_entry(hdr, idx);
     var ncols_old = _sch_ncols_clamped(schema);
-    if (ncols_old >= MAX_COLS) {
-        pg_free(schema);
-        _tx_unlock(db, fd);
-        return PATRA_ERR_COLCOUNT;
-    }
 
     var it = _spr() + PR_ITEMS;
     var nc_ptr = load64(it + CR_NPTR);
@@ -1077,6 +1128,14 @@ fn _exec_alter_add(db): i64 {
         pg_free(schema);
         _tx_unlock(db, fd);
         return PATRA_ERR_EXISTS;
+    }
+    # 1.16.1: the cap after the name, as in tbl_create — it came first, so on a
+    # table of MAX_COLS columns adding one of them answered PATRA_ERR_COLCOUNT
+    # where a narrower table answered PATRA_ERR_EXISTS.
+    if (ncols_old >= MAX_COLS) {
+        pg_free(schema);
+        _tx_unlock(db, fd);
+        return PATRA_ERR_COLCOUNT;
     }
 
     var rsz_old = row_compute_size(schema, ncols_old);

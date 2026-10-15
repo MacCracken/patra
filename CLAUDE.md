@@ -47,6 +47,7 @@ they apply. If the tools are missing something, fix the tools.
 cyrius build programs/demo.cyr build/demo   # build demo
 ./build/demo                                 # run demo
 cyrius test tests/tcyr/patra.tcyr            # unit tests (see state.md for current count)
+cyrius test tests/tcyr/patra_uninit.tcyr     # a process that never calls patra_init (own file by necessity)
 cyrius fuzz fuzz/                            # fuzz harnesses
 cyrius bench tests/bcyr/patra.bcyr           # benchmarks
 ./build/test_libro                           # libro integration

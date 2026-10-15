@@ -11,10 +11,26 @@ Benches under `/tmp` (tmpfs, fdatasync is a no-op) are noted explicitly.
 The group-commit comparison uses a real-disk path (`./bench_groupcommit.patra`,
 btrfs/NVMe under the repo) to avoid hiding the win.
 
-> **Currency note (updated 2026-10-08, v1.16.0).** The bulk of this table is
-> still the v1.9.5 / cyrius 6.0.1 baseline. Patra is now at **v1.16.0** (cyrius
-> pin **6.7.5**) and the suite stands at **43 benchmarks** (`insert_2k_in_txn`
+> **Currency note (updated 2026-10-14, v1.16.1).** The bulk of this table is
+> still the v1.9.5 / cyrius 6.0.1 baseline. Patra is now at **v1.16.1** (cyrius
+> pin **6.7.10**) and the suite stands at **43 benchmarks** (`insert_2k_in_txn`
 > added at v1.14.0; `select_point_10k` and `update_point_10k` at v1.16.0).
+>
+> - **v1.16.1: flat across the pin move and the code.** Three interleaved runs
+>   each of 1.16.0 on 6.7.5, 1.16.0 on 6.7.10 and 1.16.1 on 6.7.10, medians,
+>   from tmpfs — so the fdatasync rows there are meaningless, and were re-run
+>   from a real disk: `insert_500_sync_full` 915.3 → 918.3 → 914.7 us,
+>   `insert_500_sync_batch` 53.9 → 53.0 → 53.6, `insert_2k_in_txn`
+>   87.9 → 89.0 → 94.7 (overlapping spreads). The later `tbl_find` clamp adds 21
+>   instructions per INSERT (+0.012 %). On tmpfs, the pin move's largest rows,
+>   `dedup_select_then_insert_row_500` +6.9 % and `select_idx_eq_unique_500`
+>   +5.7 %, reverse at the next step (−7.0 %, −8.3 %). The code's one row past
+>   4 % is `insert_2k_in_txn`, 20.8 → 22.3 us in all three runs, but the path
+>   retires **178,787 user-space instructions per INSERT on both trees**
+>   (`perf_event_open`, 2,000- and 4,000-insert drivers differenced): placement,
+>   consistent with the v1.15.0 finding below. `select_point_10k` 26.5 → 26.0 us,
+>   `update_point_10k` 20.6 → 20.6, `read_scan_4t_par` 147.9 → 142.3,
+>   `order_by_200` 51.2 → 50.9.
 >
 > - **v1.16.0: one failed `open(2)` per locked statement, about 2.5 us here.**
 >   WAL recovery now runs before every statement, which probes for an orphaned

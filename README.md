@@ -71,6 +71,14 @@ patra_result_free(result);
 patra_close(db);
 ```
 
+`patra_init()` is required, not optional. Without it `patra_open` returns `0` and
+logs `patra: patra_init() has not run` (since 1.16.1; it used to die with SIGSEGV on
+Linux, macOS and Windows). `patra_init` returns `PATRA_OK`, or `PATRA_ERR_IO` if an
+allocation it needs is refused. A library that wraps patra can ask first:
+`patra_initialized()` returns `1` once `patra_init` has succeeded. It is
+process-wide, so it cannot vouch for a thread that has no TLS block (see the
+*Concurrent readers* note below).
+
 ### Dependencies
 
 **Patra has no external dependencies.** As of **v1.13.0** `cyrius.cyml` carries
@@ -83,7 +91,7 @@ from the version-pinned snapshot.
 ```toml
 [deps.patra]
 git = "https://github.com/MacCracken/patra.git"
-tag = "1.16.0"
+tag = "1.16.1"
 ```
 
 > ⚠ **If you are carrying a `[deps.sakshi]` block "required alongside patra",
@@ -167,7 +175,9 @@ call `thread_local_init()` once before its first patra call.
 an in-process shared page cache. It is redundant with the OS page cache for
 RAM-resident data and its global lock re-serializes the concurrent readers, so it
 is a **net loss on warm workloads** — enable it only for cold / slow-disk
-read-heavy workloads where avoiding real I/O outweighs the lock cost.
+read-heavy workloads where avoiding real I/O outweighs the lock cost. Call it after
+`patra_init()`: before, `patra_cache_enable(1)` returns `PATRA_ERR_IO` and leaves
+the cache off.
 
 **BYTES/TEXT result reads under concurrent writers**: safe — result sets are
 true snapshots as of v1.12.8. Every `BYTES` / `TEXT` cell is materialized into
@@ -229,6 +239,14 @@ by where its payload sat on disk. Table and column names are at most 31 bytes; a
 `CREATE TABLE` or `ALTER TABLE` that defines a longer one returns
 `PATRA_ERR_SYNTAX` (the name used to be cut to 31 bytes, leaving a table no
 statement could reach). A failed query returns `0`.
+
+**`PATRA_ERR_EXISTS` does not depend on how full the file is (1.16.1).** A file
+holds at most 63 tables and a table at most 32 columns. `CREATE TABLE` of a table
+that exists, and `ALTER TABLE … ADD COLUMN` of a column that exists, return
+`PATRA_ERR_EXISTS` at any count; `PATRA_ERR_FULL` / `PATRA_ERR_COLCOUNT` mean a
+*new* name did not fit. Before 1.16.1 the cap was checked first, so at the cap an
+existing name got the cap's error — which breaks "create if missing" code that
+reads `PATRA_ERR_EXISTS` as "already there".
 
 An `INSERT` may name its columns — `INSERT INTO t (b, a) VALUES (...)` — to bind values by name in any order; columns left unnamed take their zero/empty default. Without a column list, values are positional in `CREATE TABLE` order.
 

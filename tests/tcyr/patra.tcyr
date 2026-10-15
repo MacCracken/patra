@@ -6473,6 +6473,106 @@ fn test_no_mutex_flock_deadlock() {
     xunlink(_dl_path);
 }
 
+# -- 1.16.1: CREATE TABLE of an existing name is EXISTS at any table count --
+#
+# tbl_create tested the 63-table cap before the name, so in a full file
+# creating one of its own tables answered PATRA_ERR_FULL, where a smaller file
+# answered PATRA_ERR_EXISTS. libro 2.10.8 reads EXISTS as "the table is there".
+# (issues/archive/2026-10-14-create-table-full-masks-exists.md)
+fn test_create_exists_at_table_cap() {
+    test_group("CREATE TABLE of an existing name is EXISTS at the table cap (1.16.1)");
+    cleanup();
+    var db = patra_open(_tpath);
+    assert_eq(patra_exec(db, "CREATE TABLE t00 (a INT)"), PATRA_OK, "create t00");
+    assert_eq(patra_exec(db, "CREATE TABLE t00 (a INT)"), PATRA_ERR_EXISTS, "below the cap: EXISTS");
+
+    # t01 .. t62, by patching the two digits of one statement.
+    var sql = fl_alloc(32);
+    memcpy(sql, "CREATE TABLE t00 (a INT)", 24);
+    store8(sql + 24, 0);
+    var made = 1;
+    for (var i = 1; i < MAX_TABLES; i = i + 1) {
+        store8(sql + 14, 48 + i / 10);
+        store8(sql + 15, 48 + i % 10);
+        if (patra_exec(db, sql) == PATRA_OK) { made = made + 1; }
+    }
+    fl_free(sql);
+    assert_eq(made, MAX_TABLES, "63 tables created");
+    assert_eq(load64(_db_hdr(db) + HDR_TBLCOUNT), MAX_TABLES, "the directory is full");
+
+    assert_eq(patra_exec(db, "CREATE TABLE t00 (a INT)"), PATRA_ERR_EXISTS, "at the cap, the first table: EXISTS, not FULL");
+    assert_eq(patra_exec(db, "CREATE TABLE t62 (a INT)"), PATRA_ERR_EXISTS, "at the cap, the last table: EXISTS");
+    assert_eq(patra_exec(db, "CREATE TABLE t00 (b STR, c INT)"), PATRA_ERR_EXISTS, "EXISTS whatever the columns");
+    assert_eq(patra_exec(db, "CREATE TABLE t63 (a INT)"), PATRA_ERR_FULL, "a new name is still FULL");
+    assert_eq(load64(_db_hdr(db) + HDR_TBLCOUNT), MAX_TABLES, "nothing was added");
+    assert_eq(patra_exec(db, "INSERT INTO t62 VALUES (5)"), PATRA_OK, "the last table is usable");
+    patra_close(db);
+    cleanup();
+}
+
+# Moving the cap below the name put tbl_find ahead of every check on
+# HDR_TBLCOUNT, which each statement re-reads from disk and only patra_open
+# verifies. With a count written after the open (another process, corruption),
+# CREATE TABLE walked past the header page and died with SIGBUS, where 1.16.0's
+# cap-first order returned PATRA_ERR_FULL. tbl_find now scans at most the 63
+# slots that exist. Found by the 1.16.1 review.
+fn test_create_with_corrupt_table_count() {
+    test_group("CREATE TABLE with an unverified on-disk table count (1.16.1)");
+    cleanup();
+    var db = patra_open(_tpath);
+    assert_eq(patra_exec(db, "CREATE TABLE t (a INT)"), PATRA_OK, "create t");
+    var fd = _db_fd(db);
+    var h = fl_alloc(PAGE_SIZE);
+    patra_hdr_read(fd, h);
+    store64(h + HDR_TBLCOUNT, 1000000000);
+    patra_hdr_write(fd, h);
+    assert_eq(patra_exec(db, "CREATE TABLE zz (a INT)"), PATRA_ERR_FULL, "a count past the cap is FULL, not a fault");
+    assert_eq(patra_exec(db, "CREATE TABLE t (a INT)"), PATRA_ERR_EXISTS, "the table in slot 0 is still found");
+    patra_hdr_read(fd, h);
+    assert_eq(load64(h + HDR_TBLCOUNT), 1000000000, "the refused CREATEs wrote nothing");
+    store64(h + HDR_TBLCOUNT, 1);
+    patra_hdr_write(fd, h);
+    fl_free(h);
+    assert_eq(patra_exec(db, "INSERT INTO t VALUES (3)"), PATRA_OK, "restored, the file works");
+    patra_close(db);
+    cleanup();
+}
+
+# The same shape one level down, found while fixing the above: ALTER TABLE ADD
+# COLUMN tested the 32-column cap before the name, so on a full table adding one
+# of its own columns answered PATRA_ERR_COLCOUNT, not PATRA_ERR_EXISTS.
+fn test_add_column_exists_at_column_cap() {
+    test_group("ADD COLUMN of an existing name is EXISTS at the column cap (1.16.1)");
+    cleanup();
+    var db = patra_open(_tpath);
+    assert_eq(patra_exec(db, "CREATE TABLE w (c00 INT)"), PATRA_OK, "create w");
+    assert_eq(patra_exec(db, "ALTER TABLE w ADD COLUMN c00 INT"), PATRA_ERR_EXISTS, "below the cap: EXISTS");
+
+    # c01 .. c31.
+    var sql = fl_alloc(48);
+    memcpy(sql, "ALTER TABLE w ADD COLUMN c00 INT", 32);
+    store8(sql + 32, 0);
+    var made = 1;
+    for (var i = 1; i < MAX_COLS; i = i + 1) {
+        store8(sql + 26, 48 + i / 10);
+        store8(sql + 27, 48 + i % 10);
+        if (patra_exec(db, sql) == PATRA_OK) { made = made + 1; }
+    }
+    fl_free(sql);
+    assert_eq(made, MAX_COLS, "32 columns");
+
+    assert_eq(patra_exec(db, "ALTER TABLE w ADD COLUMN c00 INT"), PATRA_ERR_EXISTS, "at the cap, the first column: EXISTS, not COLCOUNT");
+    assert_eq(patra_exec(db, "ALTER TABLE w ADD COLUMN c31 STR"), PATRA_ERR_EXISTS, "at the cap, the last column: EXISTS");
+    assert_eq(patra_exec(db, "ALTER TABLE w ADD COLUMN c32 INT"), PATRA_ERR_COLCOUNT, "a new name is still COLCOUNT");
+    assert_eq(patra_exec(db, "INSERT INTO w (c31) VALUES (9)"), PATRA_OK, "the table is usable");
+    var rs = patra_query(db, "SELECT c31 FROM w");
+    assert(rs != 0, "select c31");
+    assert_eq(patra_result_get_int(rs, 0, 0), 9, "reads back");
+    patra_result_free(rs);
+    patra_close(db);
+    cleanup();
+}
+
 # -- 1.16.0: identifiers over 31 bytes are refused, not truncated --
 #
 # Table and column names live in 32-byte slots, and a longer name was clamped
@@ -7513,6 +7613,9 @@ fn main() {
     test_pcache_evict_fails_open();
     test_pcache_alloc_refused();
     test_identifier_length();
+    test_create_exists_at_table_cap();
+    test_create_with_corrupt_table_count();
+    test_add_column_exists_at_column_cap();
     test_close_rolls_back_open_transaction();
     test_tbl_open_contract();
     test_tbl_open_propagates();

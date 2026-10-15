@@ -56,8 +56,17 @@ fn _tbl_has_bytes(schema, ncols): i64 {
 }
 
 # Find table by name, returns index or -1
+#
+# 1.16.1: the scan is bounded by the directory's MAX_TABLES slots, as
+# _sch_ncols_clamped bounds a schema page. HDR_TBLCOUNT is re-read from disk
+# by every statement and checked only by patra_open's patra_hdr_verify, so a
+# count written after the open (another process, corruption) walked past the
+# header page. tbl_create now calls this before its cap test, so for CREATE
+# TABLE that was a new fault: 1.16.0's cap-first order returned
+# PATRA_ERR_FULL.
 fn tbl_find(hdr, name, nlen): i64 {
     var count = load64(hdr + HDR_TBLCOUNT);
+    if (count > MAX_TABLES) { count = MAX_TABLES; }
     for (var i = 0; i < count; i = i + 1) {
         if (_tbl_name_eq(_tbl_entry(hdr, i), name, nlen)) {
             return i;
@@ -70,7 +79,6 @@ fn tbl_find(hdr, name, nlen): i64 {
 # col_types: array of i64 — 8 bytes each
 # Create table with schema and data pages
 fn tbl_create(fd, hdr, name, nlen, col_names, col_types, ncols, autoinc): i64 {
-    if (load64(hdr + HDR_TBLCOUNT) >= MAX_TABLES) { return PATRA_ERR_FULL; }
     if (ncols > MAX_COLS) { return PATRA_ERR_COLCOUNT; }
     # 1.16.0: a name that does not fit its slot is refused, before anything is
     # allocated, rather than clamped to 31 bytes below — the parser refuses it
@@ -81,6 +89,11 @@ fn tbl_create(fd, hdr, name, nlen, col_names, col_types, ncols, autoinc): i64 {
         if (load64(col_names + cl_i * 16 + 8) > SCH_CNAME_MAX - 1) { return PATRA_ERR_SYNTAX; }
     }
     if (tbl_find(hdr, name, nlen) >= 0) { return PATRA_ERR_EXISTS; }
+    # 1.16.1: the cap is tested AFTER the name. It came first, so in a file
+    # holding MAX_TABLES tables, creating one of them answered PATRA_ERR_FULL
+    # where any smaller file answered PATRA_ERR_EXISTS — and a caller that reads
+    # EXISTS as "already there" (libro's patrastore_open) refused a valid store.
+    if (load64(hdr + HDR_TBLCOUNT) >= MAX_TABLES) { return PATRA_ERR_FULL; }
 
     # A row must fit inside ONE data page. MAX_COLS caps the column COUNT, but
     # that is not the binding constraint: 16 STR columns is a legal count and a

@@ -1,0 +1,76 @@
+# patra_uninit.tcyr -- patra_open refuses before patra_init (1.16.1)
+#
+# A process that never called patra_init died with SIGSEGV inside patra_open,
+# with no diagnostic: pg_alloc reads the page slab through a TLS block only
+# patra_init installs, and pc_register locks `_pc_mtx`, which only patra_init
+# creates. Filed from libro 2.10.8
+# (docs/development/issues/archive/2026-10-14-patra-open-faults-without-patra-init.md).
+#
+# This has to be its own process: tests/tcyr/patra.tcyr calls patra_init in
+# main, and nothing un-runs it. The order below matters — each stage is one
+# step further into initialisation than the last, then patra_init fails on a
+# refused allocation, and the last stage calls it for real.
+#
+# Mutation check: without the `_patra_inited` test in patra_open, this exits
+# 139 at the first patra_open.
+
+include "src/lib.cyr"
+include "lib/assert.cyr"
+
+var _upath = "/tmp/patra_uninit_test.patra";
+
+fn main() {
+    alloc_init();
+    fl_init();
+    xunlink(_upath);
+
+    # Stage 1: nothing — no TLS block on this thread, no mutexes.
+    test_group("patra_open without patra_init");
+    assert_eq(patra_initialized(), 0, "patra_initialized is 0 before patra_init");
+    assert_eq(patra_open(_upath), 0, "patra_open refuses");
+    assert_eq(file_exists(_upath), 0, "and creates no file");
+
+    # Stage 2: a TLS block, but no patra_init — the page slab would now
+    # resolve, and the fault moved on to pc_register's mutex_lock(_pc_mtx).
+    test_group("patra_open with a TLS block, without patra_init");
+    thread_local_init();
+    assert_eq(patra_open(_upath), 0, "patra_open still refuses");
+    assert_eq(file_exists(_upath), 0, "and still creates no file");
+
+    # The page cache's public switch locked the same missing mutex.
+    test_group("patra_cache_enable without patra_init");
+    assert_eq(patra_cache_enable(1), PATRA_ERR_IO, "enable refuses");
+    assert_eq(patra_cache_enabled(), 0, "the cache stays off");
+    assert_eq(patra_cache_enable(0), PATRA_OK, "disable needs no lock");
+
+    # patra_init itself fails closed: with its TLS allocation refused it
+    # returns PATRA_ERR_IO and leaves the flag 0. alloc() refuses anything over
+    # ALLOC_MAX; the 4 KB TLS block is the first thing patra_init allocates.
+    test_group("patra_init with its allocation refused");
+    var cap0 = ALLOC_MAX;
+    ALLOC_MAX = 8;
+    var ir = patra_init();
+    ALLOC_MAX = cap0;
+    assert_eq(ir, PATRA_ERR_IO, "patra_init reports the refusal");
+    assert_eq(patra_initialized(), 0, "patra_initialized stays 0");
+    assert_eq(patra_open(_upath), 0, "patra_open still refuses");
+
+    # Stage 3: patra_init, and the same calls work.
+    test_group("after patra_init");
+    assert_eq(patra_init(), PATRA_OK, "patra_init succeeds");
+    assert_eq(patra_initialized(), 1, "patra_initialized is 1");
+    var db = patra_open(_upath);
+    assert(db != 0, "patra_open succeeds");
+    assert_eq(patra_exec(db, "CREATE TABLE t (id INT)"), PATRA_OK, "create");
+    assert_eq(patra_exec(db, "INSERT INTO t VALUES (1)"), PATRA_OK, "insert");
+    patra_close(db);
+    assert_eq(patra_cache_enable(1), PATRA_OK, "cache enable succeeds");
+    assert_eq(patra_cache_enabled(), 1, "the cache is on");
+    patra_cache_enable(0);
+
+    xunlink(_upath);
+    return assert_summary();
+}
+
+var r = main();
+sys_exit(r);

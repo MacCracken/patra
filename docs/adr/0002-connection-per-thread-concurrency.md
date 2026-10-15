@@ -83,6 +83,11 @@ concurrent reads.
   so TLS isolation is load-bearing only on Linux/aarch64, where it works. The
   single-threaded path keeps the no-op lock contract (`_patra_mtx` /
   `_pt_alloc_mtx` are 0 before `patra_init`).
+  **Update (v1.16.1):** that is not a supported mode. Without `patra_init` the
+  page slab has no TLS block and the page cache no mutex, and `patra_open`
+  died with SIGSEGV; `patra_open` and `patra_cache_enable(1)` now refuse until
+  `patra_init` has run (`patra_initialized()` reports it). The 0-means-no-lock
+  checks remain, and nothing reaches them before `patra_init`.
 
 ## Alternatives considered
 

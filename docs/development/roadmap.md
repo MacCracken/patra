@@ -1,6 +1,6 @@
 # Patra Development Roadmap
 
-> **Last refreshed**: 2026-10-08 (v1.16.0)
+> **Last refreshed**: 2026-10-14 (v1.16.1)
 >
 > Thin **backlog index**, **forward-looking only**. Nothing shipped belongs here —
 > per-release detail lives in [`../../CHANGELOG.md`](../../CHANGELOG.md), the
@@ -8,11 +8,17 @@
 > in [`state.md`](state.md). Open consumer requests live one-file-each in
 > [`requests/`](requests/); upstream cyrius bugs in [`issues/`](issues/).
 
-> **Current**: **v1.16.0**, cyrius pin **6.7.5**, zero `[deps.*]` git blocks.
-> Gates green: **1389 tests** (+ 6 raw-include), **8/8 fuzz**, 43 benchmarks,
-> lint 0-warn, fmt clean, libro 15/15, vidya 19/19, `dist/` in sync (**14**
-> sidecar leaves), no raw syscalls or numeric open flags. Binary **247,600 B**
-> DCE-on / 382,768 B DCE-off.
+> **Current**: **v1.16.1**, cyrius pin **6.7.10**, zero `[deps.*]` git blocks.
+> Gates green: **1413 tests** (+ 6 raw-include, + 18 in the no-`patra_init`
+> process), **8/8 fuzz**, 43 benchmarks, lint 0-warn, fmt clean, libro 15/15,
+> vidya 19/19, `dist/` in sync (**14** sidecar leaves), no raw syscalls or
+> numeric open flags. Binary **247,128 B** DCE-on / 386,392 B DCE-off.
+>
+> **v1.16.1 closed the two bugs libro 2.10.8 filed** (both 2026-10-14):
+> `patra_open` without `patra_init` refuses instead of dying with SIGSEGV, and
+> `CREATE TABLE` of an existing table is `PATRA_ERR_EXISTS` at the 63-table cap.
+> Each had a twin, fixed with it (`patra_cache_enable(1)`; `ADD COLUMN` at the
+> 32-column cap).
 >
 > **v1.16.0 closed both of patra's own open items and the five wrong answers
 > that v1.14.0 left alone.** WAL recovery now runs before every locked
@@ -37,7 +43,8 @@ sovereignty"*.
 
 ## Open backlog
 
-**Consumer requests**: none open. **Consumer-filed bugs**: none open.
+**Consumer requests**: none open. **Consumer-filed bugs**: none open — the two
+from libro 2.10.8 shipped in v1.16.1 (below).
 **Upstream cyrius issues filed by patra**: none open. **Upstream agnos issues**:
 none open — the one filed at v1.15.0 (contended `flock` never waited) was
 resolved in agnos **1.57.7** and archived there
@@ -45,6 +52,12 @@ resolved in agnos **1.57.7** and archived there
 
 ### Recently shipped
 
+- **v1.16.1** — [`issues/archive/2026-10-14-patra-open-faults-without-patra-init.md`](issues/archive/2026-10-14-patra-open-faults-without-patra-init.md)
+  (`patra_open` / `patra_cache_enable(1)` refuse before `patra_init`, which
+  fails closed; new `patra_initialized()`) and
+  [`issues/archive/2026-10-14-create-table-full-masks-exists.md`](issues/archive/2026-10-14-create-table-full-masks-exists.md)
+  (`EXISTS` before the cap in `CREATE TABLE` and `ADD COLUMN`; `tbl_find`
+  bounded to 63 slots). cyrius 6.7.5 → 6.7.10. CHANGELOG [1.16.1].
 - **v1.16.0** — [`issues/archive/2026-09-23-wal-recovery-runs-only-at-open.md`](issues/archive/2026-09-23-wal-recovery-runs-only-at-open.md)
   (WAL recovery before every locked statement; the per-statement probe costs
   about 2.5 us), `_pc_alloc` / `_pc_reg_init` checking their allocations, and
@@ -54,8 +67,8 @@ resolved in agnos **1.57.7** and archived there
 
 ### Open — patra's own
 
-**None.** Found while fixing the v1.16.0 items, not yet scheduled; each states
-its trigger:
+**None scheduled.** Found while fixing the v1.16.0 and v1.16.1 items; each
+states its trigger:
 
 - **`wal_rollback` reads a failed header check as a bad header and unlinks the
   WAL.** `_wal_hdr_verify` returns the same error for bad magic as for a failed
@@ -88,12 +101,31 @@ its trigger:
   for inspection, as `patra_open` always has, and each statement re-checks it.
   *Trigger*: an operator who hits it. *Small (remember the refusal per handle,
   keyed on the file's identity).*
+- **A header re-read by a statement is never verified** (found by the 1.16.1
+  review). `patra_hdr_verify` runs only in `patra_open`; every statement
+  re-reads the header (`_pc_refresh` → `patra_hdr_read`) and trusts its table
+  count and directory. `src/file.cyr`'s comment that verification "runs on every
+  patra_hdr_read" is wrong. 1.16.1 bounded `tbl_find` to 63 slots, which covers
+  every lookup; `DROP TABLE`'s directory compaction still loops to the raw
+  count and faults on one past 63 (probed), and `TBL_NCOLS` / `TBL_ROOT` /
+  `TBL_SCHEMA` from a re-read directory are unchecked. Either verify on re-read
+  (a cost per statement, and a new `PATRA_ERR_PAGE` from any statement) or
+  bound each consumer. *Trigger*: the next change to the header or directory
+  code. *Small to medium.*
+- **Several public calls dereference a 0 handle**: `patra_begin`,
+  `patra_commit`, `patra_rollback`, `patra_flush`, `patra_set_sync_mode`,
+  `patra_get_sync_mode`, `patra_insert_row`, `patra_insert_row_or_ignore`
+  (`patra_begin(0)` exits 139, probed by the 1.16.1 review). `patra_exec`,
+  `patra_query`, `patra_prepare`, `patra_close` and the prepared-statement calls
+  already check. More visible since 1.16.1 made 0 the answer to an open before
+  `patra_init`, for a caller that also ignores it. *Trigger*: any change to
+  those entry points. *Small.*
 
 ### To file upstream (cyrius)
 
 **Nothing filed and open.** Of the five requests written up at v1.15.0, three
 shipped in cyrius without a filing, all in **6.6.9** (verified in the 6.7.5
-sources at this refresh):
+sources at the v1.16.0 refresh):
 
 - `FlushFileBuffers` on Windows: PE routes `fsync` / `fdatasync` to it, so
   `xfsync` — `_pt_fdatasync`'s Windows arm — flushes;
@@ -219,12 +251,12 @@ surface is intentionally small, and no new SQL surface is planned.
 **Primary target: Linux x86_64, the only one CI builds or runs.** Every other
 row below is a hand-run cross-build, and at most an emulated run. Each gap names
 what would close it; the Windows one is in *To file upstream*. Refreshed at
-v1.16.0 (cyrius 6.7.5).
+v1.16.1 (cyrius 6.7.10): every build row re-run, all warning-free.
 
 | Target | Built | Run | Flush | Writers serialized | WAL recovery (open and every statement) | `O_NOFOLLOW` |
 |---|---|---|---|---|---|---|
 | Linux x86_64 | CI | CI, full suite | fdatasync | yes (blocking `flock`) | yes | enforced |
-| Linux aarch64 | by hand | full suite, 8/8 fuzz, 3/3 programs under `qemu-aarch64` (1.16.0) | fdatasync | yes | yes | enforced |
+| Linux aarch64 | by hand | full suite, the no-`patra_init` test, 8/8 fuzz, 3/3 programs under `qemu-aarch64` (1.16.1) | fdatasync | yes | yes | enforced |
 | macOS x86_64 / arm64 | by hand (`CYRIUS_MACHO=1` / `CYRIUS_MACHO_ARM=1` to `cycc` / `cycc_aarch64`) | **not run** | fdatasync (BSD 187) | yes (BSD `flock`) | yes | enforced |
 | agnos x86_64 | by hand (`--agnos`) | **not run** | whole-filesystem sync | yes on agnos ≥ 1.57.7 (`flock`#59 waits); ⚠ **no** before | yes | bridged to `AO_NOFOLLOW` (cyrius 6.6.4) |
 | Windows (PE) | by hand (`--win`) | **not run** | `FlushFileBuffers` (cyrius 6.6.9) | ⛔ **no** | ⛔ **never** | enforced (cyrius 6.6.9) |
@@ -267,9 +299,10 @@ Durability there is weaker than on Linux.
   by patra.** ⚠ Since 1.16.0 the statement-level recovery leans on the lock
   too: on an agnos older than 1.57.7, a process whose `BEGIN` did not get its
   lock could have its live WAL replayed by another.
-- **macOS.** Both Mach-O targets compile with only stdlib-sourced "not routed"
-  warnings (`thread_local.cyr`'s 158 on x86; five on arm64 that
-  `lib/syscalls.cyr` alone reproduces). 1.15.0 fixed two macOS defects by
+- **macOS.** Both Mach-O targets compile warning-free under 6.7.10 (v1.16.1);
+  under 6.6.x they carried stdlib-sourced "not routed" warnings
+  (`thread_local.cyr`'s 158 on x86; five on arm64 that `lib/syscalls.cyr` alone
+  reproduces). 1.15.0 fixed two macOS defects by
   inspection: a new database could not be created, and a WAL was not truncated.
   It also moved database identity and WAL salts onto the CSPRNG. **None of it
   has been run on a Mac**, so "macOS works" is an inference until someone does.
