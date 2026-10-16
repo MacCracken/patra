@@ -1,6 +1,6 @@
 # Patra Development Roadmap
 
-> **Last refreshed**: 2026-10-14 (v1.16.2)
+> **Last refreshed**: 2026-10-15 (v1.16.3)
 >
 > Thin **backlog index**, **forward-looking only**. Nothing shipped belongs here —
 > per-release detail lives in [`../../CHANGELOG.md`](../../CHANGELOG.md), the
@@ -8,12 +8,19 @@
 > in [`state.md`](state.md). Open consumer requests live one-file-each in
 > [`requests/`](requests/); upstream cyrius bugs in [`issues/`](issues/).
 
-> **Current**: **v1.16.2**, cyrius pin **6.7.10**, zero `[deps.*]` git blocks.
-> Gates green: **1631 tests** (+ 6 raw-include, + 18 in the no-`patra_init`
+> **Current**: **v1.16.3**, cyrius pin **6.7.10**, zero `[deps.*]` git blocks.
+> Gates green: **1645 tests** (+ 6 raw-include, + 18 in the no-`patra_init`
 > process), **8/8 fuzz**, 43 benchmarks, lint 0-warn, fmt clean, libro 15/15,
 > vidya 19/19, `dist/` in sync (**14** sidecar leaves), no raw syscalls or
 > numeric open flags, no dangling doc links. Binary **272,008 B** DCE-on /
 > 411,272 B DCE-off.
+>
+> **v1.16.3 reads a contended lock on Windows as contended** (cyrius issue
+> `2026-10-15-patra-flock-contended-ignores-windows-xflock`): since cyrius 6.7.12
+> `xflock` there is `LockFileEx`, and a held non-blocking lock is -11, which
+> `patra_open` took for no lock at all. It is also the first run of the suite on
+> Windows hardware (cass); what that run found is under *To file upstream* and
+> *Platforms*. CHANGELOG [1.16.3].
 >
 > **v1.16.2 closed the 1.16.1 review's two follow-ups and both older items of
 > patra's own**, and what two adversarial reviews found around them: failed
@@ -64,6 +71,9 @@ resolved in agnos **1.57.7** and archived there
 
 ### Recently shipped
 
+- **v1.16.3** — `_pt_flock_contended` reads -11 as contended on Windows
+  (cyrius ≥ 6.7.12's `LockFileEx`); the fork-free contended-open test, run on
+  cass. CHANGELOG [1.16.3].
 - **v1.16.2** — failures reported, headers verified per statement, the 0
   handle; `wal_rollback` keeps a WAL it cannot read; the first writer assigns a
   missing identity; every statement survives a refused allocation anywhere
@@ -161,19 +171,26 @@ The `fl_alloc` defect filed by kybernet that reached patra (a refused large
 mapping faulted at address -12) was fixed in cyrius **6.6.7**: `fl_alloc`
 returns 0 (`lib/freelist.cyr`, `blk <= 0`).
 
+`xflock` on Windows via `LockFileEx` — written up here at v1.15.0 as request 2,
+never filed — shipped in cyrius **6.7.12** (contended `LOCK_NB` is -11); patra
+reads that since **1.16.3**.
+
 **Three requests remain written up, not filed:**
 
 1. **`xfdatasync(fd)` in `lib/io.cyr`** — `sys_fdatasync` on Linux / macOS,
    `sys_sync` on agnos, the `FlushFileBuffers` route on Windows. patra carries
    that dispatch as `_pt_fdatasync` in `src/file.cyr` and would delete it;
    libro and sigil sync too.
-2. **`xflock` on Windows via `LockFileEx`.** It returns -1 today. Without it
-   there is no cross-process locking on Windows, and WAL recovery and the
-   database-identity assignment never run there: `patra_open` takes them only
-   under a non-blocking exclusive flock, and since 1.16.0 statements replay
-   only when their flock call succeeded. A crashed transaction's WAL is never
-   replayed on Windows. This is the one remaining cyrius gap in patra's crash
-   recovery.
+2. **`_xflock_win` must not drop a lock its handle already holds** (found on
+   cass at v1.16.3, reported to the cyrius session that cut it). `LOCK_SH` /
+   `LOCK_EX` on Windows unlock the handle's sentinel byte and lock it again, so
+   re-taking `LOCK_EX` on a handle that holds it — a no-op under flock, and what
+   `_db_lock_ex` does for every statement inside a transaction — lets a handle
+   waiting for the lock take it in between. Measured on cass: a probe's waiting
+   thread acquired and released the lock while the holder's re-lock was in
+   flight, and `test_no_mutex_flock_deadlock` lost the second handle's 20
+   INSERTs (40 of 60 rows), each `PATRA_OK`. Not under wine. This is the one
+   remaining cyrius gap in patra's locking on Windows.
 3. **`ENOTSUP` (and `ESPIPE`) in the errno tables** (written up at v1.16.2).
    `jsonl_append` treats a sync that fails only because the fd has nothing to
    sync as success. On Linux that is EINVAL, which the stdlib defines; on macOS
@@ -253,10 +270,15 @@ are **not scheduled**. Each states the trigger that would move it.
 - **aarch64 in CI.** Every harness builds and passes on aarch64 since 1.15.0,
   checked by hand under `qemu-aarch64`; CI does not run it. See *Platforms*.
   *Trigger*: an aarch64 consumer. *Low.*
-- **Windows crash recovery.** Needs `xflock` on Windows (cyrius request 2 in
-  *To file upstream*); until then patra on Windows is single-process and a
-  crashed transaction stays applied. *Trigger*: the cyrius route landing, or a
-  Windows consumer. *Small once the route exists.*
+- **Windows: the rest of the cass run.** Built by cyrius 6.7.12, the suite's
+  first run on Windows hardware (v1.16.3) fails nine rows, all also with the
+  1.16.2 sources: the re-lock defect above (`test_no_mutex_flock_deadlock`);
+  six crafted-WAL rows, where a record naming a page past `page_offset`'s 2^50
+  ceiling counts as restored (`wal_recover` reports it done and removes the
+  WAL); `open /dev/null`, a Linux path in the test; and `jsonl_append` to a
+  handle whose flush fails, which has no errno to test. *Trigger*: a Windows
+  consumer, or the cyrius re-lock fix (then re-run on cass). *Small to
+  medium.*
 - **`docs/guides/` scaffolding.** `programs/` satisfies the examples half, which
   the standard permits. *Trigger*: a consumer asking for an integration
   walkthrough. *Low.*
@@ -282,8 +304,8 @@ surface is intentionally small, and no new SQL surface is planned.
 **Primary target: Linux x86_64, the only one CI builds or runs.** Every other
 row below is a hand-run cross-build, and at most an emulated run. Each gap names
 what would close it; the Windows one is in *To file upstream*. Refreshed at
-v1.16.2 (cyrius 6.7.10): every build row re-run, all warning-free; the Windows
-open path run under wine.
+v1.16.3 (cyrius 6.7.10): every build row re-run, all warning-free; the suite
+built for Windows by cyrius 6.7.12 and run on Windows hardware (cass).
 
 | Target | Built | Run | Flush | Writers serialized | WAL recovery (open and every statement) | `O_NOFOLLOW` |
 |---|---|---|---|---|---|---|
@@ -291,7 +313,7 @@ open path run under wine.
 | Linux aarch64 | by hand | full suite, the no-`patra_init` test, 8/8 fuzz, 3/3 programs under `qemu-aarch64` (1.16.2) | fdatasync | yes | yes | enforced |
 | macOS x86_64 / arm64 | by hand (`CYRIUS_MACHO=1` / `CYRIUS_MACHO_ARM=1` to `cycc` / `cycc_aarch64`) | **not run** | fdatasync (BSD 187) | yes (BSD `flock`) | yes | enforced |
 | agnos x86_64 | by hand (`--agnos`) | **not run** | whole-filesystem sync | yes on agnos ≥ 1.57.7 (`flock`#59 waits); ⚠ **no** before | yes | bridged to `AO_NOFOLLOW` (cyrius 6.6.4) |
-| Windows (PE) | by hand (`--win`) | **not run** | `FlushFileBuffers` (cyrius 6.6.9) | ⛔ **no** | ⛔ **never** | enforced (cyrius 6.6.9) |
+| Windows (PE) | by hand (`--win`) | the suite once on cass, built by cyrius 6.7.12 (1.16.3: 1,556 / 1,565) | `FlushFileBuffers` (cyrius 6.6.9) | ⛔ **no** before cyrius 6.7.12; from 6.7.12 `LockFileEx`, ⚠ but a waiting handle can write mid-transaction (*To file upstream* 2) | ⛔ **never** before cyrius 6.7.12; yes from 6.7.12 | enforced (cyrius 6.6.9) |
 
 Two notes apply across the table. **Recovery replays a WAL only while the
 replaying process holds `LOCK_EX`** — the flock call returned 0 — because only
@@ -302,8 +324,10 @@ all. **On macOS, the fsync family does not flush the drive's write cache**;
 Apple documents `fcntl(F_FULLFSYNC)` for that, and patra does not issue it.
 Durability there is weaker than on Linux.
 
-- **Windows.** **patra has not been run on Windows**; everything here is from
-  the cyrius sources and cyrius's own runs on real Windows hardware. The 6.6.6
+- **Windows.** **The suite ran on Windows hardware once, at v1.16.3** (cass,
+  Windows 11, built by cyrius 6.7.12): 1,556 / 1,565, the nine failures listed in
+  *Deferred* (*Windows: the rest of the cass run*) and CHANGELOG [1.16.3]. The
+  rest of this bullet is from the cyrius sources and cyrius's own runs. The 6.6.6
   compiler fixed PE `open(2)` flag translation (before it, `jsonl_append` wrote
   every record at offset 0, and a rewritten `<db>.wal` kept the old file's
   tail). cyrius **6.6.9** routed `fsync` / `fdatasync` to `FlushFileBuffers`,
@@ -311,17 +335,29 @@ Durability there is weaker than on Linux.
   `O_DIRECTORY` and `O_EXCL` their POSIX meaning on PE, which closes the
   dangling-symlink create through `_pt_file_create`'s `O_EXCL` path that this
   section used to describe. What remains:
-  - **No `flock`** (`xflock` returns -1). No cross-process locking at all, and
-    WAL recovery and the database-identity assignment never run: `patra_open`
-    takes them only under a non-blocking exclusive flock, and statements only
-    when their flock call succeeds. A transaction interrupted by a crash stays
-    partly applied, and the next `BEGIN`'s `O_TRUNC` discards its WAL.
-  - **Not run.** The first Windows run should check two `jsonl_append` calls
-    (the file must hold two lines), one WAL rewritten over a longer one (no tail
-    may survive), and an `O_NOFOLLOW` open of a planted link.
+  - **Locking depends on the cyrius that builds patra.** Before 6.7.12 there is
+    no `flock` (`xflock` returns -1): no cross-process locking, and WAL recovery
+    and the database-identity assignment never run — `patra_open` takes them
+    only under a non-blocking exclusive flock, statements only when their flock
+    call succeeds — so a transaction interrupted by a crash stays partly
+    applied, and the next `BEGIN`'s `O_TRUNC` discards its WAL. The pin, 6.7.10,
+    is such a cyrius. From 6.7.12 `xflock` is `LockFileEx` on one sentinel byte:
+    a blocking lock waits and a contended `LOCK_NB` is -11 (both measured on
+    cass), recovery runs under it, and since 1.16.3 `patra_open` reads -11 as
+    contended (the contended-open row passes on cass).
+  - **But a waiting writer can run inside a transaction** (6.7.12): every
+    statement in a transaction re-takes `LOCK_EX`, and `_xflock_win` drops the
+    lock to re-take it. On cass the second handle's rows were lost (*To file
+    upstream* 2).
+  - **The first-run checklist this bullet carried since 1.15.0 passed on cass**
+    (1.16.3): three `jsonl_append` calls read back as three lines
+    (`test_jsonl_append_read`), `wal_start` truncates a longer leftover WAL
+    (`test_open_flags`), and the WAL open refuses a planted symlink
+    (`test_wal_symlink_refused`).
 
-  **Treat patra on Windows as single-process**, with flushes but no crash
-  recovery.
+  **Treat patra on Windows as single-writer**: built by cyrius 6.7.12 or later
+  it has flushes and crash recovery, but not yet writers safely serialized
+  against a transaction.
 - **agnos: contended `flock` waits since agnos 1.57.7.** Before it, `#59`
   returned -1 at once for a contended `LOCK_SH` / `LOCK_EX` and expected the
   ring-3 caller to poll-spin; nothing did, and patra ignores the result at its

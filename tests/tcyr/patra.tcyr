@@ -7612,10 +7612,11 @@ fn test_header_judged_after_recovery() {
 #
 # The contention is between two descriptions in this process: flock contends
 # between descriptions, and LockFileEx between handles, exactly as between
-# processes. Where this host holds no lock between two handles (Windows on a
-# cyrius before 6.7.12, which has no flock; wine, which does not enforce
-# LockFileEx between handles; agnos, whose contended answer is -1 like any other
-# failure) the open rows are skipped by name. Linux must run them.
+# processes (measured on Windows 11 and under wine at 1.16.3). Where this host
+# holds no lock between two handles (Windows on a cyrius before 6.7.12, which
+# has no flock) or cannot tell contention from failure (agnos, whose contended
+# answer is -1 like any other), the open rows are skipped, saying so. Linux must
+# run them.
 fn test_contended_open_defers_to_recovery() {
     test_group("a contended open leaves the header to the first statement's recovery, on every target that locks (1.16.3)");
     #ifdef CYRIUS_TARGET_LINUX
@@ -7669,7 +7670,7 @@ fn test_contended_open_defers_to_recovery() {
     assert_eq(locks, 1, "a second description finds the lock held");
     #endif
     if (locks == 0) {
-        println("  skipped: this host holds no lock between two handles (Windows before cyrius 6.7.12, wine, agnos); the contended-open rows did not run");
+        println("  skipped: no lock between two handles here (Windows before cyrius 6.7.12), or agnos; the contended-open rows did not run");
         _pt_flock(f, LOCK_UN);
         sys_close(f);
         cleanup();

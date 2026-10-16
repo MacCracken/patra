@@ -5,6 +5,100 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.16.3] - 2026-10-15 — a contended lock on Windows is read as contended
+
+Patch release, one fix: cyrius issue `2026-10-15-patra-flock-contended-ignores-windows-xflock`
+(cyrius `docs/development/issues/`, found by the cyrius 6.7.12 release-docs pass). Since cyrius
+6.7.12, `xflock` on Windows is `LockFileEx` / `UnlockFileEx`, and a non-blocking lock that another
+handle holds answers -11. `_pt_flock_contended` recognised EAGAIN only on Linux and macOS, so on
+Windows a contended `patra_open` took -11 to mean that no lock could be had, and judged the header
+there and then, without the lock.
+
+Gates: **1,645 assertions** (was 1,631) · `patra_uninit.tcyr` 18 / 18 · raw-include 6 / 6 · 8 / 8
+fuzz · 43 benchmarks · libro 15/15 · vidya 19/19 · fmt + lint 0-warn · no raw syscalls · `dist/`
+in sync, sidecar 14 == 14 declared. On aarch64 under `qemu-aarch64`: 1,645 / 1,645, 18 / 18, 8 / 8
+fuzz, 3 / 3 programs. aarch64, agnos, Mach-O x86_64 / arm64 and Windows PE cross-builds are
+warning-free (Windows also under 6.7.12). The Linux x86_64 and aarch64 builds are **byte-identical
+to 1.16.2's**, because the change compiles only on Windows, so the binary (272,008 B DCE-on /
+411,272 B DCE-off) and performance are unchanged.
+
+**Toolchain: the pin stays at cyrius 6.7.10.** None of patra's rules ties the pin to a target's
+behaviour (it selects CI's toolchain), and nothing here needs 6.7.12 to build or to be correct. A
+cyrius before 6.7.12 answers every `xflock` call on Windows with -1, which is not contention, so
+patra behaves as before this release. The fix takes effect when a cyrius 6.7.12 or later builds
+patra, which the cyrius stdlib fold does.
+
+### Fixed
+
+- **A contended `patra_open` on Windows judged the header without the lock.** `_pt_flock_contended`
+  now reads -11 as contended under `#ifdef CYRIUS_TARGET_WIN`. -11 is the answer `xflock`
+  documents for a held lock on Windows. It is written as a literal because the Windows stdlib
+  declares no errno table: it is the wrapper's contract, not a copied stdlib constant (CLAUDE.md).
+  CI's raw-syscall / numeric-flag scan does not flag it. When the lock is contended, the open now
+  leaves the header's verdict to its first statement, which recovers and verifies under its own
+  lock, as on Linux and macOS. Before this fix, if a writer died leaving an invalid header,
+  `patra_open` refused the file, although the recovery that repairs the header was one statement
+  away.
+- **The comments no longer say that Windows has no flock.** That covered `_pt_flock`,
+  `_pt_flock_contended`, `_pt_fdatasync`'s note on crash atomicity, `_pt_recover_held` and
+  `patra_open`. They now say what Windows does since cyrius 6.7.12, and what it did before.
+
+### Added
+
+- **`test_contended_open_defers_to_recovery`** (14 assertions on Linux, 13 on Windows):
+  - Unit rows for `_pt_flock_contended`: EAGAIN is contended on Linux and macOS, and -11 on
+    Windows; -1 and -22 are not contention.
+  - Then a test from end to end that needs no fork, so it runs on Windows. A writer dies
+    mid-transaction, leaving a header that fails verification beside its WAL (the WAL is
+    captured, the close rolls back, and both are put back). Another description holds `LOCK_EX`.
+    The target's own non-blocking answer must classify as contended, `patra_open` must return a
+    handle and leave the WAL, and the first statement must replay it: one row, the header
+    restored, the WAL removed, then a write.
+  - Where the host holds no lock between two handles (Windows before cyrius 6.7.12), or cannot
+    tell contention from failure (agnos, whose contended answer is -1), the open rows are skipped
+    and the test prints a line saying so. Linux asserts that they ran.
+  - `_wr_disk_tblcount` moves out of the Linux-only block.
+  - Mutation-verified on Linux: without the EAGAIN arm, three rows fail. They are the same three
+    that the bug fails on Windows.
+
+### Validation — Windows, on real hardware
+
+- **cass** (Windows 11, build 26200). The suite was built for Windows by cyrius 6.7.12, in a copy
+  of this tree with the pin set to 6.7.12 (`cyrius build --win tests/tcyr/patra.tcyr`). Result:
+  **1,556 / 1,565**, and all 13 rows of the new test pass, the contended open included. The same
+  build of the 1.16.2 sources fails exactly three more rows (1,549 / 1,561): `-11 … is
+  contended`, `the target's own answer … reads as contended` and `the contended open defers the
+  header's verdict`, which is the bug. The nine rows that fail on both builds are under *Found*.
+- **wine** gives the same split (1,558 / 1,565 against 1,551 / 1,561), because wine enforces
+  `LockFileEx` between two handles of one process. Built by the pinned 6.7.10, the suite skips the
+  open rows and says so.
+- **Probes on cass**: a blocking `LOCK_EX` from a second handle waits until the holder unlocks, and
+  then returns 0; a non-blocking one returns -11.
+
+### Found on Windows, not fixed — recorded
+
+- **On Windows, a writer on a second handle can run in the middle of a transaction, and its rows
+  are lost.** On cass, `test_no_mutex_flock_deadlock` counts 40 of 60 rows. The second handle's
+  20 INSERTs return `PATRA_OK` but do not survive.
+  - **Cause**, measured by a probe on cass: `_xflock_win` drops a handle's lock before taking it
+    again. Every statement inside a transaction re-takes `LOCK_EX` on a handle that already holds
+    it (`_db_lock_ex`), which is a no-op under flock. On Windows, a handle waiting for the lock
+    takes it in that gap.
+  - **Scope:** it does not happen under wine, and sequential writes on two handles are not affected.
+    The 1.16.2 sources fail the same row.
+  - **Owner:** a defect in the cyrius stdlib (`lib/io.cyr`), reported to cyrius (roadmap *To file
+    upstream*).
+- **Eight more rows fail on Windows, all with the 1.16.2 sources too:**
+  - **Four `incomplete:` rows, plus `wal_recover reports the restore was incomplete` and `WAL
+    retained after an incomplete restore`.** A crafted WAL record that names a page past
+    `page_offset`'s 2^50 ceiling counts as restored there. `wal_recover` reports the replay done
+    and removes the WAL, and statements over it are not refused.
+  - **`open /dev/null`:** a Linux path in the test.
+  - **`jsonl_append: an fd with nothing to sync is fine`:** a Windows handle whose flush fails has
+    no errno to test, as recorded at 1.16.2.
+
+  These are recorded in roadmap *Platforms*.
+
 ## [1.16.2] - 2026-10-14 — failures are reported, not taken for success; headers verified on every statement
 
 Patch release: the two follow-ups the 1.16.1 review recorded (a 0 handle, an unverified header
