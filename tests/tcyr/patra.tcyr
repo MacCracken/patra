@@ -7553,6 +7553,7 @@ fn _wr_bad_header_child(): i64 {
     sys_exit(0);
     return 0;
 }
+#endif
 
 # HDR_TBLCOUNT as it is on disk right now, read past every handle.
 fn _wr_disk_tblcount(): i64 {
@@ -7565,7 +7566,6 @@ fn _wr_disk_tblcount(): i64 {
     sys_close(fd);
     return c;
 }
-#endif
 
 fn test_header_judged_after_recovery() {
     test_group("a header a crashed writer left invalid is replayed before it is judged (1.16.2)");
@@ -7598,6 +7598,99 @@ fn test_header_judged_after_recovery() {
     assert_eq(wal_exists(_wpath()), 0, "open: and the WAL removed");
     patra_close(a);
     #endif
+    return 0;
+}
+
+# -- 1.16.3: a contended lock is contended on Windows too --
+#
+# Since cyrius 6.7.12 xflock on Windows is LockFileEx, and a non-blocking lock
+# another handle holds answers -11. _pt_flock_contended recognised EAGAIN only on
+# Linux and macOS, so a contended patra_open on Windows took -11 for "no lock
+# can be had" and judged the header there and then, unlocked: a header a dead
+# writer left invalid, which the first statement's recovery repairs, refused
+# the open. (cyrius issue 2026-10-15-patra-flock-contended-ignores-windows-xflock)
+#
+# The contention is between two descriptions in this process: flock contends
+# between descriptions, and LockFileEx between handles, exactly as between
+# processes. Where this host holds no lock between two handles (Windows on a
+# cyrius before 6.7.12, which has no flock; wine, which does not enforce
+# LockFileEx between handles; agnos, whose contended answer is -1 like any other
+# failure) the open rows are skipped by name. Linux must run them.
+fn test_contended_open_defers_to_recovery() {
+    test_group("a contended open leaves the header to the first statement's recovery, on every target that locks (1.16.3)");
+    #ifdef CYRIUS_TARGET_LINUX
+    assert_eq(_pt_flock_contended(0 - EAGAIN), 1, "EAGAIN is contended");
+    #endif
+    #ifdef CYRIUS_TARGET_MACOS
+    assert_eq(_pt_flock_contended(0 - EAGAIN), 1, "EAGAIN is contended");
+    #endif
+    #ifdef CYRIUS_TARGET_WIN
+    assert_eq(_pt_flock_contended(0 - 11), 1, "-11, xflock's contended answer on Windows, is contended (it was no lock at all)");
+    #endif
+    assert_eq(_pt_flock_contended(0 - 1), 0, "-1 is no lock at all, not contention (Windows before cyrius 6.7.12)");
+    assert_eq(_pt_flock_contended(0 - 22), 0, "-22, a refused operation, is not contention");
+
+    # A writer begins, inserts (logging the header's before-image), writes a
+    # header that fails verification, and dies: the WAL is captured, the close
+    # rolls back, and the bad header and the WAL are put back.
+    cleanup();
+    xunlink(_wpath());
+    var s = patra_open(_tpath);
+    patra_exec(s, "CREATE TABLE t (id INT, v INT)");
+    patra_exec(s, "INSERT INTO t VALUES (1, 1)");
+    patra_begin(s);
+    patra_exec(s, "INSERT INTO t VALUES (99, 99)");
+    var h = pg_alloc();
+    patra_hdr_read(_db_fd(s), h);
+    store64(h + HDR_TBLCOUNT, 1000000000);
+    patra_hdr_write(_db_fd(s), h);
+    assert(_wal_snapshot() > 0, "the dead writer's WAL captured");
+    patra_close(s);
+    var f = _pt_file_open(_tpath);
+    patra_hdr_write(f, h);
+    pg_free(h);
+    assert(_wal_restore() > 0, "and put back");
+    assert_eq(_wr_disk_tblcount(), 1000000000, "beside a header that fails verification");
+
+    # Another description takes LOCK_EX and holds it; a third finds it held.
+    var held = _pt_flock(f, LOCK_EX);
+    var p = _pt_file_open(_tpath);
+    var pr = _pt_flock(p, LOCK_EX + LOCK_NB);
+    if (pr == 0) { _pt_flock(p, LOCK_UN); }
+    sys_close(p);
+    var locks = 0;
+    if (held == 0) {
+        if (pr != 0) { locks = 1; }
+    }
+    #ifdef CYRIUS_TARGET_AGNOS
+    locks = 0;
+    #endif
+    #ifdef CYRIUS_TARGET_LINUX
+    assert_eq(locks, 1, "a second description finds the lock held");
+    #endif
+    if (locks == 0) {
+        println("  skipped: this host holds no lock between two handles (Windows before cyrius 6.7.12, wine, agnos); the contended-open rows did not run");
+        _pt_flock(f, LOCK_UN);
+        sys_close(f);
+        cleanup();
+        xunlink(_wpath());
+        return 0;
+    }
+    assert_eq(_pt_flock_contended(pr), 1, "the target's own answer to a held lock reads as contended");
+    var db = patra_open(_tpath);
+    assert(db != 0, "the contended open defers the header's verdict (it judged it unlocked and refused the file)");
+    assert_eq(wal_exists(_wpath()), 1, "and leaves the WAL to whoever holds the lock next");
+    _pt_flock(f, LOCK_UN);
+    sys_close(f);
+    if (db != 0) {
+        assert_eq(_wr_n(db, "SELECT COUNT(*) FROM t"), 1, "its first statement replays the WAL and reads, without the dead row");
+        assert_eq(_wr_disk_tblcount(), 1, "the replay restored the header");
+        assert_eq(wal_exists(_wpath()), 0, "and removed the WAL");
+        assert_eq(patra_exec(db, "INSERT INTO t VALUES (2, 2)"), PATRA_OK, "the handle writes");
+        patra_close(db);
+    }
+    cleanup();
+    xunlink(_wpath());
     return 0;
 }
 
@@ -9274,6 +9367,7 @@ fn main() {
     test_create_exists_at_table_cap();
     test_create_with_corrupt_table_count();
     test_header_judged_after_recovery();
+    test_contended_open_defers_to_recovery();
     test_unreadable_wal_kept();
     test_dbid_assigned_by_first_writer();
     test_alter_survives_refused_allocations();

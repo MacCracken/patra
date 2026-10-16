@@ -143,23 +143,32 @@ fn _pt_seek(fd, off): i64 {
 }
 
 # Apply flock operation to fd. xflock owns the per-target dispatch (Linux
-# SYS_FLOCK, Darwin BSD flock via the x86 number, agnos #59); Windows has no
-# flock and returns -1.
+# SYS_FLOCK, Darwin BSD flock via the x86 number, agnos #59, and on Windows,
+# since cyrius 6.7.12, LockFileEx / UnlockFileEx on one sentinel byte past any
+# data, which excludes other handles' locks and nothing else). Before 6.7.12
+# Windows had no flock and xflock returned -1 for every call.
 fn _pt_flock(fd, op): i64 {
     return xflock(fd, op);
 }
 
 # Did a non-blocking flock fail only because another description holds a
 # conflicting lock? That is EAGAIN on Linux and macOS (the stdlib's errno
-# table). Anything else — Windows, whose xflock is -1 (no flock at all), or any
-# other error — means no lock can be had, not that someone else holds it
-# (1.16.2 review: patra_open told the two apart wrongly).
+# table), and -11 on Windows: xflock's documented answer there, since cyrius
+# 6.7.12, when LOCK_NB finds the lock held (the Windows stdlib declares no
+# errno table, so the literal is the wrapper's contract, not a copied
+# constant). Anything else means no lock can be had, not that someone else
+# holds it (1.16.2 review: patra_open told the two apart wrongly) — any other
+# error, or Windows on a cyrius before 6.7.12, whose xflock is -1 for every
+# call. CHANGELOG [1.16.3]
 fn _pt_flock_contended(r): i64 {
     #ifdef CYRIUS_TARGET_LINUX
     if (r == 0 - EAGAIN) { return 1; }
     #endif
     #ifdef CYRIUS_TARGET_MACOS
     if (r == 0 - EAGAIN) { return 1; }
+    #endif
+    #ifdef CYRIUS_TARGET_WIN
+    if (r == 0 - 11) { return 1; }
     #endif
     return 0;
 }
@@ -175,9 +184,11 @@ fn _pt_flock_contended(r): i64 {
 # so it returned -ENOSYS. Eleven call sites ignored that. wal_log_page's
 # write-ahead check did not, so every write inside an explicit transaction failed
 # with PATRA_ERR_IO there. Transactions work on Windows since, ROLLBACK
-# included, but without crash atomicity: without flock, recovery never runs,
-# and the next BEGIN's O_TRUNC discards a crashed transaction's WAL, so its
-# writes stay applied.
+# included. Crash atomicity needs the lock as well: on a cyrius before 6.7.12
+# Windows has no flock, so recovery never runs, and the next BEGIN's O_TRUNC
+# discards a crashed transaction's WAL, so its writes stay applied. Since 6.7.12
+# xflock is LockFileEx there, and recovery runs under it as on the other
+# targets (CHANGELOG [1.16.3]).
 #
 # 1.16.2: every caller now checks the result (several discarded it — a failed
 # sync was reported as a durable statement or commit).

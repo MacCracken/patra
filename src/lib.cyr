@@ -234,9 +234,10 @@ fn patra_init(): i64 {
 # that lock any `<db>.wal` belongs to a transaction that is no longer running:
 # a live transaction holds LOCK_EX from patra_begin to commit / rollback
 # (v1.13.3), and wal_start, the only writer of the file, runs inside that span.
-# Where the call fails (Windows, which has no flock; a contended agnos flock,
-# which never waits) the caller skips this: replaying a WAL without the lock
-# could undo a transaction that is still running.
+# Where the call fails (Windows on a cyrius before 6.7.12, which has no flock;
+# a contended agnos flock, which never waits) the caller skips this: replaying a
+# WAL without the lock could undo a transaction that is still running. Since
+# cyrius 6.7.12 Windows locks with LockFileEx, so this runs there too.
 #
 # `hdr` is a PAGE_SIZE buffer holding the current on-disk header. On return it
 # holds the post-recovery header whenever a replay ran.
@@ -377,8 +378,11 @@ fn patra_open(path): i64 {
     # 1.16.2: the header's verdict, taken under the lock after recovery. It
     # stays PATRA_OK when the lock is contended: the first statement then
     # recovers and verifies under its own lock. When no lock can be had at all
-    # (Windows has no flock), there is no recovery, as before, and the header
-    # is judged now, unlocked.
+    # (Windows on a cyrius before 6.7.12, which has no flock), there is no
+    # recovery, as before, and the header is judged now, unlocked.
+    # 1.16.3: since cyrius 6.7.12 Windows locks (LockFileEx), and a contended
+    # lock there is -11, which _pt_flock_contended now reads as contended; it
+    # read it as no lock at all and judged the header unlocked.
     var hv = PATRA_OK;
     var fl = _pt_flock(fd, LOCK_EX + LOCK_NB);
     if (fl != 0) {
