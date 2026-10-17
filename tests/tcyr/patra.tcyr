@@ -5,7 +5,21 @@ include "lib/assert.cyr"
 include "lib/mmap.cyr"
 include "lib/thread.cyr"
 
-var _tpath = "/tmp/patra_test.patra";
+# A scratch path: `p` is "/tmp/<name>", the path on Linux, macOS and agnos. Windows
+# has no /tmp — "/tmp/x" there is the drive-rooted \tmp\x, which need not exist — so
+# it gets the relative "<name>" (the suite runs from its own scratch directory, as
+# under C:\cyrius-tests). A pointer into the literal: nothing is allocated, so
+# the top-level path variables below can use it before alloc_init. (1.16.4)
+fn _scr(p): i64 {
+    #ifdef CYRIUS_TARGET_WIN
+    return p + 5;
+    #endif
+    #ifndef CYRIUS_TARGET_WIN
+    return p;
+    #endif
+}
+
+var _tpath = _scr("/tmp/patra_test.patra");
 
 # Synthetic fd for the page-cache unit test (1.14.0: the cache is keyed on
 # (dbid, page), so a direct test needs a registered fd). Deliberately a number
@@ -643,7 +657,7 @@ fn test_delete_then_insert() {
 
 # -- v0.4: JSONL ----------------------------------------------
 
-var _jpath = "/tmp/patra_test.jsonl";
+var _jpath = _scr("/tmp/patra_test.jsonl");
 fn jcleanup() { xunlink(_jpath); return 0; }
 
 fn test_json_build() {
@@ -1580,8 +1594,8 @@ fn test_jsonl_get_int_overflow() {
 # §4.2 #14 -- O_NOFOLLOW refuses to open a symlinked DB path.
 fn test_symlink_refused() {
     test_group("symlink refused");
-    var target = "/tmp/patra_nofollow_real.patra";
-    var link = "/tmp/patra_nofollow_link.patra";
+    var target = _scr("/tmp/patra_nofollow_real.patra");
+    var link = _scr("/tmp/patra_nofollow_link.patra");
     xunlink(target);
     xunlink(link);
 
@@ -1707,7 +1721,7 @@ fn test_wal_bad_magic_refused() {
     patra_close(db);
 
     # Drop a junk .wal next to the DB
-    var wpath = "/tmp/patra_test.patra.wal";
+    var wpath = _scr("/tmp/patra_test.patra.wal");
     var wfd = file_open(wpath, O_RDWR | O_CREAT | O_TRUNC, 420);
     var junk = fl_alloc(WAL_REC_SZ);
     memset(junk, 0xAA, WAL_REC_SZ);
@@ -1737,7 +1751,7 @@ fn test_wal_checksum_stops_replay() {
     patra_close(db);
 
     # Craft a minimal well-formed WAL header + one bad-checksum record
-    var wpath = "/tmp/patra_test.patra.wal";
+    var wpath = _scr("/tmp/patra_test.patra.wal");
     var wfd = file_open(wpath, O_RDWR | O_CREAT | O_TRUNC, 420);
     var hdr = fl_alloc(WAL_HDR_SZ);
     store32(hdr, WAL_MAGIC);
@@ -4669,7 +4683,7 @@ fn test_bind_text_into_text_col() {
 
 # -- v1.11.0: thread-safety (yeo-cy-test P1) ------------------
 
-var _cpath = "/tmp/patra_test_conc.patra";
+var _cpath = _scr("/tmp/patra_test_conc.patra");
 enum ConcCfg { CONC_K = 4; CONC_M = 250; }
 
 # Worker: hammer the SHARED handle with auto-commit INSERTs. WRITES stay
@@ -4735,7 +4749,7 @@ fn test_concurrency() {
 # sequentially before the threads spawn (a concurrent wal_recover on open would
 # race the process-global WAL state).
 
-var _rdpath = "/tmp/patra_test_rdconc.patra";
+var _rdpath = _scr("/tmp/patra_test_rdconc.patra");
 enum RdCfg { RD_K = 4; RD_M = 250; RD_ROWS = 5; }
 enum RdCtx { RDC_DB = 0; RDC_ERRS = 8; RDC_SZ = 16; }
 var _rd_ctx = 0;
@@ -4836,7 +4850,7 @@ fn test_read_concurrency() {
 # handle immediately after each insert under _patra_mtx + LOCK_EX, so it stays
 # safe under the single-writer model.
 
-var _xhpath = "/tmp/patra_test_xhandle.patra";
+var _xhpath = _scr("/tmp/patra_test_xhandle.patra");
 
 fn test_cross_handle_visibility() {
     test_group("cross-handle visibility (P2 conn-per-thread)");
@@ -4878,7 +4892,7 @@ fn test_cross_handle_visibility() {
 # HDR_COMMITGEN advances by 1 on every committed mutation (the on-disk gen the
 # shared page cache compares against). SELECT and rollback leave it untouched.
 
-var _gpath = "/tmp/patra_test_gen.patra";
+var _gpath = _scr("/tmp/patra_test_gen.patra");
 
 # Read the current on-disk commit generation (fresh header read).
 fn _xgen(db): i64 {
@@ -4923,8 +4937,8 @@ fn test_commit_gen() {
 # table index — and write to the wrong place. Regression for
 # issues/2026-06-28-concurrent-read-table-lookup-cache-race.md.
 
-var _tc1path = "/tmp/patra_test_tcache1.patra";
-var _tc2path = "/tmp/patra_test_tcache2.patra";
+var _tc1path = _scr("/tmp/patra_test_tcache1.patra");
+var _tc2path = _scr("/tmp/patra_test_tcache2.patra");
 
 fn test_tail_cache_per_handle() {
     test_group("tail-page cache per-handle (v1.12.7)");
@@ -5725,7 +5739,7 @@ fn test_row_geometry_property() {
 # -- v1.14.0: the WAL is opened O_NOFOLLOW, and a transaction that cannot
 # -- get a usable WAL refuses to start ------------------------------
 
-var _vpath = "/tmp/patra_test_victim.txt";
+var _vpath = _scr("/tmp/patra_test_victim.txt");
 
 # Read the whole victim file into `buf` (cap bytes); returns bytes read, or -1.
 fn _read_victim(buf, cap): i64 {
@@ -6169,8 +6183,8 @@ fn test_hostile_header_rejected() {
 
 # -- v1.14.0: WAL state is per-database, not process-global ----
 
-var _tpath2 = "/tmp/patra_test_2.patra";
-fn _wpath2(): i64 { return "/tmp/patra_test_2.patra.wal"; }
+var _tpath2 = _scr("/tmp/patra_test_2.patra");
+fn _wpath2(): i64 { return _scr("/tmp/patra_test_2.patra.wal"); }
 fn cleanup2() { xunlink(_tpath2); xunlink(_wpath2()); return 0; }
 
 fn test_two_databases_dont_share_a_wal() {
@@ -6407,7 +6421,7 @@ fn test_insert_row_autoincrement() {
 
 # -- v1.14.0: mutex-vs-flock lock order ----
 
-var _dl_path = "/tmp/patra_deadlock.patra";
+var _dl_path = _scr("/tmp/patra_deadlock.patra");
 var _dl_db2 = 0;
 var _dl_done = 0;
 
@@ -6427,7 +6441,7 @@ fn _dl_worker(arg): i64 {
 fn test_no_mutex_flock_deadlock() {
     test_group("a transaction does not deadlock a second handle (1.14.0)");
     xunlink(_dl_path);
-    xunlink("/tmp/patra_deadlock.patra.wal");
+    xunlink(_scr("/tmp/patra_deadlock.patra.wal"));
     var a = patra_open(_dl_path);
     patra_exec(a, "CREATE TABLE t (id INT, v INT)");
     _dl_db2 = patra_open(_dl_path);
@@ -6478,7 +6492,9 @@ fn test_no_mutex_flock_deadlock() {
 # Several sync calls discarded their result, so a failed sync was reported as a
 # durable statement, flush or commit. src/file.cyr's test-only seam fails the
 # sync of one fd on demand (`_pt_sync_fail_*`); /dev/null, which takes a seek
-# and a write but refuses fdatasync with EINVAL, covers the bare helpers.
+# and a write but refuses fdatasync with EINVAL, covers the bare helpers. On
+# Windows the device is NUL (1.16.4): it opens, takes a write and a seek, and
+# FlushFileBuffers refuses it.
 fn _sync_fail(fd, skip): i64 {
     _pt_sync_fail_fd = fd;
     _pt_sync_fail_skip = skip;
@@ -6493,15 +6509,32 @@ fn _sync_ok(): i64 {
 
 fn test_failed_sync_reported() {
     test_group("a failed fdatasync is reported, not taken for durability (1.16.2)");
+    #ifdef CYRIUS_TARGET_WIN
+    var nul = file_open("NUL", O_RDWR, 0);
+    assert(nul >= 0, "open NUL");
+    #endif
+    #ifndef CYRIUS_TARGET_WIN
     var nul = file_open("/dev/null", O_RDWR, 0);
     assert(nul >= 0, "open /dev/null");
+    #endif
     var h = fl_alloc(PAGE_SIZE);
     patra_hdr_init(h);
     assert_eq(patra_hdr_write(nul, h), PATRA_ERR_IO, "patra_hdr_write: a refused sync is an error");
     fl_free(h);
+    #ifdef CYRIUS_TARGET_WIN
+    # Windows' flush answers -1 for NUL and for a real failure alike: no errno
+    # tells nothing-to-sync from a failed sync, so _pt_sync_nothing_to_sync has
+    # no Windows arm (a read-only handle answers the same -1: an exemption would
+    # excuse a real failure). The row's premise is asserted and the row skipped.
+    assert_lt(xfsync(nul), 0, "NUL refuses the flush (the premise of the skipped row)");
+    var _nts = "  SKIP (windows): jsonl_append, nothing to sync — the flush has no errno to tell it from a failure\n";
+    sys_write(1, _nts, strlen(_nts));
+    #endif
+    #ifndef CYRIUS_TARGET_WIN
     # /dev/null refuses fdatasync with EINVAL — nothing to sync, as for a pipe
     # or a terminal — which is not a failure; a failed sync is.
     assert_eq(jsonl_append(nul, "{}", 2), PATRA_OK, "jsonl_append: an fd with nothing to sync is fine");
+    #endif
     _sync_fail(nul, 0);
     assert_eq(jsonl_append(nul, "{}", 2), PATRA_ERR_IO, "jsonl_append: a failed sync is an error");
     var jk = fl_alloc(8);
@@ -7354,7 +7387,7 @@ fn test_time_mix_fallback() {
 
 # -- v1.13.8: a WAL is bound to its database (audit S1-8) ----
 
-fn _wpath(): i64 { return "/tmp/patra_test.patra.wal"; }
+fn _wpath(): i64 { return _scr("/tmp/patra_test.patra.wal"); }
 
 # Snapshot / restore the .wal file. 1.14.0 made patra_close ROLL BACK an open
 # transaction (it used to abandon it, leaking the WAL fd and the lock), which

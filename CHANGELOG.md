@@ -5,6 +5,55 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.16.4] - 2026-10-17 — the suite runs on Windows: per-target scratch paths and the NUL device
+
+Patch release, tests only: cyrius issue `2026-10-16-patra-suite-dev-null-fixture-fails-on-windows` (cyrius
+`docs/development/issues/`, found by the cyrius 6.7.13 stdlib lane while running 1.16.3's suite on cass). No source
+change: `dist/patra.cyr` differs from 1.16.3's only in its `# Version:` line, so the library's builds are
+byte-identical to 1.16.3's on every target.
+
+Gates: **1,645 assertions** on Linux (unchanged; the Windows arm replaces one row there) · `patra_uninit.tcyr` 18 / 18
+· raw-include 6 / 6 · 8 / 8 fuzz · 43 benchmarks · libro 15/15 · vidya 19/19 · fmt + lint 0-warn · no raw syscalls ·
+`dist/` in sync, sidecar 14 == 14 declared — run by the repo's own CI steps in an isolated copy under the pinned
+6.7.10. On aarch64 under `qemu-aarch64`: 1,645 / 1,645. **On Windows hardware (cass): 1,565 / 1,565.**
+
+**Toolchain: the pin stays at cyrius 6.7.10.** The Windows run needs a newer cyrius to pass (below); nothing in the
+suite's portability needs one to build.
+
+### Fixed
+
+- **The suite's scratch paths were Linux paths.** Every `"/tmp/<name>"` fixture of `tests/tcyr/patra.tcyr` (18
+  literals) goes through `_scr`: the literal on Linux, macOS and agnos, the relative `<name>` on Windows. There
+  `/tmp/<name>` is the drive-rooted `\tmp\<name>`, which need not exist: on cass it does not, so 1.16.3's suite
+  failed its first `patra_open` and stopped with an access violation (0xC0000005) in *create insert select*. `_scr`
+  answers a pointer into the literal and allocates nothing, so the top-level path variables use it before
+  `alloc_init`. Linux, macOS and agnos open the same paths as before.
+- **`test_failed_sync_reported` opened `/dev/null`.** On Windows it opens `NUL`, which opens, takes a write and a seek,
+  and whose flush `FlushFileBuffers` refuses (measured on cass): the `patra_hdr_write` row and the fault-seam rows run
+  there as on Linux. The row *jsonl_append: an fd with nothing to sync is fine* cannot: Windows' flush answers -1 for
+  `NUL` and for a real failure alike, with no errno to tell them apart. On Windows the row's premise is asserted
+  (`xfsync(NUL) < 0`) and the row is skipped with a line that says why. `_pt_sync_nothing_to_sync` gets no Windows
+  arm: a read-only handle's flush answers the same -1, so an exemption would excuse a real failure.
+
+### Validation — Windows, on real hardware
+
+- **cass** (Windows 11). The suite built for Windows by the cyrius 6.7.14 release tree (its stdlib lane, against that
+  tree's `lib/`): **1,565 / 1,565**, exit 0, the skip line printed. That tree carries the two cyrius fixes the rest
+  of 1.16.3's nine failing rows were waiting on: 6.7.13's Windows `xflock` re-lock (a re-taken lock stays held, so
+  `test_no_mutex_flock_deadlock` keeps its 60 rows) and 6.7.14's PE seek (a failed seek answers -22 instead of 0, so
+  the six crafted-WAL rows see the incomplete restore). 1.16.3's suite built the same way stops at its first open,
+  its `/tmp` paths absent on cass.
+- Linux x86_64 1,645 / 1,645 and aarch64 1,645 / 1,645 (`qemu-aarch64`), unchanged.
+
+### Found, not fixed — recorded
+
+- **macOS: `patra_hdr_write: a refused sync is an error` fails** on ecb (arm64) and ach (x86_64), 1,566 / 1,567, with
+  1.16.3's suite and 1.16.4's alike: macOS syncs `/dev/null` successfully, so the bare-helper row's premise is
+  Linux's. Reported to cyrius (the fold's follow-up).
+- **Windows: the other harnesses still use `/tmp` paths.** On cass `patra_uninit.tcyr` passes 15 / 18 and
+  `patra_raw_include.tcyr` 0 / 6, for the reason fixed above in `patra.tcyr`; the fuzz harnesses, the benchmark and
+  the libro / vidya programs carry the same literals. Reported to cyrius.
+
 ## [1.16.3] - 2026-10-15 — a contended lock on Windows is read as contended
 
 Patch release, one fix: cyrius issue `2026-10-15-patra-flock-contended-ignores-windows-xflock`
