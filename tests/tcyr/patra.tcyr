@@ -6169,6 +6169,72 @@ fn test_hostile_header_rejected() {
     cleanup();
 }
 
+# -- v1.16.5: a chain the row's ref does not describe is refused ----
+
+# The chain head that row `ridx` of table `tidx` names at column offset `off`
+# (rows `rsz` bytes), read from the table's first data page through `fd`; 0 when
+# that page is not a data page holding the row. A corruption test needs the
+# on-disk page number, which a result set no longer carries: since 1.12.8 its
+# BR_PAGE holds the payload's heap snapshot.
+fn _row_chain_head(fd, hdr, tidx, ridx, rsz, off) {
+    var buf = pg_alloc();
+    var head = 0;
+    var root = load64(_tbl_entry(hdr, tidx) + TBL_ROOT);
+    if (page_read_checked(fd, hdr, root, buf) == PATRA_OK) {
+        if (load64(buf + DP_TYPE) == PAGE_DATA) {
+            if (ridx < load64(buf + DP_NROWS)) {
+                head = row_read_bytes_page(buf + DP_DATA + ridx * rsz, off);
+            }
+        }
+    }
+    pg_free(buf);
+    return head;
+}
+
+fn test_bytes_chain_overrun_refused() {
+    test_group("a chain running past its ref's length is refused (1.16.5)");
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE objects (hash STR, content BLOB)");
+    var sz = 5000;   # two chain pages: 4072 + 928 bytes
+    var payload = fl_alloc(sz);
+    _bytes_fill(payload, sz, 3);
+    assert_eq(_obj_insert(db, "loop", payload, sz), PATRA_OK, "insert a two-page blob");
+    patra_close(db);
+
+    var fd = _pt_file_open(_tpath);
+    var hdr = pg_alloc();
+    assert_eq(patra_hdr_read(fd, hdr), PATRA_OK, "header reads back");
+    var off = row_col_size(COL_STR);
+    var head = _row_chain_head(fd, hdr, 0, 0, off + COL_BYTES_SZ, off);
+    assert_eq(head > 0, 1, "the row names a chain head");
+    var out = fl_alloc(sz);
+    memset(out, 0, sz);
+    assert_eq(_bytes_read_chain(fd, hdr, head, sz, out), PATRA_OK, "the intact chain reads");
+    assert_eq(_bytes_eq(payload, out, sz), 1, "the intact chain reads byte for byte");
+    # A ref one byte short of its chain: the tail page holds more than is left.
+    assert_eq(_bytes_read_chain(fd, hdr, head, sz - 1, out), PATRA_ERR_PAGE,
+      "a chain longer than its ref's length is refused");
+
+    # The head's BY_NEXT names the head. The walk read the head twice and cut
+    # the second copy to the 928 bytes left, so the value read back PATRA_OK
+    # with the head's first bytes where the tail's belong.
+    var buf = pg_alloc();
+    assert_eq(page_read_checked(fd, hdr, head, buf), PATRA_OK, "the head page reads");
+    store64(buf + BY_NEXT, head);
+    assert_eq(page_write(fd, head, buf), PATRA_OK, "the head now names itself");
+    memset(out, 0, sz);
+    assert_eq(_bytes_read_chain(fd, hdr, head, sz, out), PATRA_ERR_PAGE,
+      "a chain that loops back to its head is refused");
+
+    pg_free(buf);
+    fl_free(out);
+    fl_free(payload);
+    pg_free(hdr);
+    sys_close(fd);
+    cleanup();
+}
+
 # -- v1.14.0: WAL state is per-database, not process-global ----
 
 var _tpath2 = _scr("/tmp/patra_test_2.patra");
@@ -9417,6 +9483,7 @@ fn main() {
     test_tbl_open_propagates();
     test_cyclic_data_chain_terminates();
     test_hostile_header_rejected();
+    test_bytes_chain_overrun_refused();
     test_alter_add_rowsz_guard();
     test_btree_equal_separator_split();
     test_btree_index_matches_scan();

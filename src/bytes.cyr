@@ -121,7 +121,12 @@ fn _bytes_read_chain(fd, hdr, first_page, len, out): i64 {
         if (chunk < 0) { pg_free(buf); return PATRA_ERR_PAGE; }
         if (chunk > BY_DATA_MAX) { pg_free(buf); return PATRA_ERR_PAGE; }
         if (chunk == 0) { pg_free(buf); return PATRA_ERR_PAGE; }
-        if (copied + chunk > len) { chunk = len - copied; }
+        # 1.16.5: a page holding more than the ref has left is malformed, not a
+        # tail to cut short — the writer's pages sum to the ref's length
+        # exactly. Cutting it short read a chain whose BY_NEXT looped back to
+        # an earlier page as PATRA_OK, that page's bytes in place of the tail's.
+        # Every page adds at least one byte, so this also ends any cycle.
+        if (chunk > len - copied) { pg_free(buf); return PATRA_ERR_PAGE; }
         memcpy(out + copied, buf + BY_DATA, chunk);
         copied = copied + chunk;
         if (copied >= len) { cur = 0; }
