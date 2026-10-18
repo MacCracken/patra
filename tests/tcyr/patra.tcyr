@@ -6492,9 +6492,10 @@ fn test_no_mutex_flock_deadlock() {
 # Several sync calls discarded their result, so a failed sync was reported as a
 # durable statement, flush or commit. src/file.cyr's test-only seam fails the
 # sync of one fd on demand (`_pt_sync_fail_*`); /dev/null, which takes a seek
-# and a write but refuses fdatasync with EINVAL, covers the bare helpers. On
-# Windows the device is NUL (1.16.4): it opens, takes a write and a seek, and
-# FlushFileBuffers refuses it.
+# and a write but refuses fdatasync with EINVAL on Linux, covers the bare
+# helpers. On Windows the device is NUL (1.16.4): it opens, takes a write and a
+# seek, and FlushFileBuffers refuses it. macOS syncs /dev/null (1.16.5): there
+# the seam refuses the bare helper's sync.
 fn _sync_fail(fd, skip): i64 {
     _pt_sync_fail_fd = fd;
     _pt_sync_fail_skip = skip;
@@ -6519,7 +6520,20 @@ fn test_failed_sync_reported() {
     #endif
     var h = fl_alloc(PAGE_SIZE);
     patra_hdr_init(h);
+    #ifdef CYRIUS_TARGET_MACOS
+    # macOS's fdatasync of /dev/null answers 0, so the device refuses nothing
+    # there: the premise is asserted and the seam refuses the sync. A pipe is no
+    # substitute — its sync is refused (ENOTSUP), but patra_hdr_write seeks
+    # first, and a pipe's seek fails (ESPIPE): the row would pass for the wrong
+    # reason. (1.16.5)
+    assert_eq(_pt_fdatasync(nul), 0, "macOS syncs /dev/null (the premise of the seam-driven row)");
+    _sync_fail(nul, 0);
     assert_eq(patra_hdr_write(nul, h), PATRA_ERR_IO, "patra_hdr_write: a refused sync is an error");
+    _sync_ok();
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
+    assert_eq(patra_hdr_write(nul, h), PATRA_ERR_IO, "patra_hdr_write: a refused sync is an error");
+    #endif
     fl_free(h);
     #ifdef CYRIUS_TARGET_WIN
     # Windows' flush answers -1 for NUL and for a real failure alike: no errno
@@ -6531,8 +6545,9 @@ fn test_failed_sync_reported() {
     sys_write(1, _nts, strlen(_nts));
     #endif
     #ifndef CYRIUS_TARGET_WIN
-    # /dev/null refuses fdatasync with EINVAL — nothing to sync, as for a pipe
-    # or a terminal — which is not a failure; a failed sync is.
+    # /dev/null refuses fdatasync with EINVAL on Linux — nothing to sync, as for
+    # a pipe or a terminal — which is not a failure; a failed sync is. (macOS
+    # syncs /dev/null, so there the row reads a sync that succeeded.)
     assert_eq(jsonl_append(nul, "{}", 2), PATRA_OK, "jsonl_append: an fd with nothing to sync is fine");
     #endif
     _sync_fail(nul, 0);
