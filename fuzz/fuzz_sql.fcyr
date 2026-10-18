@@ -2,6 +2,7 @@
 # Exit 0 = all pass. Non-zero = invariant ID that failed.
 
 include "src/lib.cyr"
+include "tests/scratch_path.cyr"
 
 alloc_init();
 fl_init();
@@ -168,7 +169,7 @@ if (load64(_spr() + PR_INS_NCOLS) != 2) { sys_exit(111); }
 if (load64(_spr() + PR_INSERT_IGNORE) != 1) { sys_exit(112); }
 
 # Integration: reorder binds by name, omitted column defaults, error paths.
-var clpath = "/tmp/patra_fuzz_collist.patra";
+var clpath = _scr("/tmp/patra_fuzz_collist.patra");
 xunlink(clpath);
 var cldb = patra_open(clpath);
 if (cldb == 0) { sys_exit(113); }
@@ -203,7 +204,7 @@ if (sql_parse() != PATRA_OK) { sys_exit(124); }
 if (load64(_spr() + PR_AUTOINC) != 0) { sys_exit(125); }
 
 # Integration: omit auto-assigns sequentially; explicit honored; 0 => auto.
-var aipath = "/tmp/patra_fuzz_autoinc.patra";
+var aipath = _scr("/tmp/patra_fuzz_autoinc.patra");
 xunlink(aipath);
 var aidb = patra_open(aipath);
 if (aidb == 0) { sys_exit(126); }
@@ -228,7 +229,7 @@ if (sql_parse() != PATRA_OK) { sys_exit(140); }
 sql_tokenize("ALTER TABLE t ADD COLUMN note TEXT");
 if (sql_parse() != PATRA_OK) { sys_exit(141); }
 
-var txpath = "/tmp/patra_fuzz_text.patra";
+var txpath = _scr("/tmp/patra_fuzz_text.patra");
 xunlink(txpath);
 var txdb = patra_open(txpath);
 if (txdb == 0) { sys_exit(142); }
@@ -273,7 +274,7 @@ sql_tokenize("INSERT INTO t VALUES (1, 'x')");
 if (sql_parse() != PATRA_OK) { sys_exit(164); }
 if (load64(_spr() + PR_NPARAMS) != 0) { sys_exit(165); }
 
-var bppath = "/tmp/patra_fuzz_bind.patra";
+var bppath = _scr("/tmp/patra_fuzz_bind.patra");
 xunlink(bppath);
 var bpdb = patra_open(bppath);
 if (bpdb == 0) { sys_exit(166); }
@@ -305,7 +306,7 @@ xunlink(bppath);
 
 # ── STR-keyed index (1.7.1): CREATE INDEX on STR + dedup probe ──
 
-var stpath = "/tmp/patra_fuzz_str.patra";
+var stpath = _scr("/tmp/patra_fuzz_str.patra");
 xunlink(stpath);
 var sdb = patra_open(stpath);
 if (sdb == 0) { sys_exit(74); }
@@ -358,7 +359,7 @@ fl_free(schema);
 
 # ── Integration: error paths ──
 
-var tpath = "/tmp/patra_fuzz.patra";
+var tpath = _scr("/tmp/patra_fuzz.patra");
 xunlink(tpath);
 var db = patra_open(tpath);
 if (db == 0) { sys_exit(80); }

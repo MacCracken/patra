@@ -16,8 +16,9 @@
 
 include "src/lib.cyr"
 include "lib/assert.cyr"
+include "tests/scratch_path.cyr"
 
-var _upath = "/tmp/patra_uninit_test.patra";
+var _upath = _scr("/tmp/patra_uninit_test.patra");
 
 fn main() {
     alloc_init();

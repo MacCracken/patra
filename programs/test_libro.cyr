@@ -5,8 +5,9 @@
 
 include "src/lib.cyr"
 include "lib/assert.cyr"
+include "tests/scratch_path.cyr"
 
-var _lpath = "/tmp/patra_libro_test.jsonl";
+var _lpath = _scr("/tmp/patra_libro_test.jsonl");
 
 fn main() {
     alloc_init();
@@ -102,7 +103,7 @@ fn main() {
     # Also test structured storage alongside JSONL
     test_group("libro + patra storage");
 
-    var dbpath = "/tmp/patra_libro_test.patra";
+    var dbpath = _scr("/tmp/patra_libro_test.patra");
     xunlink(dbpath);
     var db = patra_open(dbpath);
     assert(db != 0, "open db");

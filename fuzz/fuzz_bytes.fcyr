@@ -6,12 +6,13 @@
 # bad BY_TYPE markers, overflow BY_LEN values, cycles, and NULL children.
 
 include "src/lib.cyr"
+include "tests/scratch_path.cyr"
 
 alloc_init();
 fl_init();
 patra_init();
 
-var fpath = "/tmp/patra_fuzz_bytes.patra";
+var fpath = _scr("/tmp/patra_fuzz_bytes.patra");
 
 # Module-level state shared by the seed/read helpers. Vars must be
 # declared before any function that references them.

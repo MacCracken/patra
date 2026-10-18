@@ -3,12 +3,13 @@
 # Exit 0 = all pass. Non-zero = invariant ID that failed.
 
 include "src/lib.cyr"
+include "tests/scratch_path.cyr"
 
 alloc_init();
 fl_init();
 patra_init();
 
-var fpath = "/tmp/patra_fuzz_file.patra";
+var fpath = _scr("/tmp/patra_fuzz_file.patra");
 
 # -- Wrong magic ---------------------------------------------
 
@@ -98,7 +99,7 @@ patra_close(db);
 
 # -- JSONL round-trip -----------------------------------------
 
-var jpath = "/tmp/patra_fuzz_file.jsonl";
+var jpath = _scr("/tmp/patra_fuzz_file.jsonl");
 xunlink(jpath);
 var jfd = jsonl_open(jpath);
 if (jfd < 0) { sys_exit(40); }

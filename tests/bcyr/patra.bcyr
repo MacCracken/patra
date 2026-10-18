@@ -5,8 +5,9 @@ include "lib/bench.cyr"
 include "lib/fnptr.cyr"
 include "lib/mmap.cyr"
 include "lib/thread.cyr"
+include "tests/scratch_path.cyr"
 
-var _bpath = "/tmp/patra_bench.patra";
+var _bpath = _scr("/tmp/patra_bench.patra");
 var _bdb = 0;
 
 fn _bcleanup() { xunlink(_bpath); return 0; }
@@ -205,7 +206,7 @@ fn main() {
 
     # --- JSONL append ---
 
-    var _jbpath = "/tmp/patra_bench.jsonl";
+    var _jbpath = _scr("/tmp/patra_bench.jsonl");
     xunlink(_jbpath);
     var b14 = bench_new("jsonl_append_1k");
     var jfd = jsonl_open(_jbpath);

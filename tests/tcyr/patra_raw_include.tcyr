@@ -10,12 +10,16 @@
 #
 # CI runs it from a staging dir with NO cyrius.cyml: in-repo, `cyrius test`
 # auto-prepends the manifest's [deps] stdlib, which would hide a bundle that
-# does not compile alone. Deliberately NOT `include "src/lib.cyr"` either.
+# does not compile alone. Deliberately NOT `include "src/lib.cyr"` either. The one
+# other patra file it includes is tests/scratch_path.cyr (1.16.5: `_scr`, the
+# scratch path, relative on Windows), which needs nothing included; CI copies it
+# into the staging dir beside the bundle.
 
 include "dist/patra.cyr"
 include "lib/assert.cyr"
+include "tests/scratch_path.cyr"
 
-var _rpath = "/tmp/patra_raw_include_test.patra";
+var _rpath = _scr("/tmp/patra_raw_include_test.patra");
 
 fn main() {
     alloc_init();

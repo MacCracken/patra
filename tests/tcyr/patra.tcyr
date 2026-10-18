@@ -4,20 +4,8 @@ include "src/lib.cyr"
 include "lib/assert.cyr"
 include "lib/mmap.cyr"
 include "lib/thread.cyr"
-
-# A scratch path: `p` is "/tmp/<name>", the path on Linux, macOS and agnos. Windows
-# has no /tmp — "/tmp/x" there is the drive-rooted \tmp\x, which need not exist — so
-# it gets the relative "<name>" (the suite runs from its own scratch directory, as
-# under C:\cyrius-tests). A pointer into the literal: nothing is allocated, so
-# the top-level path variables below can use it before alloc_init. (1.16.4)
-fn _scr(p): i64 {
-    #ifdef CYRIUS_TARGET_WIN
-    return p + 5;
-    #endif
-    #ifndef CYRIUS_TARGET_WIN
-    return p;
-    #endif
-}
+# `_scr`: the scratch paths, relative on Windows (1.16.4; shared since 1.16.5)
+include "tests/scratch_path.cyr"
 
 var _tpath = _scr("/tmp/patra_test.patra");
 

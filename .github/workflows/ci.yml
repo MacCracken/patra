@@ -71,6 +71,31 @@ jobs:
           [ $fail -eq 0 ] || exit 1
           echo "No raw syscalls or numeric open flags: clean."
 
+      - name: Scratch paths go through _scr (no bare /tmp literal)
+        # Windows has no /tmp: "/tmp/<name>" there is the drive-rooted
+        # \tmp\<name>, which need not exist, so a harness that opens one fails
+        # there before it tests anything (on cass 1.16.3's suite stopped at its
+        # first open; 1.16.4's patra_uninit and raw-include harnesses failed 3 / 18
+        # and 6 / 6). Since 1.16.5 every "/tmp/ literal in a harness is the
+        # argument of _scr (tests/scratch_path.cyr: the literal on Linux, macOS
+        # and agnos, the relative <name> on Windows). Comments are stripped
+        # first; a scan that finds no _scr call at all fails, so an emptied glob
+        # cannot pass. Known limit, as above: a `#` inside a string literal hides
+        # the rest of that line.
+        run: |
+          FILES="src/*.cyr tests/*.cyr tests/tcyr/*.tcyr tests/bcyr/*.bcyr fuzz/*.fcyr programs/*.cyr"
+          BAD=$(for f in $FILES; do
+            sed -E 's/#.*$//' "$f" | sed 's|_scr("/tmp/||g' | grep -n '"/tmp/' | sed "s|^|$f:|" || true
+          done)
+          if [ -n "$BAD" ]; then
+            echo 'FAIL: a "/tmp/ literal outside _scr: write _scr("/tmp/<name>") (tests/scratch_path.cyr)'
+            echo "$BAD"
+            exit 1
+          fi
+          N=$(for f in $FILES; do sed -E 's/#.*$//' "$f" || true; done | { grep -o '_scr("/tmp/' || true; } | wc -l)
+          [ "$N" -gt 0 ] || { echo "FAIL: no _scr(\"/tmp/ call found: the scan read nothing"; exit 1; }
+          echo "Scratch paths: all $N \"/tmp/ literals go through _scr."
+
       - name: Format check
         # Per-file loop, deliberately NOT `cyrfmt --check src/*.cyr`: cyrfmt
         # reads only argv[1] and silently ignores the rest, so the glob form
@@ -133,6 +158,8 @@ jobs:
           T=$(mktemp -d)
           mkdir -p "$T/dist" "$T/tests/tcyr"
           cp dist/patra.cyr "$T/dist/"
+          # The harness's scratch path helper (1.16.5): it needs nothing included.
+          cp tests/scratch_path.cyr "$T/tests/"
           cp tests/tcyr/patra_raw_include.tcyr "$T/tests/tcyr/"
           (cd "$T" && cyrius test tests/tcyr/patra_raw_include.tcyr)
 

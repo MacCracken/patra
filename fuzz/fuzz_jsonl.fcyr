@@ -6,12 +6,13 @@
 # Audit 2026-04-21 §4.1 #3.
 
 include "src/lib.cyr"
+include "tests/scratch_path.cyr"
 
 alloc_init();
 fl_init();
 patra_init();
 
-var jpath = "/tmp/patra_fuzz_jsonl.jsonl";
+var jpath = _scr("/tmp/patra_fuzz_jsonl.jsonl");
 
 fn _cleanup() { xunlink(jpath); return 0; }
 

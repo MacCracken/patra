@@ -5,13 +5,14 @@
 # applying attacker-controlled pages. Audit 2026-04-21 §4.1 #2.
 
 include "src/lib.cyr"
+include "tests/scratch_path.cyr"
 
 alloc_init();
 fl_init();
 patra_init();
 
-var fpath = "/tmp/patra_fuzz_wal.patra";
-var wpath = "/tmp/patra_fuzz_wal.patra.wal";
+var fpath = _scr("/tmp/patra_fuzz_wal.patra");
+var wpath = _scr("/tmp/patra_fuzz_wal.patra.wal");
 
 fn _cleanup() {
     xunlink(fpath);

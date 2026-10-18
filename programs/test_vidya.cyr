@@ -5,13 +5,14 @@
 
 include "src/lib.cyr"
 include "lib/assert.cyr"
+include "tests/scratch_path.cyr"
 
 fn main() {
     alloc_init();
     fl_init();
     patra_init();
 
-    var dbpath = "/tmp/patra_vidya_test.patra";
+    var dbpath = _scr("/tmp/patra_vidya_test.patra");
     xunlink(dbpath);
 
     test_group("vidya knowledge index");

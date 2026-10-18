@@ -1,0 +1,20 @@
+# scratch_path.cyr -- the scratch path every patra harness writes to (1.16.5)
+#
+# `_scr(p)`: `p` is "/tmp/<name>", the path on Linux, macOS and agnos. Windows has
+# no /tmp — "/tmp/x" there is the drive-rooted \tmp\x, which need not exist — so it
+# gets the relative "<name>" (a harness runs from its own scratch directory, as
+# under C:\cyrius-tests). A pointer into the literal: nothing is allocated, so a
+# top-level path variable can use it before alloc_init.
+#
+# It needs nothing included before it, so tests/tcyr/patra_raw_include.tcyr can
+# include it beside dist/patra.cyr alone. 1.16.4 kept it in tests/tcyr/patra.tcyr;
+# since 1.16.5 every harness (tests/, fuzz/, programs/) takes its scratch paths
+# from here, and CI refuses a /tmp literal that does not go through `_scr`.
+fn _scr(p): i64 {
+    #ifdef CYRIUS_TARGET_WIN
+    return p + 5;
+    #endif
+    #ifndef CYRIUS_TARGET_WIN
+    return p;
+    #endif
+}

@@ -5,12 +5,13 @@
 # Audit 2026-04-21 §4.1 #1.
 
 include "src/lib.cyr"
+include "tests/scratch_path.cyr"
 
 alloc_init();
 fl_init();
 patra_init();
 
-var fpath = "/tmp/patra_fuzz_btree.patra";
+var fpath = _scr("/tmp/patra_fuzz_btree.patra");
 
 fn _cleanup() { xunlink(fpath); return 0; }
 
