@@ -9,6 +9,16 @@
 
 ## Current
 
+> **v1.16.5 (2026-10-18)** — **the harnesses' fixtures are per-target.** Patch release, tests only (cyrius
+> issues `2026-10-17-patra-failed-sync-row-assumes-dev-null-refuses-fsync-on-macos` and
+> `2026-10-17-patra-other-suites-open-tmp-paths-on-windows`): on macOS the failed-sync test's bare `patra_hdr_write` row
+> runs through the sync seam, its premise asserted (macOS syncs `/dev/null`), and `_scr` moves into
+> `tests/scratch_path.cyr`, which every harness with a `/tmp/<name>` path now uses (20 more literals: the no-init and
+> raw-include tests, six fuzz harnesses, the benchmark, the libro / vidya programs), a new CI step refusing a bare
+> one. **ecb and ach: 1,568 / 1,568** (was 1,566 / 1,567); **cass: `patra_uninit` 18 / 18, raw-include 6 / 6** (were
+> 15 / 18 and 0 / 6), the suite 1,565 / 1,565 — built by the cyrius 6.7.15 platform lane tree. Linux 1645 / 1645 and
+> aarch64 unchanged; `dist/` differs only in its version line; pin unchanged at 6.7.10.
+>
 > **v1.16.4 (2026-10-17)** — **the suite runs on Windows.** Patch release, tests only (cyrius issue
 > `2026-10-16-patra-suite-dev-null-fixture-fails-on-windows`): `tests/tcyr/patra.tcyr`'s 18 `/tmp/<name>` fixtures go
 > through `_scr` (relative on Windows, where `/tmp` is a drive-rooted path that need not exist), and the failed-sync
@@ -328,7 +338,7 @@
 > statement across all three exec paths. **Closes the 1.13.x repair arc.**
 > **1061 tests / 8 fuzz green.**
 
-- **Version**: 1.16.4 (read `VERSION` for the authoritative number)
+- **Version**: 1.16.5 (read `VERSION` for the authoritative number)
 - **Cyrius toolchain**: **6.7.10** (pinned in `cyrius.cyml [package].cyrius`; 6.5.19 → 6.5.27 at v1.13.1, → 6.5.29 at v1.13.9, → 6.5.33 at v1.13.10, → 6.5.36 at v1.13.11, → 6.6.0 at v1.13.12, → 6.6.2 at v1.14.2, → 6.6.4 at v1.14.3, → 6.6.6 at v1.15.0, → 6.6.9 at v1.15.1, → 6.6.18 at v1.15.2, → 6.7.5 at v1.16.0, → **6.7.10 at v1.16.1**; each source-change-free on its own). `lib/` now holds the declared closure only — **32 files**, all in `cyrius.lock` (re-counted v1.16.1; 6.7.10 changed 19 of them; `cyrius deps --locked` clean. At v1.15.0 `cyrius deps --relock` was needed to lock the two new leaves). The 6.5.29 bump reformatted `btree.cyr` / `table.cyr` / `where.cyr` — continuation-line indent only, `git diff -w` empty. **Neither the 6.5.33 nor the 6.5.36 nor the 6.6.0 bump reformatted anything**: all 12 `src/` files (and all 3 in `programs/`) pass `fmt --check` and `lint` unchanged at each, and `dist/patra.cyr` regenerates byte-identically apart from its version header. `lib/` re-synced with `lib sync --full` at v1.13.12: **108 → 109 `.cyr` files** (37 changed, 1 added — `hashseed.cyr`), the 109 inclusive of the 7-file `unicode/` subtree; `lib/` is gitignored, so this is a local snapshot refresh. ✅ **Version dispatch honours the pin** (re-verified v1.15.0): scratch manifests pinned to 6.6.0 / 6.6.2 / 6.6.6 each run their own compiler, with no drift warning, and `cyrius which` names the pinned `cycc`. The v1.13.12 finding that every driver ran the installed `cycc` no longer holds. ⚠ **But `cyrius build` re-syncs every declared stdlib leaf into `lib/` from the pinned toolchain before it compiles, even with `--no-deps`**, so an old `lib/` copied into a scratch tree is overwritten, and a pin bump can only be A/B'd as compiler + snapshot together.
   Progression: 6.1.15 (v1.11.0) → 6.2.1 (v1.11.1, stdlib
   pin sweep) → 6.2.19 (v1.11.3) → 6.2.21 (v1.11.5) → 6.2.22 (v1.12.0) →
@@ -418,7 +428,8 @@
   stdlib-only build (patra's own count went 13 → 0 at v1.15.0), and both Mach-O
   targets carried stdlib-sourced "not routed" warnings; under 6.7.10 none remain.
   **CI cross-builds none of these.**
-- **Status**: **v1.16.4 — the suite's fixtures are per-target (scratch paths, `NUL`): 1,565 / 1,565 on Windows hardware with a cyrius 6.7.14 build.** Before it:
+- **Status**: **v1.16.5 — every harness's scratch paths go through `tests/scratch_path.cyr` (CI-gated) and the macOS sync row through the seam: the suites read 0 failures on ecb, ach and cass.** Before it:
+  **v1.16.4 — the suite's fixtures are per-target (scratch paths, `NUL`): 1,565 / 1,565 on Windows hardware with a cyrius 6.7.14 build.** Before it:
   **v1.16.3 — a contended lock on Windows (cyrius ≥ 6.7.12's `LockFileEx`, -11) is read as contended; first run on Windows hardware.** Before it:
   **v1.16.2 — failed syncs, refused writes and refused allocations reported (commit rolls back; sticky `DB_SYNC_ERR`); headers verified per statement after recovery; three row-loss paths closed; the 0 handle refused.** Before it:
   **v1.16.1 — `patra_open` / `patra_cache_enable(1)` refuse before `patra_init`, which now fails closed (new `patra_initialized()`); `PATRA_ERR_EXISTS` before the table and column caps; `tbl_find` bounded to 63 slots; cyrius `6.7.5` → `6.7.10`.** Before it:
@@ -480,11 +491,15 @@
 - **Primary target**: Linux x86_64, the only target CI builds or runs.
   **aarch64**: since v1.15.0 every harness builds warning-free and passes under
   `qemu-aarch64` (1645/1645, 18/18, 8/8, 3/3 at v1.16.3), checked by hand.
-  **agnos and macOS (both Mach-O)** cross-build, but are not run. **Windows PE**
+  **agnos** cross-builds, but is not run. **macOS (both Mach-O)** cross-builds; the
+  suite ran on ecb and ach at v1.16.4 (1,566 / 1,567, one fixture row) and at
+  v1.16.5 (1,568 / 1,568, every other harness passing), built by cyrius lane
+  trees. **Windows PE**
   cross-builds, and at v1.16.3 the suite ran on Windows hardware (cass) for the
   first time, built by cyrius 6.7.12 (1,556 / 1,565; the nine failures are
   pre-existing and recorded); at v1.16.4, built by the cyrius 6.7.14 release
-  tree, 1,565 / 1,565. Built by a cyrius before 6.7.12 (the pin, 6.7.10)
+  tree, 1,565 / 1,565; at v1.16.5 every other harness but `fuzz_bytes` passes there too (CHANGELOG [1.16.5]
+  *Found*). Built by a cyrius before 6.7.12 (the pin, 6.7.10)
   Windows has no `flock`: single-process, no WAL replay. From 6.7.12 `xflock` is
   `LockFileEx`, recovery runs under it, and since v1.16.3 a contended open is
   recognised — but a same-mode re-lock lets another handle in mid-transaction
@@ -523,7 +538,9 @@ the tree stood at 8,111 at v1.14.3, and the sweep removed 16 lines net.
   `patra_init`, its own CI step since v1.16.1), and 1645 / 1645 on aarch64 under `qemu-aarch64` (by hand).
   On Windows (cass, built by cyrius 6.7.12, v1.16.3) 1,556 / 1,565: nine pre-existing failures, recorded in
   CHANGELOG [1.16.3]; at v1.16.4, built by the cyrius 6.7.14 release tree, 1,565 / 1,565 (one row skipped by name
-  there, its premise asserted in its place). (+14 at v1.16.3: `test_contended_open_defers_to_recovery` — `_pt_flock_contended`'s
+  there, its premise asserted in its place); at v1.16.5 `patra_uninit` 18 / 18 and raw-include 6 / 6 there too (were
+  15 / 18 and 0 / 6: `/tmp` paths). On macOS (ecb, ach) 1,568 / 1,568 at v1.16.5 — the failed-sync test's macOS arm
+  adds its premise row (`_pt_fdatasync` of `/dev/null` is 0) and drives the bare-helper row through the seam. (+14 at v1.16.3: `test_contended_open_defers_to_recovery` — `_pt_flock_contended`'s
   unit rows, and a fork-free contended open over a dead writer's WAL; mutation-verified, and on cass the 1.16.2
   sources fail its three bug rows.) (+218 at v1.16.2: `test_statements_survive_refused_allocations` 22 — the allocation seam swept over every
   allocation of fourteen statement scenarios, JSONL and a new thread's first statements, plus five queries for a
@@ -713,6 +730,7 @@ payload at `BY_DATA_MAX = 4072`.
 
 | Version | Date | Summary |
 |---------|------|---------|
+| 1.16.5 | 2026-10-18 | **The harnesses' fixtures are per-target.** Tests only: on macOS the failed-sync test's bare `patra_hdr_write` row goes through the sync seam (macOS syncs `/dev/null`; its premise asserted), and `_scr` moves into `tests/scratch_path.cyr`, used by every harness with a `/tmp/<name>` path (the no-init and raw-include tests, six fuzz harnesses, the benchmark, the libro / vidya programs); a CI step refuses a bare `/tmp` literal. ecb / ach 1,568 / 1,568 (was 1,566 / 1,567); cass `patra_uninit` 18 / 18, raw-include 6 / 6 (were 15 / 18, 0 / 6). `dist/` differs only in its version line; pin unchanged at 6.7.10. |
 | 1.16.4 | 2026-10-17 | **The suite runs on Windows.** Tests only: the 18 `/tmp/<name>` fixtures of `tests/tcyr/patra.tcyr` go through `_scr` (relative on Windows), and the failed-sync test opens `NUL` there, skipping its *nothing to sync* row by name (Windows' flush gives no errno to tell it from a failure). On cass, built by the cyrius 6.7.14 release tree: **1,565 / 1,565**. Found, not fixed: macOS fails one row (`/dev/null` syncs there), and the other harnesses' `/tmp` paths on Windows — both reported to cyrius. `dist/` differs only in its version line; pin 6.7.10 unchanged. |
 | 1.16.3 | 2026-10-15 | **A contended lock on Windows is read as contended.** Since cyrius 6.7.12 `xflock` on Windows is `LockFileEx` and a held non-blocking lock is -11; `_pt_flock_contended` knew only EAGAIN, so a contended `patra_open` judged the header unlocked (and refused a file a dead writer's WAL would repair). -11 is contended on Windows now. New fork-free `test_contended_open_defers_to_recovery` (+14, **1645**); first run on Windows hardware (cass, 6.7.12 build: 1,556 / 1,565, the 1.16.2 sources fail the three bug rows more). Found there, not fixed: a cyrius `_xflock_win` same-mode re-lock that lets a second handle write mid-transaction (40 / 60 rows), and eight more pre-existing Windows rows. Linux builds byte-identical to 1.16.2; pin 6.7.10 unchanged. |
 | 1.16.2 | 2026-10-14 | **Failures are reported, not taken for success; headers verified on every statement; every statement survives a refused allocation; transactions on two databases on two threads keep their indexes.** The ~70 unchecked allocations checked and swept statement by statement (8,246 forked children): failure paths no longer leave the on-disk free list naming a written page, a B-tree split reserves before writing, a refused query fails instead of answering unsorted or empty, a statement that fails mid-way in a transaction makes COMMIT roll back. Writer state per call / per thread (ADR-0005); WAL slots claimed by CAS. **1631 tests**, mutation-verified (one survivor, leak-only). Binary 272,008 B DCE-on; +0.16 % instructions per INSERT in a transaction. A failed `fdatasync` was reported as durability at ten sites (`wal_commit` unlinked the WAL over unsynced pages); all checked, `patra_commit` rolls back what it cannot make durable, and the failure is sticky on the handle (`DB_SYNC_ERR`). A transaction with a write it could not log is rolled back at COMMIT (it committed in part). Three row-loss paths closed (ALTER staged `TBL_NROWS` rows only; ALTER could commit root 0; `SELECT *` sized from a low count); `CREATE TABLE t ()` no longer makes the file unopenable; duplicate column names refused. Headers verified per statement after recovery, and by `patra_open` under its lock after recovery (Windows: unlocked). 0 handle / result set refused; `wal_rollback` keeps a WAL it cannot read; FIFO / directory WAL paths refused without hanging; first writer assigns a missing `HDR_DBID`. RENAME COLUMN and VACUUM commit through `_db_hdr_commit`. Test-only sync and allocation seams (architecture notes 004, 005); CI dangling-link gate and `cyrius test --timeout`. +218 tests over 1.16.1, every fix mutation-verified; two adversarial reviews (21 findings: 18 fixed, 3 recorded). |
@@ -781,7 +799,7 @@ Full history in [`../../CHANGELOG.md`](../../CHANGELOG.md). Pre-1.6 narrative in
 - **CI**: x86_64 Linux only — `cyrius build` + **format check** (per-file loop, added v1.13.7) + lint (**hard gate** since v1.10.1 — any `warn` fails) + **no raw syscalls / numeric open flags** (v1.15.0; comment-stripped scan of `src/`, `tests/`, `fuzz/`, `programs/`, mutation-verified) + 1645 tests (`--timeout 300`; count at v1.16.3) + the **no-`patra_init` process** (`patra_uninit.tcyr`, v1.16.1) + **test-count-vs-state.md assertion** + 8 fuzz + 43 benchmarks + libro + vidya integration + **`dist/` sync and sidecar-leaf check** + **no dangling links between the docs** (v1.16.2; out-of-repo links skipped, four historical ones allowlisted) + **version consistency** across VERSION / cyrius.cyml / CHANGELOG top entry / README `[deps.patra]` tag / dist header (the last four added v1.13.7, each verified to fail when it should). Toolchain installed via the upstream `install.sh`, version sourced from the `cyrius.cyml` pin; deps resolved via `cyrius deps`.
 - **Release**: tag-driven on `[0-9]*`; verifies `VERSION == cyrius.cyml package.version == git tag`; ships source tarball + `dist/patra.cyr` bundle + DCE demo binary + SHA256SUMS. Same `install.sh` toolchain step as CI.
 - **aarch64**: verified by hand, not in CI. Since v1.15.0 the unit suite, all 8 fuzz harnesses and the 3 programs build warning-free for aarch64 and run green under `qemu-aarch64` on the verification host (re-run at v1.16.3 under 6.7.10: 1645 / 1645, `patra_uninit` 18 / 18, 8 / 8, 3 / 3); the bench builds but was not run there. Before 1.15.0 most of them did not compile there.
-- **agnos, macOS (x86_64 + arm64 Mach-O)**: cross-built by hand, never run in this repo (the cyrius 6.7.14 stdlib lane ran the suite on ecb and ach at v1.16.4: 1,566 / 1,567, one fixture row, recorded in CHANGELOG [1.16.4]). **Windows PE**: cross-built by hand; the suite run on Windows hardware (cass) at v1.16.3, built by cyrius 6.7.12, and at v1.16.4, built by the cyrius 6.7.14 release tree (1,565 / 1,565) — not in CI. Per-target gaps: [`roadmap.md` *Platforms*](roadmap.md#platforms--what-patra-guarantees-where).
+- **agnos, macOS (x86_64 + arm64 Mach-O)**: cross-built by hand, never run in this repo (the cyrius 6.7.14 stdlib lane ran the suite on ecb and ach at v1.16.4: 1,566 / 1,567, one fixture row, recorded in CHANGELOG [1.16.4]; the cyrius 6.7.15 platform lane at v1.16.5: 1,568 / 1,568, every other harness passing). **Windows PE**: cross-built by hand; the suite run on Windows hardware (cass) at v1.16.3, built by cyrius 6.7.12, and at v1.16.4, built by the cyrius 6.7.14 release tree (1,565 / 1,565); at v1.16.5 every other harness too, but `fuzz_bytes` (CHANGELOG [1.16.5] *Found*) — not in CI. Per-target gaps: [`roadmap.md` *Platforms*](roadmap.md#platforms--what-patra-guarantees-where).
 
 ## Known footguns / latent issues
 

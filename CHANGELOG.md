@@ -5,6 +5,76 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.16.5] - 2026-10-18 — the harnesses' fixtures are per-target: the macOS sync row through the seam, one scratch-path helper
+
+Patch release, tests only: cyrius issues `2026-10-17-patra-failed-sync-row-assumes-dev-null-refuses-fsync-on-macos` and
+`2026-10-17-patra-other-suites-open-tmp-paths-on-windows` (cyrius `docs/development/issues/`, both recorded in 1.16.4's
+*Found* section and measured by the cyrius 6.7.14 stdlib lane; fixed by the cyrius 6.7.15 platform lane). No source
+change: `dist/patra.cyr` differs from 1.16.4's only in its `# Version:` line, so the library's builds are byte-identical
+to 1.16.4's on every target.
+
+Gates: **1,645 assertions** on Linux (unchanged) · `patra_uninit.tcyr` 18 / 18 · raw-include 6 / 6 · 8 / 8 fuzz · 43
+benchmarks · libro 15/15 · vidya 19/19 · fmt + lint 0-warn · no raw syscalls · **no bare `/tmp` literal (new)** ·
+`dist/` in sync, sidecar 14 == 14 declared — run by the repo's own CI steps in an isolated copy under the pinned 6.7.10.
+On aarch64 under `qemu-aarch64`: 1,645 / 1,645, every other harness passing. **On macOS hardware (ecb arm64, ach
+x86_64): 1,568 / 1,568** (1.16.4: 1,566 / 1,567). **On Windows hardware (cass): `patra_uninit.tcyr` 18 / 18 (was
+15 / 18), `patra_raw_include.tcyr` 6 / 6 (was 0 / 6)**, the suite 1,565 / 1,565 as before.
+
+**Toolchain: the pin stays at cyrius 6.7.10.** The macOS and Windows runs were built by the cyrius 6.7.15 platform lane
+tree (its `lib/`); nothing here needs a newer cyrius to build.
+
+### Fixed
+
+- **macOS: `patra_hdr_write: a refused sync is an error` failed** on ecb and ach (1,566 / 1,567): the row opens
+  `/dev/null` as a device that takes a seek and a write but refuses the sync — Linux's `/dev/null`, whose
+  `fdatasync` is EINVAL. macOS's answers 0 (the new premise row, on ecb and ach), so `patra_hdr_write` returned
+  `PATRA_OK`. On macOS `test_failed_sync_reported` now asserts that premise (`_pt_fdatasync` of `/dev/null` is 0: +1
+  row there) and drives the bare-helper row through the test-only sync seam (`_sync_fail(nul, 0)`, then
+  `_sync_ok()`), as the statement rows already were. A pipe is no substitute: macOS refuses its sync (ENOTSUP), but `patra_hdr_write` seeks first and a
+  pipe's seek fails, so the row would pass for the wrong reason. Linux and Windows keep the bare row unchanged; on
+  macOS the *nothing to sync is fine* row reads a sync that succeeded (its comment now says so).
+- **Windows: every harness but `patra.tcyr` opened `/tmp` paths.** 1.16.4's `_scr` (the literal on Linux, macOS and
+  agnos; the relative `<name>` on Windows, where `/tmp/<name>` is the drive-rooted `\tmp\<name>` and need not exist)
+  moves out of `tests/tcyr/patra.tcyr` into **`tests/scratch_path.cyr`**, a test-only include that needs nothing
+  before it, and every other `"/tmp/<name>"` literal goes through it: `patra_uninit.tcyr`, `patra_raw_include.tcyr`
+  (which now includes the bundle, `lib/assert.cyr` and the helper — the CI step copies it into its staging dir), the
+  six fuzz harnesses that write a file (`fuzz_btree`, `fuzz_bytes`, `fuzz_file`, `fuzz_jsonl`, `fuzz_sql`,
+  `fuzz_wal`: 13 literals), `tests/bcyr/patra.bcyr` and `programs/test_libro.cyr` / `test_vidya.cyr` — 20 literals
+  beside the suite's 18. On cass 1.16.4's `patra_uninit` failed its `patra_open` (*cannot open or create file*, 15 / 18,
+  exit 3) and the raw-include harness every row (0 / 6, exit 6); both pass now. Linux, macOS and agnos open the same
+  paths as before.
+
+### Added
+
+- **CI: *Scratch paths go through `_scr`*.** Every `"/tmp/` literal in `src/`, `tests/`, `fuzz/` and `programs/`
+  (comments stripped) must be the argument of `_scr`; a bare one fails the job, naming the file and line. A scan that
+  finds no `_scr` call at all fails too, so an emptied glob cannot pass. Checked by mutation: one literal unwrapped
+  fails it, under `bash -e` and `bash -eo pipefail` alike; 1.16.4's tree fails it on 20 literals.
+
+### Validation — macOS and Windows, on real hardware
+
+Every harness built by the cyrius 6.7.15 platform lane tree (against its `lib/`) and run from a scratch directory:
+
+- **ecb** (macOS 27, arm64) and **ach** (macOS 13, x86_64), alike: the suite **1,568 / 1,568**, `patra_uninit`
+  18 / 18, raw-include 6 / 6, 8 / 8 fuzz, libro 15/15, vidya 19/19, the demo and the benchmark exit 0. 1.16.4's suite
+  built the same way: 1,566 / 1,567 on both, the row above.
+- **cass** (Windows 11): the suite 1,565 / 1,565 (unchanged), `patra_uninit` **18 / 18** (1.16.4: 15 / 18, exit 3),
+  raw-include **6 / 6** (0 / 6, exit 6), libro 15/15 and vidya 19/19 (1.16.4: both crashed, 0xC0000005), seven of the
+  eight fuzz harnesses exit 0 (1.16.4: `fuzz_btree` and `fuzz_bytes` crashed, `fuzz_file` / `fuzz_jsonl` exited 10,
+  `fuzz_sql` 113, `fuzz_wal` 1 — their `/tmp` paths; `fuzz_pcache` and `fuzz_stmtseq`, which have none, 0), the
+  demo and the benchmark exit 0. `fuzz_bytes`: below.
+- Linux x86_64 1,645 / 1,645 and aarch64 1,645 / 1,645 (`qemu-aarch64`, every other harness passing), unchanged.
+
+### Found, not fixed — recorded
+
+- **`fuzz_bytes` plants its corruption at a heap address, not at the chain.** It takes the chain's first page from a
+  query result (`BR_PAGE`), which since 1.12.8 (`_rs_materialize`) holds the payload's heap pointer: each mutation is
+  written at `page_offset(<address>)`, far past the end of the file, and the chain is never touched — on every target
+  the harness has tested nothing since 1.12.8 (on Linux the page lands in a sparse file at offset ~5.8e17; on macOS
+  and under wine it exits 0 in seconds too). On Windows hardware, where its path now opens, the write past EOF makes
+  NTFS zero-fill the gap: on cass the run sat ~17 minutes in one write that `taskkill` could not interrupt and left a
+  50,465,939,456-byte file. **Do not run `fuzz_bytes` on Windows hardware until it is fixed.** Reported to cyrius (the fold's follow-up).
+
 ## [1.16.4] - 2026-10-17 — the suite runs on Windows: per-target scratch paths and the NUL device
 
 Patch release, tests only: cyrius issue `2026-10-16-patra-suite-dev-null-fixture-fails-on-windows` (cyrius

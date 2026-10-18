@@ -1,6 +1,6 @@
 # Patra Development Roadmap
 
-> **Last refreshed**: 2026-10-17 (v1.16.4)
+> **Last refreshed**: 2026-10-18 (v1.16.5)
 >
 > Thin **backlog index**, **forward-looking only**. Nothing shipped belongs here —
 > per-release detail lives in [`../../CHANGELOG.md`](../../CHANGELOG.md), the
@@ -8,12 +8,21 @@
 > in [`state.md`](state.md). Open consumer requests live one-file-each in
 > [`requests/`](requests/); upstream cyrius bugs in [`issues/`](issues/).
 
-> **Current**: **v1.16.4**, cyrius pin **6.7.10**, zero `[deps.*]` git blocks.
+> **Current**: **v1.16.5**, cyrius pin **6.7.10**, zero `[deps.*]` git blocks.
 > Gates green: **1645 tests** (+ 6 raw-include, + 18 in the no-`patra_init`
 > process), **8/8 fuzz**, 43 benchmarks, lint 0-warn, fmt clean, libro 15/15,
 > vidya 19/19, `dist/` in sync (**14** sidecar leaves), no raw syscalls or
-> numeric open flags, no dangling doc links. Binary **272,008 B** DCE-on /
-> 411,272 B DCE-off.
+> numeric open flags, no bare `/tmp` literal, no dangling doc links. Binary
+> **272,008 B** DCE-on / 411,272 B DCE-off.
+>
+> **v1.16.5 makes the harnesses' fixtures per-target** (cyrius issues
+> `2026-10-17-patra-failed-sync-row-assumes-dev-null-refuses-fsync-on-macos`,
+> `2026-10-17-patra-other-suites-open-tmp-paths-on-windows`): the failed-sync
+> test's bare-helper row runs through the sync seam on macOS, which syncs
+> `/dev/null`, and every harness takes its scratch paths from
+> `tests/scratch_path.cyr` (CI refuses a bare `/tmp` literal). **ecb / ach
+> 1,568 / 1,568; on cass `patra_uninit` 18 / 18 and raw-include 6 / 6.** Tests
+> only; CHANGELOG [1.16.5].
 >
 > **v1.16.4 makes the suite's fixtures per-target** (cyrius issue
 > `2026-10-16-patra-suite-dev-null-fixture-fails-on-windows`): its `/tmp/<name>`
@@ -270,13 +279,13 @@ are **not scheduled**. Each states the trigger that would move it.
 - **aarch64 in CI.** Every harness builds and passes on aarch64 since 1.15.0,
   checked by hand under `qemu-aarch64`; CI does not run it. See *Platforms*.
   *Trigger*: an aarch64 consumer. *Low.*
-- **The fixtures outside `patra.tcyr`.** On macOS one row of the suite fails
-  (`patra_hdr_write: a refused sync is an error`: macOS syncs `/dev/null`), and on
-  Windows the other harnesses still open `/tmp` paths (`patra_uninit.tcyr` 15 / 18
-  and `patra_raw_include.tcyr` 0 / 6 on cass; the fuzz harnesses, the benchmark
-  and the programs carry the same literals). Both reported to cyrius at v1.16.4,
-  which places fold follow-ups (CHANGELOG [1.16.4] *Found*). *Trigger*: that
-  placement. *Small.*
+- **`fuzz_bytes` corrupts a heap address, not the chain.** It takes the chain's
+  first page from a query result, whose `BR_PAGE` has held the payload's heap
+  pointer since 1.12.8, so its five mutations land far past the end of the file
+  on every target and test nothing; on Windows hardware the write past EOF made
+  NTFS zero-fill a 50 GB file (cass, v1.16.5's run). Reported to cyrius at
+  v1.16.5 (CHANGELOG [1.16.5] *Found*). Do not run it on Windows hardware until
+  it is fixed. *Trigger*: cyrius's placement. *Small.*
 - **`docs/guides/` scaffolding.** `programs/` satisfies the examples half, which
   the standard permits. *Trigger*: a consumer asking for an integration
   walkthrough. *Low.*
@@ -305,15 +314,17 @@ what would close it; the Windows one is in *To file upstream*. Refreshed at
 v1.16.3 (cyrius 6.7.10): every build row re-run, all warning-free; the suite
 built for Windows by cyrius 6.7.12 and run on Windows hardware (cass). At
 v1.16.4 the suite ran on cass again (1,565 / 1,565) and on macOS (ecb, ach),
-built by the cyrius 6.7.14 release tree.
+built by the cyrius 6.7.14 release tree; at v1.16.5 every harness ran on ecb,
+ach and cass, built by the cyrius 6.7.15 platform lane tree, with no failure but
+`fuzz_bytes` on cass (*Deferred*).
 
 | Target | Built | Run | Flush | Writers serialized | WAL recovery (open and every statement) | `O_NOFOLLOW` |
 |---|---|---|---|---|---|---|
 | Linux x86_64 | CI | CI, full suite | fdatasync | yes (blocking `flock`) | yes | enforced |
 | Linux aarch64 | by hand | full suite, the no-`patra_init` test, 8/8 fuzz, 3/3 programs under `qemu-aarch64` (1.16.2) | fdatasync | yes | yes | enforced |
-| macOS x86_64 / arm64 | by hand (`CYRIUS_MACHO=1` / `CYRIUS_MACHO_ARM=1` to `cycc` / `cycc_aarch64`) | the suite once, on ach and ecb (1.16.4, cyrius 6.7.14 release tree): 1,566 / 1,567, one fixture row (*Deferred*) | fdatasync (BSD 187) | yes (BSD `flock`) | yes | enforced |
+| macOS x86_64 / arm64 | by hand (`CYRIUS_MACHO=1` / `CYRIUS_MACHO_ARM=1` to `cycc` / `cycc_aarch64`) | on ach and ecb: the suite at 1.16.4 (cyrius 6.7.14 release tree), 1,566 / 1,567, one fixture row; every harness at 1.16.5 (cyrius 6.7.15 lane tree): the suite 1,568 / 1,568, the no-`patra_init` test, raw-include, 8/8 fuzz, 3/3 programs, the benchmark | fdatasync (BSD 187) | yes (BSD `flock`) | yes | enforced |
 | agnos x86_64 | by hand (`--agnos`) | **not run** | whole-filesystem sync | yes on agnos ≥ 1.57.7 (`flock`#59 waits); ⚠ **no** before | yes | bridged to `AO_NOFOLLOW` (cyrius 6.6.4) |
-| Windows (PE) | by hand (`--win`) | the suite on cass: 1.16.3 built by cyrius 6.7.12, 1,556 / 1,565; 1.16.4 built by the cyrius 6.7.14 release tree, 1,565 / 1,565 | `FlushFileBuffers` (cyrius 6.6.9) | ⛔ **no** before cyrius 6.7.12; from 6.7.12 `LockFileEx`, ⚠ but before 6.7.13 a waiting handle can write mid-transaction | ⛔ **never** before cyrius 6.7.12; yes from 6.7.12 | enforced (cyrius 6.6.9) |
+| Windows (PE) | by hand (`--win`) | the suite on cass: 1.16.3 built by cyrius 6.7.12, 1,556 / 1,565; 1.16.4 built by the cyrius 6.7.14 release tree, 1,565 / 1,565; 1.16.5 (cyrius 6.7.15 lane tree): the suite 1,565 / 1,565, the no-`patra_init` test 18 / 18, raw-include 6 / 6 | `FlushFileBuffers` (cyrius 6.6.9) | ⛔ **no** before cyrius 6.7.12; from 6.7.12 `LockFileEx`, ⚠ but before 6.7.13 a waiting handle can write mid-transaction | ⛔ **never** before cyrius 6.7.12; yes from 6.7.12 | enforced (cyrius 6.6.9) |
 
 Two notes apply across the table. **Recovery replays a WAL only while the
 replaying process holds `LOCK_EX`** — the flock call returned 0 — because only
