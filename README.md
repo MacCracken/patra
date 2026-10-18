@@ -205,7 +205,9 @@ true snapshots as of v1.12.8. Every `BYTES` / `TEXT` cell is materialized into
 an owned buffer *while the query still holds its shared flock*;
 `patra_result_read_bytes` / `patra_result_read_text` are pure copies from that
 snapshot, unaffected by any writer that later updates or deletes the rows.
-(Buffers are freed by `patra_result_free`.)
+(Buffers are freed by `patra_result_free`.) A cell whose chain is malformed keeps
+its row's length and reads as `PATRA_ERR_PAGE`, with nothing written (1.16.5; it
+read as an empty value from 1.12.8).
 
 ## Consumers
 

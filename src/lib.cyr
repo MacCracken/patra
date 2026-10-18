@@ -2695,7 +2695,11 @@ fn _rs_materialize(fd, hdr, rs): i64 {
                         if (mr == PATRA_ERR_IO) { mfail = 1; }
                         _pt_free(buf);
                         store64(ref + BR_PAGE, 0);
-                        store64(ref + BR_LEN, 0);
+                        # 1.16.5: a malformed chain keeps its BR_LEN, so the cell
+                        # reads as PATRA_ERR_PAGE (patra_result_read_bytes /
+                        # _read_text). Zeroing it read the value back as an
+                        # empty one, PATRA_OK, which it never was.
+                        if (mfail != 0) { store64(ref + BR_LEN, 0); }
                     }
                 } else {
                     store64(ref + BR_PAGE, 0);
