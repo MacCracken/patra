@@ -5,26 +5,61 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.16.5] - 2026-10-18 — the harnesses' fixtures are per-target: the macOS sync row through the seam, one scratch-path helper
+## [1.16.5] - 2026-10-18 — the harnesses' fixtures are per-target, and `fuzz_bytes` reaches the chain: a malformed BYTES / TEXT chain reads as `PATRA_ERR_PAGE`
 
-Patch release, tests only: cyrius issues `2026-10-17-patra-failed-sync-row-assumes-dev-null-refuses-fsync-on-macos` and
+Patch release: cyrius issues `2026-10-17-patra-failed-sync-row-assumes-dev-null-refuses-fsync-on-macos` and
 `2026-10-17-patra-other-suites-open-tmp-paths-on-windows` (cyrius `docs/development/issues/`, both recorded in 1.16.4's
-*Found* section and measured by the cyrius 6.7.14 stdlib lane; fixed by the cyrius 6.7.15 platform lane). No source
-change: `dist/patra.cyr` differs from 1.16.4's only in its `# Version:` line, so the library's builds are byte-identical
-to 1.16.4's on every target.
+*Found* section and measured by the cyrius 6.7.14 stdlib lane; fixed by the cyrius 6.7.15 platform lane), and
+`2026-10-18-patra-fuzz-bytes-plants-corruption-at-a-heap-address` (found while fixing them; fixed by the cyrius 6.7.15
+libfix lane). The repaired `fuzz_bytes` reaches the BYTES chain for the first time since 1.12.8, and two of its five
+mutations met read-path defects, fixed here: **`dist/patra.cyr` changes in `_bytes_read_chain` and `_rs_materialize`**
+(and its `# Version:` line).
 
-Gates: **1,645 assertions** on Linux (unchanged) · `patra_uninit.tcyr` 18 / 18 · raw-include 6 / 6 · 8 / 8 fuzz · 43
-benchmarks · libro 15/15 · vidya 19/19 · fmt + lint 0-warn · no raw syscalls · **no bare `/tmp` literal (new)** ·
-`dist/` in sync, sidecar 14 == 14 declared — run by the repo's own CI steps in an isolated copy under the pinned 6.7.10.
-On aarch64 under `qemu-aarch64`: 1,645 / 1,645, every other harness passing. **On macOS hardware (ecb arm64, ach
-x86_64): 1,568 / 1,568** (1.16.4: 1,566 / 1,567). **On Windows hardware (cass): `patra_uninit.tcyr` 18 / 18 (was
-15 / 18), `patra_raw_include.tcyr` 6 / 6 (was 0 / 6)**, the suite 1,565 / 1,565 as before.
+Gates: **1,677 assertions** on Linux (was 1,645: +9 `test_bytes_chain_overrun_refused`, +23
+`test_malformed_chain_read_refused`) · `patra_uninit.tcyr` 18 / 18 · raw-include 6 / 6 · 8 / 8 fuzz, **`fuzz_bytes`
+now reaching its target** · 43 benchmarks · libro 15/15 · vidya 19/19 · fmt + lint 0-warn · no raw syscalls · **no bare
+`/tmp` literal (new)** · `dist/` in sync, sidecar 14 == 14 declared — run by the repo's own CI steps in an isolated copy
+under the pinned 6.7.10. On aarch64: 1,677 / 1,677 under `qemu-aarch64` and on real hardware (pi), every other
+harness passing. **On macOS hardware (ecb arm64, ach x86_64): 1,600 / 1,600** (1.16.4: 1,566 / 1,567). **On Windows
+hardware (cass): `patra_uninit.tcyr` 18 / 18 (was 15 / 18), `patra_raw_include.tcyr` 6 / 6 (was 0 / 6)**, the suite
+1,597 / 1,597, all 8 fuzz harnesses exit 0.
 
-**Toolchain: the pin stays at cyrius 6.7.10.** The macOS and Windows runs were built by the cyrius 6.7.15 platform lane
-tree (its `lib/`); nothing here needs a newer cyrius to build.
+**Toolchain: the pin stays at cyrius 6.7.10.** The macOS, Windows and aarch64 runs were built by cyrius 6.7.15 lane
+trees (their `lib/`); nothing here needs a newer cyrius to build.
 
 ### Fixed
 
+- **A malformed BYTES / TEXT chain read back as an empty value, `PATRA_OK`** (since 1.12.8). `_rs_materialize`
+  snapshots each chain cell under the query's flock; for a chain it could not read (`_bytes_read_chain`
+  `PATRA_ERR_PAGE`: a bad `BY_TYPE`, an oversized or negative `BY_LEN`, a `BY_NEXT` out of the file) it zeroed the
+  cell's length as well as its pointer, so `patra_result_get_bytes_len` / `_get_text_len` read 0 and
+  `patra_result_read_bytes` / `_read_text` answered `PATRA_OK` with nothing written — where both document
+  `PATRA_ERR_PAGE` on a malformed chain, and the function's own header says the length is unchanged. The cell now
+  keeps the row's length beside the null pointer, so the read answers **`PATRA_ERR_PAGE`**, writing nothing; the query
+  still answers and its other cells read as before. A refused buffer still fails the query (`PATRA_ERR_IO`, 1.16.2).
+  New `test_malformed_chain_read_refused` (+23: a BYTES and a TEXT table, one row of each corrupted); with the fix
+  reverted, 4 fail.
+- **A chain looping back read as `PATRA_OK` with the wrong bytes.** `_bytes_read_chain` cut a page holding more than the
+  ref had left to the bytes left and walked on. The writer's pages sum to the ref's length exactly, so no legitimate
+  chain needs that: on a two-page blob (4,072 + 928 bytes) whose head's `BY_NEXT` names the head, the walk read the head
+  twice and answered `PATRA_OK` — the head's first bytes where the tail's belong, through the public read too. Such a
+  page is now **`PATRA_ERR_PAGE`**; every page adds at least one byte, so this also ends any cycle within the ref's
+  length. A ref shorter than its chain (the same check) is refused too, where it was read truncated. New
+  `test_bytes_chain_overrun_refused` (+9); with the fix reverted, 2 fail.
+- **`fuzz_bytes` corrupted a heap address, not the chain — it had tested nothing since 1.12.8.** It took the chain's
+  head page from a query result, whose `BR_PAGE` has held the payload's heap pointer since 1.12.8, so each mutation was
+  written at `page_offset(<address>)` (~5.7e17 bytes into a sparse file on Linux) and the run passed on every target.
+  On Windows hardware, whose files are not sparse, NTFS zero-filled the gap: on cass one write sat ~17 minutes that
+  `taskkill` could not interrupt and left a 50,465,939,456-byte file. The head now comes from the **row's on-disk
+  bytes-ref** (the table's data page), and each section proves it reached its target: the head is a `PAGE_BYTES` page
+  of the file before anything is written (`page_read_checked`), the mutation reads back after, and the file stays within
+  `HDR_PGCOUNT` pages (`page_offset(HDR_PGCOUNT)`) before and after the reads. A baseline section reads the intact blob
+  byte for byte; each of the five mutations (`BY_TYPE` = `PAGE_DATA`, `BY_LEN` 999,999,999, `BY_NEXT` = the head,
+  `BY_NEXT` 999,999, `BY_LEN` -1) must be refused — the chain walk and `patra_result_read_bytes` `PATRA_ERR_PAGE`, the
+  cell keeping the row's length, nothing written. A failure exits with its invariant's id and names it on stderr.
+  Measured: on the 1.16.5 release library (`e36f202`) it fails at once (exit 15: the corrupt cell's length read 0);
+  re-pointed at the query result's heap pointer (the old source) it fails (exit 7), and the old unguarded mutation
+  fails the file-size row (exit 18: 574,752,544,404,873,216 bytes against 24,576).
 - **macOS: `patra_hdr_write: a refused sync is an error` failed** on ecb and ach (1,566 / 1,567): the row opens
   `/dev/null` as a device that takes a seek and a write but refuses the sync — Linux's `/dev/null`, whose
   `fdatasync` is EINVAL. macOS's answers 0 (the new premise row, on ecb and ach), so `patra_hdr_write` returned
@@ -51,29 +86,31 @@ tree (its `lib/`); nothing here needs a newer cyrius to build.
   finds no `_scr` call at all fails too, so an emptied glob cannot pass. Checked by mutation: one literal unwrapped
   fails it, under `bash -e` and `bash -eo pipefail` alike; 1.16.4's tree fails it on 20 literals.
 
-### Validation — macOS and Windows, on real hardware
+### Validation — aarch64, macOS and Windows, on real hardware
 
-Every harness built by the cyrius 6.7.15 platform lane tree (against its `lib/`) and run from a scratch directory:
+Every harness built by a cyrius 6.7.15 lane tree (against its `lib/`) and run from a scratch directory:
 
-- **ecb** (macOS 27, arm64) and **ach** (macOS 13, x86_64), alike: the suite **1,568 / 1,568**, `patra_uninit`
+- **ecb** (macOS 27, arm64) and **ach** (macOS 13, x86_64), alike: the suite **1,600 / 1,600**, `patra_uninit`
   18 / 18, raw-include 6 / 6, 8 / 8 fuzz, libro 15/15, vidya 19/19, the demo and the benchmark exit 0. 1.16.4's suite
-  built the same way: 1,566 / 1,567 on both, the row above.
-- **cass** (Windows 11): the suite 1,565 / 1,565 (unchanged), `patra_uninit` **18 / 18** (1.16.4: 15 / 18, exit 3),
-  raw-include **6 / 6** (0 / 6, exit 6), libro 15/15 and vidya 19/19 (1.16.4: both crashed, 0xC0000005), seven of the
-  eight fuzz harnesses exit 0 (1.16.4: `fuzz_btree` and `fuzz_bytes` crashed, `fuzz_file` / `fuzz_jsonl` exited 10,
+  built the same way: 1,566 / 1,567 on both, the macOS row above. `fuzz_bytes` re-pointed at the heap pointer fails
+  there too (exit 7).
+- **cass** (Windows 11): the suite **1,597 / 1,597**, `patra_uninit` **18 / 18** (1.16.4: 15 / 18, exit 3),
+  raw-include **6 / 6** (0 / 6, exit 6), libro 15/15 and vidya 19/19 (1.16.4: both crashed, 0xC0000005), **all 8 fuzz
+  harnesses exit 0** (1.16.4: `fuzz_btree` and `fuzz_bytes` crashed, `fuzz_file` / `fuzz_jsonl` exited 10,
   `fuzz_sql` 113, `fuzz_wal` 1 — their `/tmp` paths; `fuzz_pcache` and `fuzz_stmtseq`, which have none, 0), the
-  demo and the benchmark exit 0. `fuzz_bytes`: below.
-- Linux x86_64 1,645 / 1,645 and aarch64 1,645 / 1,645 (`qemu-aarch64`, every other harness passing), unchanged.
+  demo and the benchmark exit 0. `fuzz_bytes` ran under a watchdog (a time limit and a 10 MB cap on its file): exit 0,
+  its database never past 16 KB when polled, the drive's free space unchanged.
+- **pi** (aarch64 Linux): the suite **1,677 / 1,677**, `patra_uninit` 18 / 18, raw-include 6 / 6, 8 / 8 fuzz, libro 15/15,
+  vidya 19/19, the demo and the benchmark exit 0.
+- Linux x86_64 1,677 / 1,677, aarch64 1,677 / 1,677 under `qemu-aarch64` and the Windows build under wine (1,597 /
+  1,597), every other harness passing.
 
 ### Found, not fixed — recorded
 
-- **`fuzz_bytes` plants its corruption at a heap address, not at the chain.** It takes the chain's first page from a
-  query result (`BR_PAGE`), which since 1.12.8 (`_rs_materialize`) holds the payload's heap pointer: each mutation is
-  written at `page_offset(<address>)`, far past the end of the file, and the chain is never touched — on every target
-  the harness has tested nothing since 1.12.8 (on Linux the page lands in a sparse file at offset ~5.8e17; on macOS
-  and under wine it exits 0 in seconds too). On Windows hardware, where its path now opens, the write past EOF makes
-  NTFS zero-fill the gap: on cass the run sat ~17 minutes in one write that `taskkill` could not interrupt and left a
-  50,465,939,456-byte file. **Do not run `fuzz_bytes` on Windows hardware until it is fixed.** Reported to cyrius (the fold's follow-up).
+- **A BYTES / TEXT row ref whose length exceeds the file reads back as an empty value, `PATRA_OK`.** 1.14.0's clamp in
+  `_rs_materialize` (a length past `HDR_PGCOUNT * BY_DATA_MAX`) zeroes the cell's length with its pointer, so the
+  shape fixed above for a malformed chain remains for a malformed ref. What it should answer — `PATRA_ERR_PAGE` with a
+  length the file cannot hold, or a distinct marker — is open. Reported to cyrius (the fold's follow-up).
 
 ## [1.16.4] - 2026-10-17 — the suite runs on Windows: per-target scratch paths and the NUL device
 

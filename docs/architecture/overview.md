@@ -59,7 +59,10 @@ pages. `length` is the total payload, not per-page; a row ref of
 - **Read**: `_bytes_read_chain` walks the chain through
   `page_read_checked` (bounds-checks) and verifies each page's
   `BY_TYPE` marker; rejects a chain with oversized or negative
-  per-page length.
+  per-page length, or (v1.16.5) one whose pages add up to more than
+  the row's length — a `BY_NEXT` looping back. A query snapshots each
+  cell (`_rs_materialize`); a cell whose chain is malformed keeps the
+  row's length and reads as `PATRA_ERR_PAGE` (v1.16.5).
 - **Free**: `_bytes_free_chain` walks and releases each page onto the
   free list. Invoked on DELETE, DROP TABLE, and ALTER TABLE DROP
   COLUMN (when the dropped column is BYTES).
