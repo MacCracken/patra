@@ -1,9 +1,31 @@
 # fuzz_bytes.fcyr -- malformed BYTES chain invariants
 #
-# Builds a table with a BYTES column, plants chain-corrupting mutations on
-# the blob's head page, and asserts Patra returns cleanly rather than
-# crashing, hanging, or reading past the chain. The read path must survive
-# bad BY_TYPE markers, overflow BY_LEN values, cycles, and NULL children.
+# Builds a table with a BYTES column whose value spans two chain pages, plants
+# one chain-corrupting mutation on the blob's head page per section, and
+# asserts that Patra reports the malformed chain rather than crashing, hanging,
+# reading past the chain or answering with bytes it never read: the walk
+# answers PATRA_ERR_PAGE, the query still answers, the cell keeps the row's
+# length, and patra_result_read_bytes answers PATRA_ERR_PAGE, writing nothing.
+# The read path must refuse a bad BY_TYPE marker, an oversized or negative
+# BY_LEN, a BY_NEXT looping back and a BY_NEXT past the end of the file.
+#
+# 1.16.5: the head page comes from the ROW's on-disk bytes-ref (the table's
+# data page), never from a query result -- since 1.12.8 a result set's BR_PAGE
+# holds the payload's heap snapshot, so every mutation was written at
+# page_offset(<that address>), far past the end of the file, and the harness
+# tested nothing (on Windows, whose files are not sparse, one run wrote 50 GB).
+# Each section now proves it reached its target: the head is a PAGE_BYTES page
+# of the file before anything is written, the mutation reads back after, and
+# the file stays within HDR_PGCOUNT pages.
+#
+# Exit 0 = all pass. Non-zero = the invariant that failed, also named on
+# stderr: k for the intact blob (the baseline), N*10 + k for mutation N (1..5):
+#   k = 1 the seed failed          2 the head is not a chain page of the file
+#       3 the mutation did not land  4 the query failed
+#       5 the length is not the row's
+#       6 the read was not refused (or wrote)
+#       7 the chain walk was not refused
+#       8 the file grew past HDR_PGCOUNT pages
 
 include "src/lib.cyr"
 include "tests/scratch_path.cyr"
@@ -16,21 +38,58 @@ var fpath = _scr("/tmp/patra_fuzz_bytes.patra");
 
 # Module-level state shared by the seed/read helpers. Vars must be
 # declared before any function that references them.
+var _g_sz = 5000;   # two chain pages: 4072 + 928 bytes
 var _g_db = 0;
 var _g_fp = 0;
+var _g_payload = 0;
 
 fn _cleanup() { xunlink(fpath); return 0; }
 
+# Name the failed invariant on stderr and exit with its id.
+fn _fail(code, what) {
+    eprint("fuzz_bytes: FAIL ", 17);
+    efmt_int(code);
+    eprint(": ", 2);
+    eprint(what, strlen(what));
+    eprint("\n", 1);
+    sys_exit(code);
+    return 0;
+}
+
+# The chain head the ROW names: column 1's bytes-ref in the only row of the
+# table's data page, read from the file. 0 when the file does not hold the
+# row the seed wrote.
+fn _row_chain_head(fd): i64 {
+    var hdr = pg_alloc();
+    var buf = pg_alloc();
+    var head = 0;
+    if (patra_hdr_read(fd, hdr) == PATRA_OK) {
+        var root = load64(_tbl_entry(hdr, 0) + TBL_ROOT);
+        if (page_read_checked(fd, hdr, root, buf) == PATRA_OK) {
+            if (load64(buf + DP_TYPE) == PAGE_DATA) {
+                if (load64(buf + DP_NROWS) == 1) {
+                    var off = row_col_size(COL_STR);   # column 0 is the STR hash
+                    if (row_read_bytes_len(buf + DP_DATA, off) == _g_sz) {
+                        head = row_read_bytes_page(buf + DP_DATA, off);
+                    }
+                }
+            }
+        }
+    }
+    pg_free(buf);
+    pg_free(hdr);
+    return head;
+}
+
 # Insert a single (hash STR, content BYTES) row with a deterministic
-# payload, return the first chain page of the content column.
-fn _seed_one_blob() {
+# payload; leave the handle in _g_db and the chain's head page in _g_fp.
+fn _seed_one_blob(sect) {
     _cleanup();
     var db = patra_open(fpath);
-    patra_exec(db, "CREATE TABLE t (hash STR, content BYTES)");
-
-    var sz = 5000;  # two chain pages
-    var payload = fl_alloc(sz);
-    for (var i = 0; i < sz; i = i + 1) { store8(payload + i, i & 255); }
+    if (db == 0) { _fail(sect * 10 + 1, "patra_open"); }
+    if (patra_exec(db, "CREATE TABLE t (hash STR, content BYTES)") != PATRA_OK) {
+        _fail(sect * 10 + 1, "CREATE TABLE");
+    }
 
     var types = fl_alloc(16);
     var ivals = fl_alloc(16);
@@ -44,86 +103,159 @@ fn _seed_one_blob() {
     store64(sptrs + 0, "h");
     store64(slens + 0, 1);
     store64(types + 8, COL_BYTES);
-    store64(bptrs + 8, payload);
-    store64(blens + 8, sz);
-    patra_insert_row(db, "t", 1, 2, types, ivals, sptrs, slens, bptrs, blens);
-
-    var rs = patra_query(db, "SELECT * FROM t");
-    var data = load64(rs + RS_DATA);
-    var first_pg = load64(data + _rs_field_off(rs, 1) + BR_PAGE);
-    patra_result_free(rs);
-
+    store64(bptrs + 8, _g_payload);
+    store64(blens + 8, _g_sz);
+    var ir = patra_insert_row(db, "t", 1, 2, types, ivals, sptrs, slens, bptrs, blens);
     fl_free(types); fl_free(ivals); fl_free(sptrs);
-    fl_free(slens); fl_free(bptrs); fl_free(blens); fl_free(payload);
-    # Return (db handle, first_pg) via module-level vars -- caller closes.
+    fl_free(slens); fl_free(bptrs); fl_free(blens);
+    if (ir != PATRA_OK) { _fail(sect * 10 + 1, "patra_insert_row"); }
+
     _g_db = db;
-    _g_fp = first_pg;
+    _g_fp = _row_chain_head(_db_fd(db));
+    if (_g_fp == 0) { _fail(sect * 10 + 2, "the row names no chain head in the file"); }
     return 0;
 }
 
-fn _try_read() {
-    var rs = patra_query(_g_db, "SELECT * FROM t");
-    if (rs == 0) { return 0; }
-    var out = fl_alloc(16384);
-    memset(out, 0, 16384);
-    # Ignore return -- the invariant is "don't crash / hang".
-    patra_result_read_bytes(_g_db, rs, 0, 1, out);
-    fl_free(out);
-    patra_result_free(rs);
+# Overwrite the i64 at `field` of the chain's head page with `value`, after
+# checking the head is a chain page of the file -- a page number that misses
+# fails here, before anything is written -- and read it back after.
+fn _mutate(sect, field, value) {
+    var fd = _db_fd(_g_db);
+    var hdr = pg_alloc();
+    var buf = pg_alloc();
+    if (patra_hdr_read(fd, hdr) != PATRA_OK) { _fail(sect * 10 + 2, "the header does not read"); }
+    if (page_read_checked(fd, hdr, _g_fp, buf) != PATRA_OK) {
+        _fail(sect * 10 + 2, "the chain head is not a page of the file");
+    }
+    if (load64(buf + BY_TYPE) != PAGE_BYTES) {
+        _fail(sect * 10 + 2, "the chain head is not a BYTES page");
+    }
+    store64(buf + field, value);
+    if (page_write(fd, _g_fp, buf) != PATRA_OK) { _fail(sect * 10 + 3, "the mutation was not written"); }
+    memset(buf, 0, PAGE_SIZE);
+    if (page_read_checked(fd, hdr, _g_fp, buf) != PATRA_OK) {
+        _fail(sect * 10 + 3, "the mutated page does not read back");
+    }
+    if (load64(buf + field) != value) { _fail(sect * 10 + 3, "the mutation did not land"); }
+    pg_free(buf);
+    pg_free(hdr);
     return 0;
 }
+
+# 1 when `n` bytes at `p` are all zero.
+fn _zeroed(p, n) {
+    for (var i = 0; i < n; i = i + 1) {
+        if (load8(p + i) != 0) { return 0; }
+    }
+    return 1;
+}
+
+# The file holds the header and HDR_PGCOUNT pages, no more: a mutation written
+# at any page number outside them grows it.
+fn _check_size(sect) {
+    var fd = _db_fd(_g_db);
+    var hdr = pg_alloc();
+    if (patra_hdr_read(fd, hdr) != PATRA_OK) { _fail(sect * 10 + 8, "the header does not read"); }
+    var lim = page_offset(load64(hdr + HDR_PGCOUNT));
+    pg_free(hdr);
+    var size = xlseek(fd, 0, 2);   # SEEK_END
+    if (size < 0) { _fail(sect * 10 + 8, "the file's size does not read"); }
+    if (size > lim) { _fail(sect * 10 + 8, "the file is larger than HDR_PGCOUNT pages"); }
+    return 0;
+}
+
+# Check the file's size, then read the blob back two ways -- the chain walk
+# from the head the row names, and the query -- and check the size again.
+# Section 0 (intact) must read the payload; a mutated chain must be refused
+# with nothing written.
+fn _check_read(sect) {
+    _check_size(sect);
+    var fd = _db_fd(_g_db);
+    var hdr = pg_alloc();
+    var out = fl_alloc(16384);
+    if (patra_hdr_read(fd, hdr) != PATRA_OK) { _fail(sect * 10 + 7, "the header does not read"); }
+    memset(out, 0, 16384);
+    var wr = _bytes_read_chain(fd, hdr, _g_fp, _g_sz, out);
+    if (sect == 0) {
+        if (wr != PATRA_OK) { _fail(7, "the intact chain does not walk"); }
+        if (memeq(out, _g_payload, _g_sz) == 0) { _fail(7, "the intact chain walks to other bytes"); }
+    } else {
+        if (wr != PATRA_ERR_PAGE) { _fail(sect * 10 + 7, "the chain walk was not refused"); }
+    }
+
+    var rs = patra_query(_g_db, "SELECT * FROM t");
+    if (rs == 0) { _fail(sect * 10 + 4, "the query failed"); }
+    if (patra_result_count(rs) != 1) { _fail(sect * 10 + 4, "the query lost the row"); }
+    if (patra_result_get_bytes_len(rs, 0, 1) != _g_sz) {
+        _fail(sect * 10 + 5, "the value's length is not the row's");
+    }
+    memset(out, 0, 16384);
+    var rr = patra_result_read_bytes(_g_db, rs, 0, 1, out);
+    if (sect == 0) {
+        if (rr != PATRA_OK) { _fail(6, "the intact blob does not read"); }
+        if (memeq(out, _g_payload, _g_sz) == 0) { _fail(6, "the intact blob reads other bytes"); }
+    } else {
+        if (rr != PATRA_ERR_PAGE) { _fail(sect * 10 + 6, "the read was not refused"); }
+        if (_zeroed(out, 16384) == 0) { _fail(sect * 10 + 6, "the refused read wrote"); }
+    }
+    patra_result_free(rs);
+    _check_size(sect);
+
+    fl_free(out);
+    pg_free(hdr);
+    return 0;
+}
+
+# The deterministic payload every section inserts.
+fn _make_payload() {
+    _g_payload = fl_alloc(_g_sz);
+    for (var i = 0; i < _g_sz; i = i + 1) { store8(_g_payload + i, i & 255); }
+    return 0;
+}
+
+_make_payload();
+
+# -- 0. The intact blob reads back (the baseline) ------------
+
+_seed_one_blob(0);
+_check_read(0);
+patra_close(_g_db);
 
 # -- 1. BY_TYPE overwritten to a non-PAGE_BYTES sentinel -----
 
-_seed_one_blob();
-var fd = _db_fd(_g_db);
-var buf = fl_alloc(PAGE_SIZE);
-page_read(fd, _g_fp, buf);
-store64(buf + BY_TYPE, PAGE_DATA);
-page_write(fd, _g_fp, buf);
-_try_read();
+_seed_one_blob(1);
+_mutate(1, BY_TYPE, PAGE_DATA);
+_check_read(1);
 patra_close(_g_db);
 
 # -- 2. BY_LEN set far past BY_DATA_MAX (must be rejected) ---
 
-_seed_one_blob();
-fd = _db_fd(_g_db);
-page_read(fd, _g_fp, buf);
-store64(buf + BY_LEN, 999999999);
-page_write(fd, _g_fp, buf);
-_try_read();
+_seed_one_blob(2);
+_mutate(2, BY_LEN, 999999999);
+_check_read(2);
 patra_close(_g_db);
 
 # -- 3. BY_NEXT pointing to itself (cycle) -------------------
 
-_seed_one_blob();
-fd = _db_fd(_g_db);
-page_read(fd, _g_fp, buf);
-store64(buf + BY_NEXT, _g_fp);
-page_write(fd, _g_fp, buf);
-_try_read();
+_seed_one_blob(3);
+_mutate(3, BY_NEXT, _g_fp);
+_check_read(3);
 patra_close(_g_db);
 
 # -- 4. BY_NEXT pointing past end-of-file --------------------
 
-_seed_one_blob();
-fd = _db_fd(_g_db);
-page_read(fd, _g_fp, buf);
-store64(buf + BY_NEXT, 999999);
-page_write(fd, _g_fp, buf);
-_try_read();
+_seed_one_blob(4);
+_mutate(4, BY_NEXT, 999999);
+_check_read(4);
 patra_close(_g_db);
 
 # -- 5. BY_LEN negative --------------------------------------
 
-_seed_one_blob();
-fd = _db_fd(_g_db);
-page_read(fd, _g_fp, buf);
-store64(buf + BY_LEN, 0 - 1);
-page_write(fd, _g_fp, buf);
-_try_read();
+_seed_one_blob(5);
+_mutate(5, BY_LEN, 0 - 1);
+_check_read(5);
 patra_close(_g_db);
 
-fl_free(buf);
+fl_free(_g_payload);
 _cleanup();
 sys_exit(0);
