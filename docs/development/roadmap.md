@@ -9,7 +9,7 @@
 > [`requests/`](requests/); upstream cyrius bugs in [`issues/`](issues/).
 
 > **Current**: **v1.16.5**, cyrius pin **6.7.10**, zero `[deps.*]` git blocks.
-> Gates green: **1677 tests** (+ 6 raw-include, + 18 in the no-`patra_init`
+> Gates green: **1752 tests** (+ 6 raw-include, + 18 in the no-`patra_init`
 > process), **8/8 fuzz**, 43 benchmarks, lint 0-warn, fmt clean, libro 15/15,
 > vidya 19/19, `dist/` in sync (**14** sidecar leaves), no raw syscalls or
 > numeric open flags, no bare `/tmp` literal, no dangling doc links. Binary
@@ -19,15 +19,18 @@
 > chain** (cyrius issues
 > `2026-10-17-patra-failed-sync-row-assumes-dev-null-refuses-fsync-on-macos`,
 > `2026-10-17-patra-other-suites-open-tmp-paths-on-windows`,
-> `2026-10-18-patra-fuzz-bytes-plants-corruption-at-a-heap-address`): the
+> `2026-10-18-patra-fuzz-bytes-plants-corruption-at-a-heap-address`,
+> `2026-10-18-patra-oversized-bytes-ref-reads-as-empty-value`): the
 > failed-sync test's bare-helper row runs through the sync seam on macOS, which
 > syncs `/dev/null`; every harness takes its scratch paths from
 > `tests/scratch_path.cyr` (CI refuses a bare `/tmp` literal); `fuzz_bytes` takes
 > its target from the row on disk (since 1.12.8 it wrote past the end of the
 > file and tested nothing), and the read-path defects it then met are fixed: a
 > malformed BYTES / TEXT chain reads as `PATRA_ERR_PAGE` (was an empty value, or
-> the wrong bytes, `PATRA_OK`). **1,677 tests; ecb / ach 1,600 / 1,600; cass
-> 1,597 / 1,597, `patra_uninit` 18 / 18, raw-include 6 / 6, 8 / 8 fuzz.**
+> the wrong bytes, `PATRA_OK`), and so does a ref naming more bytes than the file
+> can hold, its length -1 (was an empty value). **1,752 tests; ecb / ach
+> 1,675 / 1,675; cass 1,672 / 1,672, `patra_uninit` 18 / 18, raw-include 6 / 6,
+> 8 / 8 fuzz.**
 > CHANGELOG [1.16.5].
 >
 > **v1.16.4 makes the suite's fixtures per-target** (cyrius issue
@@ -285,12 +288,12 @@ are **not scheduled**. Each states the trigger that would move it.
 - **aarch64 in CI.** Every harness builds and passes on aarch64 since 1.15.0,
   checked by hand under `qemu-aarch64`; CI does not run it. See *Platforms*.
   *Trigger*: an aarch64 consumer. *Low.*
-- **A BYTES / TEXT row ref longer than the file reads as an empty value.**
-  1.14.0's clamp in `_rs_materialize` zeroes the length of a ref past
-  `HDR_PGCOUNT * BY_DATA_MAX`, so such a cell reads `PATRA_OK`, empty — the
-  shape v1.16.5 fixed for a malformed chain. What it should answer is open.
-  Reported to cyrius at v1.16.5 (CHANGELOG [1.16.5] *Found*). *Trigger*:
-  cyrius's placement. *Small.*
+- **A BYTES / TEXT row ref with a negative length answers it from the getters.**
+  `_rs_materialize` bounds a ref's length from above only, so
+  `patra_result_get_bytes_len` / `_get_text_len` return a stored -5 as -5 (the
+  read answers `PATRA_ERR_PAGE` since v1.16.5); whether it joins the oversized
+  ref's -1 is open. Reported to cyrius at v1.16.5 (CHANGELOG [1.16.5] *Found*).
+  *Trigger*: cyrius's placement. *Small.*
 - **`docs/guides/` scaffolding.** `programs/` satisfies the examples half, which
   the standard permits. *Trigger*: a consumer asking for an integration
   walkthrough. *Low.*
@@ -325,10 +328,10 @@ ach, cass and pi, built by cyrius 6.7.15 lane trees, with no failure.
 | Target | Built | Run | Flush | Writers serialized | WAL recovery (open and every statement) | `O_NOFOLLOW` |
 |---|---|---|---|---|---|---|
 | Linux x86_64 | CI | CI, full suite | fdatasync | yes (blocking `flock`) | yes | enforced |
-| Linux aarch64 | by hand | full suite, the no-`patra_init` test, 8/8 fuzz, 3/3 programs under `qemu-aarch64` (1.16.2); every harness under `qemu-aarch64` and on pi, real hardware (1.16.5, cyrius 6.7.15 lane tree): the suite 1,677 / 1,677 | fdatasync | yes | yes | enforced |
-| macOS x86_64 / arm64 | by hand (`CYRIUS_MACHO=1` / `CYRIUS_MACHO_ARM=1` to `cycc` / `cycc_aarch64`) | on ach and ecb: the suite at 1.16.4 (cyrius 6.7.14 release tree), 1,566 / 1,567, one fixture row; every harness at 1.16.5 (cyrius 6.7.15 lane tree): the suite 1,600 / 1,600, the no-`patra_init` test, raw-include, 8/8 fuzz, 3/3 programs, the benchmark | fdatasync (BSD 187) | yes (BSD `flock`) | yes | enforced |
+| Linux aarch64 | by hand | full suite, the no-`patra_init` test, 8/8 fuzz, 3/3 programs under `qemu-aarch64` (1.16.2); every harness under `qemu-aarch64` and on pi, real hardware (1.16.5, cyrius 6.7.15 lane tree): the suite 1,752 / 1,752 | fdatasync | yes | yes | enforced |
+| macOS x86_64 / arm64 | by hand (`CYRIUS_MACHO=1` / `CYRIUS_MACHO_ARM=1` to `cycc` / `cycc_aarch64`) | on ach and ecb: the suite at 1.16.4 (cyrius 6.7.14 release tree), 1,566 / 1,567, one fixture row; every harness at 1.16.5 (cyrius 6.7.15 lane tree): the suite 1,675 / 1,675, the no-`patra_init` test, raw-include, 8/8 fuzz, 3/3 programs, the benchmark | fdatasync (BSD 187) | yes (BSD `flock`) | yes | enforced |
 | agnos x86_64 | by hand (`--agnos`) | **not run** | whole-filesystem sync | yes on agnos ≥ 1.57.7 (`flock`#59 waits); ⚠ **no** before | yes | bridged to `AO_NOFOLLOW` (cyrius 6.6.4) |
-| Windows (PE) | by hand (`--win`) | the suite on cass: 1.16.3 built by cyrius 6.7.12, 1,556 / 1,565; 1.16.4 built by the cyrius 6.7.14 release tree, 1,565 / 1,565; 1.16.5 (cyrius 6.7.15 lane tree): the suite 1,597 / 1,597, the no-`patra_init` test 18 / 18, raw-include 6 / 6, 8/8 fuzz, 3/3 programs, the benchmark | `FlushFileBuffers` (cyrius 6.6.9) | ⛔ **no** before cyrius 6.7.12; from 6.7.12 `LockFileEx`, ⚠ but before 6.7.13 a waiting handle can write mid-transaction | ⛔ **never** before cyrius 6.7.12; yes from 6.7.12 | enforced (cyrius 6.6.9) |
+| Windows (PE) | by hand (`--win`) | the suite on cass: 1.16.3 built by cyrius 6.7.12, 1,556 / 1,565; 1.16.4 built by the cyrius 6.7.14 release tree, 1,565 / 1,565; 1.16.5 (cyrius 6.7.15 lane tree): the suite 1,672 / 1,672, the no-`patra_init` test 18 / 18, raw-include 6 / 6, 8/8 fuzz, 3/3 programs, the benchmark | `FlushFileBuffers` (cyrius 6.6.9) | ⛔ **no** before cyrius 6.7.12; from 6.7.12 `LockFileEx`, ⚠ but before 6.7.13 a waiting handle can write mid-transaction | ⛔ **never** before cyrius 6.7.12; yes from 6.7.12 | enforced (cyrius 6.6.9) |
 
 Two notes apply across the table. **Recovery replays a WAL only while the
 replaying process holds `LOCK_EX`** — the flock call returned 0 — because only

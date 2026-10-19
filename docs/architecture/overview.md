@@ -62,7 +62,10 @@ pages. `length` is the total payload, not per-page; a row ref of
   per-page length, or (v1.16.5) one whose pages add up to more than
   the row's length — a `BY_NEXT` looping back. A query snapshots each
   cell (`_rs_materialize`); a cell whose chain is malformed keeps the
-  row's length and reads as `PATRA_ERR_PAGE` (v1.16.5).
+  row's length and reads as `PATRA_ERR_PAGE` (v1.16.5). A ref longer
+  than every page of the file (`HDR_PGCOUNT * BY_DATA_MAX`) is not
+  read: its length is stored as -1 (no valid length) and it reads as
+  `PATRA_ERR_PAGE` too (v1.16.5; it read empty from v1.14.0).
 - **Free**: `_bytes_free_chain` walks and releases each page onto the
   free list. Invoked on DELETE, DROP TABLE, and ALTER TABLE DROP
   COLUMN (when the dropped column is BYTES).
