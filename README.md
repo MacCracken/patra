@@ -210,7 +210,9 @@ its row's length and reads as `PATRA_ERR_PAGE`, with nothing written (1.16.5; it
 read as an empty value from 1.12.8). A cell whose ref names more bytes than the
 file can hold has no valid length — `patra_result_get_bytes_len` /
 `_get_text_len` answer -1 — and reads as `PATRA_ERR_PAGE` too (1.16.5; it read as
-an empty value from 1.14.0).
+an empty value from 1.14.0); so does a cell whose ref names a negative length,
+which `patra_insert_row` stored before 1.16.6 (1.16.6; the getters answered the
+stored value).
 
 ## Consumers
 
