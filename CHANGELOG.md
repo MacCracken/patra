@@ -5,6 +5,63 @@ All notable changes to Patra will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.16.6] - 2026-10-19 — a negative BYTES / TEXT length: `patra_insert_row` refuses it, and a stored one reads as length -1, `PATRA_ERR_PAGE`
+
+Patch release: cyrius issue `2026-10-18-patra-negative-bytes-ref-length-answered-raw` (cyrius
+`docs/development/issues/`; recorded in 1.16.5's *Found* section, which named only the getters — the cyrius 6.7.15
+libfix3 lane's review then found that the public insert stores such a length too). Both answers are the cyrius
+maintainer's decisions at the cyrius 6.7.16 open (2026-10-19): the insert is **refused with a parameter error**, and a
+stored negative length reads as **length -1, read refused**. **`dist/patra.cyr` changes in `_patra_insert_row_impl`
+and `_rs_materialize`**, and in the doc comments of `patra_insert_row`, `patra_insert_row_or_ignore` and the four
+BYTES / TEXT result accessors (and its `# Version:` line).
+
+Gates: **1,939 assertions** on Linux (was 1,752: +87 `test_negative_length_insert_refused`, +100
+`test_negative_ref_length_read_refused`) · `patra_uninit.tcyr` 18 / 18 · raw-include 6 / 6 · 8 / 8 fuzz · 43
+benchmarks · libro 15/15 · vidya 19/19 · fmt + lint 0-warn · no raw syscalls · no bare `/tmp` literal · `dist/` in
+sync, sidecar 14 == 14 declared — run by the repo's own CI steps in an isolated copy under the pinned 6.7.10. On
+aarch64 under `qemu-aarch64`: 1,939 / 1,939, `patra_uninit` 18 / 18. **Not re-run on macOS, Windows or aarch64
+hardware for this patch** (1.16.5's runs there stand; the two changes are target-independent comparisons).
+
+**Toolchain: the pin stays at cyrius 6.7.10.** Demo binary unchanged: 272,008 B DCE-on, 411,272 B DCE-off.
+
+### Fixed
+
+- **`patra_insert_row` stored a negative BYTES / TEXT length and answered `PATRA_OK`.** `_patra_insert_row_impl` (and
+  so `patra_insert_row_or_ignore`, the same impl) took a negative `blens[i]` for a BYTES / TEXT column:
+  `_bytes_write_chain` writes nothing for a length ≤ 0 and answers 0, 1.16.2's refused-chain check runs only for a
+  length > 0, and `row_write_bytes_ref` stored the negative length — so `SELECT` returned a cell whose getter read
+  the stored value (-5 in the issue) and whose read answered `PATRA_ERR_PAGE` (since 1.16.5), where the insert's doc
+  names `blens[i]` "empty if 0" and no negative. The type-match loop, which runs before anything is written, now
+  refuses a negative BYTES / TEXT length with **`PATRA_ERR_PARAM`** (11, patra's answer for a bad caller parameter):
+  no chain and no row are written. Under OR IGNORE the length is checked before the key probe, so a duplicate key
+  with a negative length is `PATRA_ERR_PARAM`, not ignored. A refusal writes nothing, so it does not fail an open
+  transaction. **Migration:** a caller that passed a negative length (it got a cell no read could return) now gets
+  `PATRA_ERR_PARAM` and no row; a caller passing 0 for an empty value is unchanged. New
+  `test_negative_length_insert_refused` (+87: the cyrius issue's reproduction for BYTES and TEXT, through both verbs,
+  lengths -5, -1 and i64 min — `PATRA_ERR_PARAM` and no row, the table then taking a value and an empty one; a
+  5,000-byte value in one column beside a negative length in the other, either order, both verbs, leaving the header's
+  page count and free-list head unchanged; OR IGNORE on a duplicate and a fresh key; a refusal inside `BEGIN` /
+  `COMMIT`); with the fix reverted, 59 fail; with the refusal moved after the first chain is written (and given
+  back), 5.
+- **A stored negative BYTES / TEXT length was answered by the getters as itself.** `_rs_materialize` bounded a ref's
+  length from above only (`HDR_PGCOUNT * BY_DATA_MAX`, 1.14.0; -1 past it since 1.16.5), so a negative one — written
+  by `patra_insert_row` before this release, or a damaged file — kept its value: `patra_result_get_bytes_len` /
+  `_get_text_len` returned it (-5), where their doc names -1 as the only no-length answer. The bound is now
+  `len < 0 || len > maxlen`: such a cell **has no valid length, -1**, and the reads answer **`PATRA_ERR_PAGE`** with
+  nothing written, the same as a ref longer than the file (1.16.5). A stored -1 reads as before. Nothing is allocated
+  for the ref. New `test_negative_ref_length_read_refused` (+100: the cyrius issue's reproduction — a one-row table,
+  `BR_LEN` 5,000 → -5 — then a BYTES table (whole; -5; -1; i64 min; -5 on an empty value's ref; empty) and a TEXT
+  table (whole; -5; -1; i64 min; empty), each through `SELECT *` and a projection, both getters and both reads); with
+  the fix reverted, 11 fail (the getters: -5 and i64 min).
+
+### Found, not fixed — recorded
+
+- **A prepared `INSERT` stores a negative TEXT length from `patra_bind_text`.** `patra_bind_text(stmt, i, ptr, -5)`
+  bound into a TEXT column answers `PATRA_OK` from `patra_exec_prepared` and stores the negative length (measured on
+  1.16.5 and on this release: the row reads back with the getter -5 on 1.16.5, -1 and `PATRA_ERR_PAGE` here); the
+  bind path is the decision above's sibling, outside the issue's surface (`patra_insert_row`). Reported to cyrius
+  (the fold's follow-up).
+
 ## [1.16.5] - 2026-10-18 — the harnesses' fixtures are per-target, and `fuzz_bytes` reaches the chain: a malformed BYTES / TEXT chain or ref reads as `PATRA_ERR_PAGE`
 
 Patch release: cyrius issues `2026-10-17-patra-failed-sync-row-assumes-dev-null-refuses-fsync-on-macos` and

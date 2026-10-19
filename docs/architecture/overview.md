@@ -65,11 +65,14 @@ pages. `length` is the total payload, not per-page; a row ref of
   row's length and reads as `PATRA_ERR_PAGE` (v1.16.5). A ref longer
   than every page of the file (`HDR_PGCOUNT * BY_DATA_MAX`) is not
   read: its length is stored as -1 (no valid length) and it reads as
-  `PATRA_ERR_PAGE` too (v1.16.5; it read empty from v1.14.0).
+  `PATRA_ERR_PAGE` too (v1.16.5; it read empty from v1.14.0), and so
+  is a ref with a negative length (v1.16.6; the getters answered the
+  stored value).
 - **Free**: `_bytes_free_chain` walks and releases each page onto the
   free list. Invoked on DELETE, DROP TABLE, and ALTER TABLE DROP
   COLUMN (when the dropped column is BYTES).
-- **Consumer API**: `patra_insert_row` (binds `bptrs[]` + `blens[]`)
+- **Consumer API**: `patra_insert_row` (binds `bptrs[]` + `blens[]`;
+  a negative length is `PATRA_ERR_PARAM`, nothing written, v1.16.6)
   and `patra_result_read_bytes(db, rs, row, col, out)`. SQL
   INSERT/UPDATE reject BYTES columns (`PATRA_ERR_TYPE`); SQL WHERE on
   BYTES never matches — filter in application code.

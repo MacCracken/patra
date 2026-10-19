@@ -9,6 +9,15 @@
 
 ## Current
 
+> **v1.16.6 (2026-10-19)** — **a negative BYTES / TEXT length: `patra_insert_row` refuses it, and a stored one reads as
+> length -1, `PATRA_ERR_PAGE`.** Patch release (cyrius issue `2026-10-18-patra-negative-bytes-ref-length-answered-raw`;
+> both answers the cyrius maintainer's decisions at the cyrius 6.7.16 open): `patra_insert_row` and
+> `patra_insert_row_or_ignore` refuse a negative BYTES / TEXT length with `PATRA_ERR_PARAM` before anything is written
+> (they stored it and answered `PATRA_OK`), and `_rs_materialize` gives a stored negative length -1, so the getters
+> answer -1 and the reads `PATRA_ERR_PAGE` (the getters answered the stored value). `dist/` changes in those two
+> functions and the doc comments. **1,939 assertions** (was 1,752); aarch64 1,939 / 1,939 under `qemu-aarch64`; not
+> re-run on hardware. Pin unchanged at 6.7.10.
+>
 > **v1.16.5 (2026-10-18)** — **the harnesses' fixtures are per-target, and `fuzz_bytes` reaches the chain: a malformed
 > BYTES / TEXT chain or ref reads as `PATRA_ERR_PAGE`.** Patch release (cyrius issues
 > `2026-10-17-patra-failed-sync-row-assumes-dev-null-refuses-fsync-on-macos`,
@@ -347,7 +356,7 @@
 > statement across all three exec paths. **Closes the 1.13.x repair arc.**
 > **1061 tests / 8 fuzz green.**
 
-- **Version**: 1.16.5 (read `VERSION` for the authoritative number)
+- **Version**: 1.16.6 (read `VERSION` for the authoritative number)
 - **Cyrius toolchain**: **6.7.10** (pinned in `cyrius.cyml [package].cyrius`; 6.5.19 → 6.5.27 at v1.13.1, → 6.5.29 at v1.13.9, → 6.5.33 at v1.13.10, → 6.5.36 at v1.13.11, → 6.6.0 at v1.13.12, → 6.6.2 at v1.14.2, → 6.6.4 at v1.14.3, → 6.6.6 at v1.15.0, → 6.6.9 at v1.15.1, → 6.6.18 at v1.15.2, → 6.7.5 at v1.16.0, → **6.7.10 at v1.16.1**; each source-change-free on its own). `lib/` now holds the declared closure only — **32 files**, all in `cyrius.lock` (re-counted v1.16.1; 6.7.10 changed 19 of them; `cyrius deps --locked` clean. At v1.15.0 `cyrius deps --relock` was needed to lock the two new leaves). The 6.5.29 bump reformatted `btree.cyr` / `table.cyr` / `where.cyr` — continuation-line indent only, `git diff -w` empty. **Neither the 6.5.33 nor the 6.5.36 nor the 6.6.0 bump reformatted anything**: all 12 `src/` files (and all 3 in `programs/`) pass `fmt --check` and `lint` unchanged at each, and `dist/patra.cyr` regenerates byte-identically apart from its version header. `lib/` re-synced with `lib sync --full` at v1.13.12: **108 → 109 `.cyr` files** (37 changed, 1 added — `hashseed.cyr`), the 109 inclusive of the 7-file `unicode/` subtree; `lib/` is gitignored, so this is a local snapshot refresh. ✅ **Version dispatch honours the pin** (re-verified v1.15.0): scratch manifests pinned to 6.6.0 / 6.6.2 / 6.6.6 each run their own compiler, with no drift warning, and `cyrius which` names the pinned `cycc`. The v1.13.12 finding that every driver ran the installed `cycc` no longer holds. ⚠ **But `cyrius build` re-syncs every declared stdlib leaf into `lib/` from the pinned toolchain before it compiles, even with `--no-deps`**, so an old `lib/` copied into a scratch tree is overwritten, and a pin bump can only be A/B'd as compiler + snapshot together.
   Progression: 6.1.15 (v1.11.0) → 6.2.1 (v1.11.1, stdlib
   pin sweep) → 6.2.19 (v1.11.3) → 6.2.21 (v1.11.5) → 6.2.22 (v1.12.0) →
@@ -437,7 +446,8 @@
   stdlib-only build (patra's own count went 13 → 0 at v1.15.0), and both Mach-O
   targets carried stdlib-sourced "not routed" warnings; under 6.7.10 none remain.
   **CI cross-builds none of these.**
-- **Status**: **v1.16.5 — every harness's scratch paths go through `tests/scratch_path.cyr` (CI-gated) and the macOS sync row through the seam: the suites read 0 failures on ecb, ach and cass; `fuzz_bytes` reaches the chain, and a malformed BYTES / TEXT chain or ref reads as `PATRA_ERR_PAGE` (was an empty value, or for a chain looping back the wrong bytes, `PATRA_OK`); a ref longer than the file answers length -1.** Before it:
+- **Status**: **v1.16.6 — `patra_insert_row` (and its OR IGNORE twin) refuses a negative BYTES / TEXT length with `PATRA_ERR_PARAM`, writing nothing, and a stored negative length reads as length -1, `PATRA_ERR_PAGE`.** Before it:
+  **v1.16.5 — every harness's scratch paths go through `tests/scratch_path.cyr` (CI-gated) and the macOS sync row through the seam: the suites read 0 failures on ecb, ach and cass; `fuzz_bytes` reaches the chain, and a malformed BYTES / TEXT chain or ref reads as `PATRA_ERR_PAGE` (was an empty value, or for a chain looping back the wrong bytes, `PATRA_OK`); a ref longer than the file answers length -1.** Before it:
   **v1.16.4 — the suite's fixtures are per-target (scratch paths, `NUL`): 1,565 / 1,565 on Windows hardware with a cyrius 6.7.14 build.** Before it:
   **v1.16.3 — a contended lock on Windows (cyrius ≥ 6.7.12's `LockFileEx`, -11) is read as contended; first run on Windows hardware.** Before it:
   **v1.16.2 — failed syncs, refused writes and refused allocations reported (commit rolls back; sticky `DB_SYNC_ERR`); headers verified per statement after recovery; three row-loss paths closed; the 0 handle refused.** Before it:
@@ -500,7 +510,8 @@
 - **Primary target**: Linux x86_64, the only target CI builds or runs.
   **aarch64**: since v1.15.0 every harness builds warning-free and passes under
   `qemu-aarch64` (1645/1645, 18/18, 8/8, 3/3 at v1.16.3), checked by hand; at
-  v1.16.5 under `qemu-aarch64` and on real hardware (pi): 1752/1752, 18/18, 8/8, 3/3.
+  v1.16.5 under `qemu-aarch64` and on real hardware (pi): 1752/1752, 18/18, 8/8, 3/3;
+  at v1.16.6 under `qemu-aarch64` (the pin): 1939/1939, 18/18.
   **agnos** cross-builds, but is not run. **macOS (both Mach-O)** cross-builds; the
   suite ran on ecb and ach at v1.16.4 (1,566 / 1,567, one fixture row) and at
   v1.16.5 (1,675 / 1,675, every other harness passing), built by cyrius lane
@@ -543,16 +554,19 @@ the tree stood at 8,111 at v1.14.3, and the sweep removed 16 lines net.
 ## Tests / Fuzz / Bench
 
 - **Unit**: `tests/tcyr/patra.tcyr` — **1939 / 1939** assertions pass under
-  cyrius 6.7.10 (v1.16.5; plus 6 / 6 in `tests/tcyr/patra_raw_include.tcyr`, which CI runs from a
+  cyrius 6.7.10 (v1.16.6; plus 6 / 6 in `tests/tcyr/patra_raw_include.tcyr`, which CI runs from a
   manifest-less staging dir, and 18 / 18 in `tests/tcyr/patra_uninit.tcyr`, a process that never calls
-  `patra_init`, its own CI step since v1.16.1), and 1752 / 1752 on aarch64 under `qemu-aarch64` and on pi (by hand,
-  v1.16.5).
+  `patra_init`, its own CI step since v1.16.1), and 1939 / 1939 on aarch64 under `qemu-aarch64` (by hand, v1.16.6;
+  1752 / 1752 there and on pi at v1.16.5).
   On Windows (cass, built by cyrius 6.7.12, v1.16.3) 1,556 / 1,565: nine pre-existing failures, recorded in
   CHANGELOG [1.16.3]; at v1.16.4, built by the cyrius 6.7.14 release tree, 1,565 / 1,565 (one row skipped by name
   there, its premise asserted in its place); at v1.16.5 1,672 / 1,672, and `patra_uninit` 18 / 18 and raw-include 6 / 6
   there too (were 15 / 18 and 0 / 6: `/tmp` paths). On macOS (ecb, ach) 1,675 / 1,675 at v1.16.5 — the failed-sync
   test's macOS arm adds its premise row (`_pt_fdatasync` of `/dev/null` is 0) and drives the bare-helper row through
-  the seam. (+107 at v1.16.5: `test_bytes_chain_overrun_refused` 9, `test_malformed_chain_read_refused` 23 and
+  the seam. (+187 at v1.16.6: `test_negative_length_insert_refused` 87 and `test_negative_ref_length_read_refused`
+  100 — a negative BYTES / TEXT length through `patra_insert_row` and its OR IGNORE twin, refused with nothing written,
+  and BYTES and TEXT refs with negative stored lengths beside whole and empty cells; mutation-verified.)
+  (+107 at v1.16.5: `test_bytes_chain_overrun_refused` 9, `test_malformed_chain_read_refused` 23 and
   `test_oversized_ref_read_refused` 75 — a chain looping back, a ref shorter than its chain, a BYTES and a TEXT cell
   whose chain is malformed, and BYTES and TEXT refs longer than the file beside whole, empty and at-the-bound cells;
   mutation-verified.)
@@ -750,6 +764,7 @@ payload at `BY_DATA_MAX = 4072`.
 
 | Version | Date | Summary |
 |---------|------|---------|
+| 1.16.6 | 2026-10-19 | **A negative BYTES / TEXT length: `patra_insert_row` refuses it, and a stored one reads as length -1, `PATRA_ERR_PAGE`.** cyrius issue `2026-10-18-patra-negative-bytes-ref-length-answered-raw`, both answers the cyrius maintainer's decisions (cyrius 6.7.16 open): `patra_insert_row` / `_or_ignore` answer `PATRA_ERR_PARAM` for a negative length before anything is written (OR IGNORE before its key probe; they stored it, `PATRA_OK`), and `_rs_materialize` bounds a ref's length from below too, so a stored negative length reads -1 from the getters (was the stored value) and `PATRA_ERR_PAGE` from the reads. New `test_negative_length_insert_refused` (+87) and `test_negative_ref_length_read_refused` (+100), **1,939**; aarch64 1,939 / 1,939 under `qemu-aarch64`. Found, not fixed: a prepared `INSERT` stores a negative TEXT length from `patra_bind_text` — reported to cyrius. Pin 6.7.10 unchanged. |
 | 1.16.5 | 2026-10-18 | **The harnesses' fixtures are per-target; `fuzz_bytes` reaches the chain, and a malformed BYTES / TEXT chain or ref reads as `PATRA_ERR_PAGE`.** On macOS the failed-sync test's bare `patra_hdr_write` row goes through the sync seam (macOS syncs `/dev/null`; its premise asserted), and `_scr` moves into `tests/scratch_path.cyr`, used by every harness with a `/tmp/<name>` path (the no-init and raw-include tests, six fuzz harnesses, the benchmark, the libro / vidya programs); a CI step refuses a bare `/tmp` literal. `fuzz_bytes` took its target from a result set's heap pointer (since 1.12.8) and wrote past the end of the file (50 GB on cass); it now takes the row's on-disk ref, proves each mutation landed and the file's size, and asserts the read path refuses all five. Three read-path fixes: `_rs_materialize` keeps a malformed chain's length so the read answers `PATRA_ERR_PAGE` (it read as an empty value, `PATRA_OK`), `_bytes_read_chain` refuses a page holding more than the ref has left (a chain looping back read `PATRA_OK` with the wrong bytes), and a ref naming more bytes than the file can hold answers length -1 and reads `PATRA_ERR_PAGE` (it read as an empty value since 1.14.0; the cyrius maintainer's decision). 1,752 assertions (+107); ecb / ach 1,675 / 1,675 (was 1,566 / 1,567); cass the suite 1,672 / 1,672, `patra_uninit` 18 / 18, raw-include 6 / 6 (were 15 / 18, 0 / 6), 8 / 8 fuzz. Pin unchanged at 6.7.10. |
 | 1.16.4 | 2026-10-17 | **The suite runs on Windows.** Tests only: the 18 `/tmp/<name>` fixtures of `tests/tcyr/patra.tcyr` go through `_scr` (relative on Windows), and the failed-sync test opens `NUL` there, skipping its *nothing to sync* row by name (Windows' flush gives no errno to tell it from a failure). On cass, built by the cyrius 6.7.14 release tree: **1,565 / 1,565**. Found, not fixed: macOS fails one row (`/dev/null` syncs there), and the other harnesses' `/tmp` paths on Windows — both reported to cyrius. `dist/` differs only in its version line; pin 6.7.10 unchanged. |
 | 1.16.3 | 2026-10-15 | **A contended lock on Windows is read as contended.** Since cyrius 6.7.12 `xflock` on Windows is `LockFileEx` and a held non-blocking lock is -11; `_pt_flock_contended` knew only EAGAIN, so a contended `patra_open` judged the header unlocked (and refused a file a dead writer's WAL would repair). -11 is contended on Windows now. New fork-free `test_contended_open_defers_to_recovery` (+14, **1645**); first run on Windows hardware (cass, 6.7.12 build: 1,556 / 1,565, the 1.16.2 sources fail the three bug rows more). Found there, not fixed: a cyrius `_xflock_win` same-mode re-lock that lets a second handle write mid-transaction (40 / 60 rows), and eight more pre-existing Windows rows. Linux builds byte-identical to 1.16.2; pin 6.7.10 unchanged. |
@@ -816,9 +831,9 @@ Full history in [`../../CHANGELOG.md`](../../CHANGELOG.md). Pre-1.6 narrative in
 
 ## CI / verification hosts
 
-- **CI**: x86_64 Linux only — `cyrius build` + **format check** (per-file loop, added v1.13.7) + lint (**hard gate** since v1.10.1 — any `warn` fails) + **no raw syscalls / numeric open flags** (v1.15.0; comment-stripped scan of `src/`, `tests/`, `fuzz/`, `programs/`, mutation-verified) + 1752 tests (`--timeout 300`; count at v1.16.5) + the **no-`patra_init` process** (`patra_uninit.tcyr`, v1.16.1) + **test-count-vs-state.md assertion** + 8 fuzz + 43 benchmarks + libro + vidya integration + **`dist/` sync and sidecar-leaf check** + **no dangling links between the docs** (v1.16.2; out-of-repo links skipped, four historical ones allowlisted) + **version consistency** across VERSION / cyrius.cyml / CHANGELOG top entry / README `[deps.patra]` tag / dist header (the last four added v1.13.7, each verified to fail when it should). Toolchain installed via the upstream `install.sh`, version sourced from the `cyrius.cyml` pin; deps resolved via `cyrius deps`.
+- **CI**: x86_64 Linux only — `cyrius build` + **format check** (per-file loop, added v1.13.7) + lint (**hard gate** since v1.10.1 — any `warn` fails) + **no raw syscalls / numeric open flags** (v1.15.0; comment-stripped scan of `src/`, `tests/`, `fuzz/`, `programs/`, mutation-verified) + 1939 tests (`--timeout 300`; count at v1.16.6) + the **no-`patra_init` process** (`patra_uninit.tcyr`, v1.16.1) + **test-count-vs-state.md assertion** + 8 fuzz + 43 benchmarks + libro + vidya integration + **`dist/` sync and sidecar-leaf check** + **no dangling links between the docs** (v1.16.2; out-of-repo links skipped, four historical ones allowlisted) + **version consistency** across VERSION / cyrius.cyml / CHANGELOG top entry / README `[deps.patra]` tag / dist header (the last four added v1.13.7, each verified to fail when it should). Toolchain installed via the upstream `install.sh`, version sourced from the `cyrius.cyml` pin; deps resolved via `cyrius deps`.
 - **Release**: tag-driven on `[0-9]*`; verifies `VERSION == cyrius.cyml package.version == git tag`; ships source tarball + `dist/patra.cyr` bundle + DCE demo binary + SHA256SUMS. Same `install.sh` toolchain step as CI.
-- **aarch64**: verified by hand, not in CI. Since v1.15.0 the unit suite, all 8 fuzz harnesses and the 3 programs build warning-free for aarch64 and run green under `qemu-aarch64` on the verification host (re-run at v1.16.3 under 6.7.10: 1645 / 1645, `patra_uninit` 18 / 18, 8 / 8, 3 / 3; at v1.16.5, built by a cyrius 6.7.15 lane tree, 1752 / 1752 there and on pi, every harness and the bench passing). Before 1.15.0 most of them did not compile there.
+- **aarch64**: verified by hand, not in CI. Since v1.15.0 the unit suite, all 8 fuzz harnesses and the 3 programs build warning-free for aarch64 and run green under `qemu-aarch64` on the verification host (re-run at v1.16.3 under 6.7.10: 1645 / 1645, `patra_uninit` 18 / 18, 8 / 8, 3 / 3; at v1.16.5, built by a cyrius 6.7.15 lane tree, 1752 / 1752 there and on pi, every harness and the bench passing; at v1.16.6 under 6.7.10, 1939 / 1939 and `patra_uninit` 18 / 18 under `qemu-aarch64`). Before 1.15.0 most of them did not compile there.
 - **agnos, macOS (x86_64 + arm64 Mach-O)**: cross-built by hand, never run in this repo (the cyrius 6.7.14 stdlib lane ran the suite on ecb and ach at v1.16.4: 1,566 / 1,567, one fixture row, recorded in CHANGELOG [1.16.4]; the cyrius 6.7.15 lanes at v1.16.5: 1,675 / 1,675, every other harness passing). **Windows PE**: cross-built by hand; the suite run on Windows hardware (cass) at v1.16.3, built by cyrius 6.7.12, and at v1.16.4, built by the cyrius 6.7.14 release tree (1,565 / 1,565); at v1.16.5 1,672 / 1,672 and every other harness, `fuzz_bytes` included (CHANGELOG [1.16.5]) — not in CI. Per-target gaps: [`roadmap.md` *Platforms*](roadmap.md#platforms--what-patra-guarantees-where).
 
 ## Known footguns / latent issues
