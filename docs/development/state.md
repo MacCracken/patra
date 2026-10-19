@@ -542,7 +542,7 @@ the tree stood at 8,111 at v1.14.3, and the sweep removed 16 lines net.
 
 ## Tests / Fuzz / Bench
 
-- **Unit**: `tests/tcyr/patra.tcyr` — **1752 / 1752** assertions pass under
+- **Unit**: `tests/tcyr/patra.tcyr` — **1839 / 1839** assertions pass under
   cyrius 6.7.10 (v1.16.5; plus 6 / 6 in `tests/tcyr/patra_raw_include.tcyr`, which CI runs from a
   manifest-less staging dir, and 18 / 18 in `tests/tcyr/patra_uninit.tcyr`, a process that never calls
   `patra_init`, its own CI step since v1.16.1), and 1752 / 1752 on aarch64 under `qemu-aarch64` and on pi (by hand,

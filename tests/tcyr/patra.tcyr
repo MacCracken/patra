@@ -6493,6 +6493,171 @@ fn test_oversized_ref_read_refused() {
     cleanup();
 }
 
+# Insert (hash, `len` bytes of `pl`) into the two-column table `tname` (hash
+# STR, content of type `ct`) through patra_insert_row, or (oi != 0) its OR
+# IGNORE twin.
+fn _neg_len_insert(db, tname, tnlen, ct, hash, pl, len, oi) {
+    var a = fl_alloc(96);
+    memset(a, 0, 96);
+    store64(a + 0, COL_STR); store64(a + 8, ct);
+    store64(a + 32, hash); store64(a + 48, strlen(hash));
+    store64(a + 72, pl); store64(a + 88, len);
+    var r = 0;
+    if (oi != 0) {
+        r = patra_insert_row_or_ignore(db, tname, tnlen, 2, a, a + 16, a + 32, a + 48, a + 64, a + 80);
+    } else {
+        r = patra_insert_row(db, tname, tnlen, 2, a, a + 16, a + 32, a + 48, a + 64, a + 80);
+    }
+    fl_free(a);
+    return r;
+}
+
+# Insert (hash, `alen` bytes of `pl` as BYTES, `blen` bytes of `pl` as TEXT)
+# into the table `m` (hash STR, a BYTES, b TEXT) through patra_insert_row, or
+# (oi != 0) its OR IGNORE twin.
+fn _neg_len_insert3(db, hash, pl, alen, blen, oi) {
+    var c = fl_alloc(144);
+    memset(c, 0, 144);
+    store64(c + 0, COL_STR); store64(c + 8, COL_BYTES); store64(c + 16, COL_TEXT);
+    store64(c + 48, hash); store64(c + 72, strlen(hash));
+    store64(c + 104, pl); store64(c + 128, alen);
+    store64(c + 112, pl); store64(c + 136, blen);
+    var r = 0;
+    if (oi != 0) {
+        r = patra_insert_row_or_ignore(db, "m", 1, 3, c, c + 24, c + 48, c + 72, c + 96, c + 120);
+    } else {
+        r = patra_insert_row(db, "m", 1, 3, c, c + 24, c + 48, c + 72, c + 96, c + 120);
+    }
+    fl_free(c);
+    return r;
+}
+
+fn test_negative_length_insert_refused() {
+    test_group("a negative BYTES / TEXT length is refused by patra_insert_row (1.16.6)");
+    var pl = fl_alloc(5000);
+    _bytes_fill(pl, 5000, 3);
+    var o16 = fl_alloc(16);
+    var lens = fl_alloc(24);
+    store64(lens + 0, 0 - 5);                          # the cyrius issue's reproduction
+    store64(lens + 8, 0 - 1);                          # the no-valid-length marker
+    store64(lens + 16, 0 - 0x7FFFFFFFFFFFFFFF - 1);    # i64 min
+    # The cyrius issue's reproduction 1 and its twins: a (hash STR, content
+    # BYTES | TEXT) table, the row inserted through patra_insert_row and
+    # through patra_insert_row_or_ignore. Before, each insert answered
+    # PATRA_OK and stored the negative length: SELECT returned the row, its
+    # length getter -5, its read (since 1.16.5) PATRA_ERR_PAGE.
+    var k = 0;
+    while (k < 4) {
+        var ct = COL_BYTES;
+        if (k >= 2) { ct = COL_TEXT; }
+        var oi = k % 2;
+        cleanup();
+        var db = patra_open(_tpath);
+        if (ct == COL_BYTES) { patra_exec(db, "CREATE TABLE t (hash STR, content BYTES)"); }
+        else { patra_exec(db, "CREATE TABLE t (hash STR, content TEXT)"); }
+        var li = 0;
+        while (li < 3) {
+            assert_eq(_neg_len_insert(db, "t", 1, ct, "h", pl, load64(lens + li * 8), oi), PATRA_ERR_PARAM,
+              "a negative length is refused: PATRA_ERR_PARAM");
+            li = li + 1;
+        }
+        var rs = patra_query(db, "SELECT * FROM t");
+        assert_eq(rs != 0, 1, "the query after the refused inserts answers");
+        assert_eq(patra_result_count(rs), 0, "no row was written");
+        memset(o16, 90, 16);
+        if (ct == COL_BYTES) {
+            assert_eq(patra_result_get_bytes_len(rs, 0, 1), 0 - 1, "no row: the BYTES getter answers -1");
+            assert_eq(patra_result_read_bytes(db, rs, 0, 1, o16), PATRA_ERR_PARAM,
+              "no row: the BYTES read answers PATRA_ERR_PARAM");
+        } else {
+            assert_eq(patra_result_get_text_len(rs, 0, 1), 0 - 1, "no row: the TEXT getter answers -1");
+            assert_eq(patra_result_read_text(db, rs, 0, 1, o16), PATRA_ERR_PARAM,
+              "no row: the TEXT read answers PATRA_ERR_PARAM");
+        }
+        assert_eq(load64(o16) == 0x5A5A5A5A5A5A5A5A, 1, "nothing was read");
+        patra_result_free(rs);
+        # The table still takes a value, and an empty one.
+        assert_eq(_neg_len_insert(db, "t", 1, ct, "h", pl, 16, oi), PATRA_OK, "a 16-byte value inserts");
+        assert_eq(_neg_len_insert(db, "t", 1, ct, "e", pl, 0, oi), PATRA_OK, "an empty value inserts");
+        rs = patra_query(db, "SELECT * FROM t");
+        assert_eq(patra_result_count(rs), 2, "the two valid rows");
+        memset(o16, 0, 16);
+        if (ct == COL_BYTES) {
+            assert_eq(patra_result_get_bytes_len(rs, 0, 1), 16, "the BYTES value's length");
+            assert_eq(patra_result_read_bytes(db, rs, 0, 1, o16), PATRA_OK, "the BYTES value reads");
+            assert_eq(patra_result_get_bytes_len(rs, 1, 1), 0, "the empty BYTES value's length");
+        } else {
+            assert_eq(patra_result_get_text_len(rs, 0, 1), 16, "the TEXT value's length");
+            assert_eq(patra_result_read_text(db, rs, 0, 1, o16), PATRA_OK, "the TEXT value reads");
+            assert_eq(patra_result_get_text_len(rs, 1, 1), 0, "the empty TEXT value's length");
+        }
+        assert_eq(_bytes_eq(o16, pl, 16), 1, "the value reads byte for byte");
+        patra_result_free(rs);
+        patra_close(db);
+        k = k + 1;
+    }
+
+    # Refused before anything is written: a 5,000-byte value in one column
+    # beside a negative length in the other (either order) writes no chain.
+    # The in-memory header is read straight after the refused call — a chain
+    # written and given back would have grown its page count.
+    cleanup();
+    var db2 = patra_open(_tpath);
+    patra_exec(db2, "CREATE TABLE m (hash STR, a BYTES, b TEXT)");
+    assert_eq(patra_exec(db2, "CREATE INDEX ON m (hash)"), PATRA_OK, "index the hash");
+    var rs2 = patra_query(db2, "SELECT * FROM m");
+    patra_result_free(rs2);
+    var pgc = load64(_db_hdr(db2) + HDR_PGCOUNT);
+    var fhd = load64(_db_hdr(db2) + HDR_FREEHEAD);
+    var oi2 = 0;
+    while (oi2 < 2) {
+        assert_eq(_neg_len_insert3(db2, "m1", pl, 5000, 0 - 5, oi2), PATRA_ERR_PARAM,
+          "a 5,000-byte BYTES value beside a negative TEXT length: PATRA_ERR_PARAM");
+        assert_eq(load64(_db_hdr(db2) + HDR_PGCOUNT), pgc, "no page was written for the BYTES value");
+        assert_eq(load64(_db_hdr(db2) + HDR_FREEHEAD), fhd, "and none was given back");
+        assert_eq(_neg_len_insert3(db2, "m1", pl, 0 - 5, 5000, oi2), PATRA_ERR_PARAM,
+          "a negative BYTES length beside a 5,000-byte TEXT value: PATRA_ERR_PARAM");
+        assert_eq(load64(_db_hdr(db2) + HDR_PGCOUNT), pgc, "no page was written for the TEXT value");
+        assert_eq(load64(_db_hdr(db2) + HDR_FREEHEAD), fhd, "and none was given back");
+        oi2 = oi2 + 1;
+    }
+    rs2 = patra_query(db2, "SELECT * FROM m");
+    assert_eq(patra_result_count(rs2), 0, "no row was written");
+    patra_result_free(rs2);
+
+    # OR IGNORE checks the length before its key probe: a duplicate key with a
+    # negative length is refused, not ignored, and a fresh key too.
+    assert_eq(_neg_len_insert3(db2, "m1", pl, 5000, 10, 0), PATRA_OK, "insert the row m1");
+    assert_eq(_neg_len_insert3(db2, "m1", pl, 10, 0 - 5, 1), PATRA_ERR_PARAM,
+      "OR IGNORE: a duplicate key with a negative length is PATRA_ERR_PARAM");
+    assert_eq(_neg_len_insert3(db2, "m2", pl, 0 - 5, 10, 1), PATRA_ERR_PARAM,
+      "OR IGNORE: a fresh key with a negative length is PATRA_ERR_PARAM");
+    assert_eq(_neg_len_insert3(db2, "m1", pl, 10, 10, 1), PATRA_OK, "OR IGNORE: a duplicate key is ignored");
+    assert_eq(patra_rows_affected(db2), 0, "and nothing inserted");
+    rs2 = patra_query(db2, "SELECT * FROM m");
+    assert_eq(patra_result_count(rs2), 1, "the one row m1");
+    assert_eq(patra_result_get_bytes_len(rs2, 0, 1), 5000, "m1's BYTES value");
+    assert_eq(patra_result_get_text_len(rs2, 0, 2), 10, "m1's TEXT value");
+    patra_result_free(rs2);
+
+    # Inside a transaction the refusal wrote nothing, so it does not fail the
+    # transaction: the next insert and the COMMIT go through.
+    assert_eq(patra_begin(db2), PATRA_OK, "BEGIN");
+    assert_eq(_neg_len_insert3(db2, "m3", pl, 0 - 5, 10, 0), PATRA_ERR_PARAM,
+      "in a transaction: a negative length is PATRA_ERR_PARAM");
+    assert_eq(_neg_len_insert3(db2, "m4", pl, 10, 10, 0), PATRA_OK, "in a transaction: the next row inserts");
+    assert_eq(patra_commit(db2), PATRA_OK, "COMMIT");
+    rs2 = patra_query(db2, "SELECT * FROM m");
+    assert_eq(patra_result_count(rs2), 2, "m1 and m4");
+    patra_result_free(rs2);
+    patra_close(db2);
+
+    fl_free(lens);
+    fl_free(o16);
+    fl_free(pl);
+    cleanup();
+}
+
 # -- v1.14.0: WAL state is per-database, not process-global ----
 
 var _tpath2 = _scr("/tmp/patra_test_2.patra");
@@ -9744,6 +9909,7 @@ fn main() {
     test_bytes_chain_overrun_refused();
     test_malformed_chain_read_refused();
     test_oversized_ref_read_refused();
+    test_negative_length_insert_refused();
     test_alter_add_rowsz_guard();
     test_btree_equal_separator_split();
     test_btree_index_matches_scan();

@@ -9740,8 +9740,10 @@ fn patra_result_free(rs): i64 {
 #   COL_INT  → ivals[i]
 #   COL_STR  → sptrs[i] + slens[i] (byte buffer + length)
 #   COL_BYTES → bptrs[i] + blens[i] (binary buffer + length; empty if 0)
+#   COL_TEXT  → bptrs[i] + blens[i] (as COL_BYTES)
 # Arrays whose slots aren't consulted can be 0 (null). Returns PATRA_OK,
-# PATRA_ERR_NOTFOUND, PATRA_ERR_COLCOUNT, or PATRA_ERR_TYPE.
+# PATRA_ERR_NOTFOUND, PATRA_ERR_COLCOUNT, PATRA_ERR_TYPE, or PATRA_ERR_PARAM
+# for a negative BYTES / TEXT length (1.16.6; nothing is written).
 # Programmatic row insert; the only path that can write BYTES columns.
 fn patra_insert_row(db, tname, tnlen, ncols, types, ivals, sptrs, slens, bptrs, blens): i64 {
     var _tx = 0;
@@ -9762,6 +9764,8 @@ fn patra_insert_row(db, tname, tnlen, ncols, types, ivals, sptrs, slens, bptrs, 
 # is probed BEFORE the BYTES/TEXT content chain is allocated, so a duplicate
 # costs only the indexed-key probe — no chain write or cleanup. Requires an
 # index on the conflict column (no index => nothing to dedup => always inserts).
+# A negative BYTES / TEXT length is PATRA_ERR_PARAM before the probe, as in
+# patra_insert_row (1.16.6).
 # [consumer: sit — collapses the pre-flight SELECT on its object-ingest path.]
 fn patra_insert_row_or_ignore(db, tname, tnlen, ncols, types, ivals, sptrs, slens, bptrs, blens): i64 {
     var _tx = 0;
@@ -9800,6 +9804,14 @@ fn _patra_insert_row_impl(db, tname, tnlen, ncols, types, ivals, sptrs, slens, b
         var vtype = load64(types + i * 8);
         if (vtype != ctype) {
             pg_free(schema); _tx_unlock(db, fd); return PATRA_ERR_TYPE;
+        }
+        # 1.16.6: a negative BYTES / TEXT length is refused before anything is
+        # written or probed. It was stored as the cell's length, a value with
+        # no valid meaning, and the insert answered PATRA_OK.
+        if (_col_is_chain(ctype)) {
+            if (load64(blens + i * 8) < 0) {
+                pg_free(schema); _tx_unlock(db, fd); return PATRA_ERR_PARAM;
+            }
         }
     }
 
