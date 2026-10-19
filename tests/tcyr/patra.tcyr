@@ -6322,6 +6322,177 @@ fn test_malformed_chain_read_refused() {
     cleanup();
 }
 
+# Rewrite the length of the bytes-ref that row `ridx` of table `tidx` holds at
+# column offset `off` (rows `rsz` bytes) on the table's first data page, its
+# page left as is.
+fn _row_ref_len_set(fd, hdr, tidx, ridx, rsz, off, len) {
+    var buf = pg_alloc();
+    var root = load64(_tbl_entry(hdr, tidx) + TBL_ROOT);
+    var r = page_read_checked(fd, hdr, root, buf);
+    if (r == PATRA_OK) {
+        if (load64(buf + DP_TYPE) != PAGE_DATA) { r = PATRA_ERR_PAGE; }
+        elif (ridx >= load64(buf + DP_NROWS)) { r = PATRA_ERR_PAGE; }
+    }
+    if (r == PATRA_OK) {
+        var row = buf + DP_DATA + ridx * rsz;
+        row_write_bytes_ref(row, off, row_read_bytes_page(row, off), len);
+        r = page_write(fd, root, buf);
+    }
+    pg_free(buf);
+    return r;
+}
+
+fn test_oversized_ref_read_refused() {
+    test_group("a BYTES / TEXT ref longer than the file reads as PATRA_ERR_PAGE (1.16.5)");
+    cleanup();
+    # The cyrius issue's reproduction: a one-row table holding a 5,000-byte
+    # blob, the row's BR_LEN rewritten to 1,000,000,000 (the file holds 5
+    # pages). Before, 1.14.0's clamp zeroed the length: length 0, PATRA_OK.
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (hash STR, content BYTES)");
+    var pl = fl_alloc(5000);
+    memset(pl, 65, 5000);
+    var a = fl_alloc(96);
+    memset(a, 0, 96);
+    store64(a + 0, COL_STR); store64(a + 8, COL_BYTES);
+    store64(a + 32, "h"); store64(a + 48, 1);
+    store64(a + 72, pl); store64(a + 88, 5000);
+    assert_eq(patra_insert_row(db, "t", 1, 2, a, a + 16, a + 32, a + 48, a + 64, a + 80),
+      PATRA_OK, "insert the 5,000-byte blob");
+    patra_close(db);
+    var fd = _pt_file_open(_tpath);
+    var hdr = pg_alloc();
+    var buf = pg_alloc();
+    assert_eq(patra_hdr_read(fd, hdr), PATRA_OK, "header reads back");
+    var root = load64(_tbl_entry(hdr, 0) + TBL_ROOT);
+    assert_eq(page_read_checked(fd, hdr, root, buf), PATRA_OK, "the data page reads");
+    row_write_bytes_ref(buf + DP_DATA, COL_STR_SZ, row_read_bytes_page(buf + DP_DATA, COL_STR_SZ), 1000000000);
+    assert_eq(page_write(fd, root, buf), PATRA_OK, "the row's BR_LEN is now 1,000,000,000");
+    pg_free(buf);
+    pg_free(hdr);
+    sys_close(fd);
+    db = patra_open(_tpath);
+    var rs = patra_query(db, "SELECT * FROM t");
+    assert_eq(rs != 0, 1, "a query over the oversized ref answers");
+    assert_eq(patra_result_get_bytes_len(rs, 0, 1), 0 - 1,
+      "a ref longer than the file has no valid length (-1)");
+    var o16 = fl_alloc(16);
+    memset(o16, 90, 16);
+    assert_eq(patra_result_read_bytes(db, rs, 0, 1, o16), PATRA_ERR_PAGE,
+      "a ref longer than the file reads as PATRA_ERR_PAGE");
+    assert_eq(load64(o16) == 0x5A5A5A5A5A5A5A5A, 1, "the refused read wrote nothing");
+    patra_result_free(rs);
+    fl_free(o16);
+    fl_free(a);
+    fl_free(pl);
+    patra_close(db);
+    cleanup();
+
+    # Beside whole and empty cells, both column types, both result shapes
+    # (SELECT * and a projection: each snapshots its own result). A ref at
+    # the bound keeps its length (the chain then cannot be read: a malformed
+    # chain); one byte past it has none.
+    db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE objects (hash STR, content BLOB)");
+    patra_exec(db, "CREATE TABLE notes (id INT, body TEXT)");
+    var sz = 5000;
+    var good = fl_alloc(sz);
+    _bytes_fill(good, sz, 9);
+    assert_eq(_obj_insert(db, "whole", good, sz), PATRA_OK, "insert the blob kept whole");
+    assert_eq(_obj_insert(db, "over", good, sz), PATRA_OK, "insert the blob whose ref goes past the file");
+    assert_eq(_obj_insert(db, "edge", good, sz), PATRA_OK, "insert the blob whose ref goes one byte past");
+    assert_eq(_obj_insert(db, "bound", good, sz), PATRA_OK, "insert the blob whose ref is at the bound");
+    assert_eq(_obj_insert(db, "empty", good, 0), PATRA_OK, "insert the empty blob");
+    var t1 = "a readable note";
+    assert_eq(patra_exec(db, "INSERT INTO notes VALUES (1, 'a readable note')"), PATRA_OK,
+      "insert the text kept whole");
+    assert_eq(patra_exec(db, "INSERT INTO notes VALUES (2, 'a note whose ref is too long')"),
+      PATRA_OK, "insert the text whose ref goes past the file");
+    assert_eq(patra_exec(db, "INSERT INTO notes VALUES (3, '')"), PATRA_OK, "insert the empty text");
+    patra_close(db);
+
+    fd = _pt_file_open(_tpath);
+    hdr = pg_alloc();
+    assert_eq(patra_hdr_read(fd, hdr), PATRA_OK, "header reads back");
+    var bound = load64(hdr + HDR_PGCOUNT) * BY_DATA_MAX;
+    var boff = row_col_size(COL_STR);
+    var brsz = boff + COL_BYTES_SZ;
+    var trsz = COL_INT_SZ + COL_BYTES_SZ;
+    assert_eq(_row_ref_len_set(fd, hdr, 0, 1, brsz, boff, 1000000000), PATRA_OK,
+      "the blob's ref names 1,000,000,000 bytes");
+    assert_eq(_row_ref_len_set(fd, hdr, 0, 2, brsz, boff, bound + 1), PATRA_OK,
+      "the blob's ref names one byte past the bound");
+    assert_eq(_row_ref_len_set(fd, hdr, 0, 3, brsz, boff, bound), PATRA_OK,
+      "the blob's ref names the bound");
+    assert_eq(_row_ref_len_set(fd, hdr, 1, 1, trsz, COL_INT_SZ, 1000000000), PATRA_OK,
+      "the text's ref names 1,000,000,000 bytes");
+    pg_free(hdr);
+    sys_close(fd);
+
+    db = patra_open(_tpath);
+    var out = fl_alloc(sz);
+    var marks = fl_alloc(sz);
+    memset(marks, 90, sz);
+    var q = 0;
+    while (q < 2) {
+        var col = 1;
+        if (q == 0) { rs = patra_query(db, "SELECT * FROM objects"); }
+        else { col = 0; rs = patra_query(db, "SELECT content FROM objects"); }
+        assert_eq(rs != 0, 1, "a query over the oversized BYTES refs answers");
+        assert_eq(patra_result_count(rs), 5, "all five blob rows");
+        assert_eq(patra_result_get_bytes_len(rs, 0, col), sz, "the whole blob's length");
+        memset(out, 90, sz);
+        assert_eq(patra_result_read_bytes(db, rs, 0, col, out), PATRA_OK, "the whole blob reads");
+        assert_eq(_bytes_eq(good, out, sz), 1, "the whole blob reads byte for byte");
+        assert_eq(patra_result_get_bytes_len(rs, 1, col), 0 - 1, "a BYTES ref past the file: length -1");
+        memset(out, 90, sz);
+        assert_eq(patra_result_read_bytes(db, rs, 1, col, out), PATRA_ERR_PAGE,
+          "a BYTES ref past the file reads as PATRA_ERR_PAGE");
+        assert_eq(_bytes_eq(out, marks, sz), 1, "the refused read wrote nothing");
+        assert_eq(patra_result_get_bytes_len(rs, 2, col), 0 - 1, "one byte past the bound: length -1");
+        assert_eq(patra_result_read_bytes(db, rs, 2, col, out), PATRA_ERR_PAGE,
+          "one byte past the bound reads as PATRA_ERR_PAGE");
+        assert_eq(patra_result_get_bytes_len(rs, 3, col), bound, "a ref at the bound keeps its length");
+        assert_eq(patra_result_read_bytes(db, rs, 3, col, out), PATRA_ERR_PAGE,
+          "a ref at the bound reads as PATRA_ERR_PAGE (a malformed chain)");
+        assert_eq(_bytes_eq(out, marks, sz), 1, "neither refused read wrote anything");
+        assert_eq(patra_result_get_bytes_len(rs, 4, col), 0, "the empty blob's length");
+        assert_eq(patra_result_read_bytes(db, rs, 4, col, out), PATRA_OK, "the empty blob reads");
+        assert_eq(_bytes_eq(out, marks, sz), 1, "the empty read wrote nothing");
+        patra_result_free(rs);
+        q = q + 1;
+    }
+
+    q = 0;
+    while (q < 2) {
+        var tcol = 1;
+        if (q == 0) { rs = patra_query(db, "SELECT * FROM notes"); }
+        else { tcol = 0; rs = patra_query(db, "SELECT body FROM notes"); }
+        assert_eq(rs != 0, 1, "a query over the oversized TEXT ref answers");
+        assert_eq(patra_result_count(rs), 3, "all three text rows");
+        assert_eq(patra_result_get_text_len(rs, 0, tcol), strlen(t1), "the whole text's length");
+        memset(out, 90, sz);
+        assert_eq(patra_result_read_text(db, rs, 0, tcol, out), PATRA_OK, "the whole text reads");
+        assert_eq(memeq(out, t1, strlen(t1)), 1, "the whole text reads byte for byte");
+        assert_eq(patra_result_get_text_len(rs, 1, tcol), 0 - 1, "a TEXT ref past the file: length -1");
+        memset(out, 90, sz);
+        assert_eq(patra_result_read_text(db, rs, 1, tcol, out), PATRA_ERR_PAGE,
+          "a TEXT ref past the file reads as PATRA_ERR_PAGE");
+        assert_eq(_bytes_eq(out, marks, sz), 1, "the refused text read wrote nothing");
+        assert_eq(patra_result_get_text_len(rs, 2, tcol), 0, "the empty text's length");
+        assert_eq(patra_result_read_text(db, rs, 2, tcol, out), PATRA_OK, "the empty text reads");
+        assert_eq(_bytes_eq(out, marks, sz), 1, "the empty text read wrote nothing");
+        patra_result_free(rs);
+        q = q + 1;
+    }
+
+    fl_free(marks);
+    fl_free(out);
+    fl_free(good);
+    patra_close(db);
+    cleanup();
+}
+
 # -- v1.14.0: WAL state is per-database, not process-global ----
 
 var _tpath2 = _scr("/tmp/patra_test_2.patra");
@@ -9572,6 +9743,7 @@ fn main() {
     test_hostile_header_rejected();
     test_bytes_chain_overrun_refused();
     test_malformed_chain_read_refused();
+    test_oversized_ref_read_refused();
     test_alter_add_rowsz_guard();
     test_btree_equal_separator_split();
     test_btree_index_matches_scan();
