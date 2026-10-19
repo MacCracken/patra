@@ -41,8 +41,8 @@ hardware for this patch** (1.16.5's runs there stand; the two changes are target
   lengths -5, -1 and i64 min — `PATRA_ERR_PARAM` and no row, the table then taking a value and an empty one; a
   5,000-byte value in one column beside a negative length in the other, either order, both verbs, leaving the header's
   page count and free-list head unchanged; OR IGNORE on a duplicate and a fresh key; a refusal inside `BEGIN` /
-  `COMMIT`); with the fix reverted, 59 fail; with the refusal moved after the first chain is written (and given
-  back), 5.
+  `COMMIT`); with the fix reverted, 55 fail (59 at `4e5b5bf`, before the read fix answered -1 for the written row's
+  getter); with the refusal moved after the first chain is written (and given back), 5.
 - **A stored negative BYTES / TEXT length was answered by the getters as itself.** `_rs_materialize` bounded a ref's
   length from above only (`HDR_PGCOUNT * BY_DATA_MAX`, 1.14.0; -1 past it since 1.16.5), so a negative one — written
   by `patra_insert_row` before this release, or a damaged file — kept its value: `patra_result_get_bytes_len` /
@@ -56,11 +56,15 @@ hardware for this patch** (1.16.5's runs there stand; the two changes are target
 
 ### Found, not fixed — recorded
 
-- **A prepared `INSERT` stores a negative TEXT length from `patra_bind_text`.** `patra_bind_text(stmt, i, ptr, -5)`
-  bound into a TEXT column answers `PATRA_OK` from `patra_exec_prepared` and stores the negative length (measured on
-  1.16.5 and on this release: the row reads back with the getter -5 on 1.16.5, -1 and `PATRA_ERR_PAGE` here); the
-  bind path is the decision above's sibling, outside the issue's surface (`patra_insert_row`). Reported to cyrius
-  (the fold's follow-up).
+- **A negative `patra_bind_text` length is stored by a prepared `INSERT` / `UPDATE`.** `patra_bind_text` keeps its
+  `len` unchecked (`BIND_LEN`) and `patra_exec_prepared` copies it into the row, so a `?` bound with -5 answers
+  `PATRA_OK` from the bind and from the exec. On `t (hash STR, content TEXT)` with `INSERT INTO t VALUES (?, ?)`: bound
+  into the TEXT column, the row is written with the length (the getter -5 on 1.16.5, -1 here; the read
+  `PATRA_ERR_PAGE` on both); bound into the STR column (`patra_bind_text(st, 0, "h", -5)`), the row is written with an
+  empty string. `UPDATE t SET … = ?` does the same to each, and a negative length bound into a `WHERE` value matches
+  no row. Measured on 1.16.5 and on this release. The bind path is outside the cyrius issue's surface
+  (`patra_insert_row`), and whether the insert decision above extends to it is the cyrius maintainer's call: filed as
+  cyrius issue `2026-10-19-patra-bind-text-negative-length-stored` (cyrius `docs/development/issues/`).
 
 ## [1.16.5] - 2026-10-18 — the harnesses' fixtures are per-target, and `fuzz_bytes` reaches the chain: a malformed BYTES / TEXT chain or ref reads as `PATRA_ERR_PAGE`
 

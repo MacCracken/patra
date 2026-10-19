@@ -298,12 +298,13 @@ are **not scheduled**. Each states the trigger that would move it.
 - **aarch64 in CI.** Every harness builds and passes on aarch64 since 1.15.0,
   checked by hand under `qemu-aarch64`; CI does not run it. See *Platforms*.
   *Trigger*: an aarch64 consumer. *Low.*
-- **A prepared `INSERT` stores a negative TEXT length from `patra_bind_text`.**
-  `patra_bind_text(stmt, i, ptr, -5)` into a TEXT column answers `PATRA_OK` and
-  stores the length; since v1.16.6 that cell reads -1 / `PATRA_ERR_PAGE`, but the
-  write is not refused as `patra_insert_row`'s is (v1.16.6). Reported to cyrius
-  at v1.16.6 (CHANGELOG [1.16.6] *Found*). *Trigger*: cyrius's placement.
-  *Small.*
+- **A negative `patra_bind_text` length is stored by a prepared `INSERT` /
+  `UPDATE`.** `patra_bind_text(stmt, i, ptr, -5)` answers `PATRA_OK`, and so does
+  the exec: into a TEXT column the row keeps the length (since v1.16.6 it reads
+  -1 / `PATRA_ERR_PAGE`), into a STR column it stores an empty string. The write
+  is not refused as `patra_insert_row`'s is (v1.16.6). Filed as cyrius issue
+  `2026-10-19-patra-bind-text-negative-length-stored` (CHANGELOG [1.16.6]
+  *Found*). *Trigger*: cyrius's placement. *Small.*
 - **`docs/guides/` scaffolding.** `programs/` satisfies the examples half, which
   the standard permits. *Trigger*: a consumer asking for an integration
   walkthrough. *Low.*
