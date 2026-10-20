@@ -139,8 +139,9 @@ that `patra_bind_int` / `patra_bind_text` fill via `_apply_binds` before exec �
 bound values are written / compared as bytes and **never reparsed as SQL**, so
 quotes and other metacharacters can't escape (the safe path for free text).
 Direct `patra_exec` / `patra_query` reject a statement containing `?`
-(`PATRA_ERR_PARAM`). The parse/exec scratch (`_sql_toks`, `_sql_pr`) is
-process-global — see Concurrency.
+(`PATRA_ERR_PARAM`), and `patra_bind_text` a negative length (`PATRA_ERR_PARAM`,
+nothing stored: the placeholder keeps what it held, v1.16.6). The parse/exec
+scratch (`_sql_toks`, `_sql_pr`) is process-global — see Concurrency.
 
 ## Concurrency
 
