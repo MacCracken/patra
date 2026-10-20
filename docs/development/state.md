@@ -553,10 +553,10 @@ the tree stood at 8,111 at v1.14.3, and the sweep removed 16 lines net.
 
 ## Tests / Fuzz / Bench
 
-- **Unit**: `tests/tcyr/patra.tcyr` — **1939 / 1939** assertions pass under
+- **Unit**: `tests/tcyr/patra.tcyr` — **2075 / 2075** assertions pass under
   cyrius 6.7.10 (v1.16.6; plus 6 / 6 in `tests/tcyr/patra_raw_include.tcyr`, which CI runs from a
   manifest-less staging dir, and 18 / 18 in `tests/tcyr/patra_uninit.tcyr`, a process that never calls
-  `patra_init`, its own CI step since v1.16.1), and 1939 / 1939 on aarch64 under `qemu-aarch64` (by hand, v1.16.6;
+  `patra_init`, its own CI step since v1.16.1), and 2075 / 2075 on aarch64 under `qemu-aarch64` (by hand, v1.16.6;
   1752 / 1752 there and on pi at v1.16.5).
   On Windows (cass, built by cyrius 6.7.12, v1.16.3) 1,556 / 1,565: nine pre-existing failures, recorded in
   CHANGELOG [1.16.3]; at v1.16.4, built by the cyrius 6.7.14 release tree, 1,565 / 1,565 (one row skipped by name

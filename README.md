@@ -293,7 +293,7 @@ patra_exec_prepared(db, st);
 patra_finalize(st);
 ```
 
-`?` works in `INSERT` values, `WHERE` values, and `UPDATE … SET` values. Bound values are written/compared as bytes and never reparsed as SQL, so quotes and other metacharacters can't escape — this is the safe way to store arbitrary free text (a string literal would truncate or inject at the first `'`). Bind buffers must stay valid until the prepared statement runs; a statement containing `?` can't be passed to `patra_exec` / `patra_query` directly (it returns `PATRA_ERR_PARAM`).
+`?` works in `INSERT` values, `WHERE` values, and `UPDATE … SET` values. Bound values are written/compared as bytes and never reparsed as SQL, so quotes and other metacharacters can't escape — this is the safe way to store arbitrary free text (a string literal would truncate or inject at the first `'`). Bind buffers must stay valid until the prepared statement runs; a statement containing `?` can't be passed to `patra_exec` / `patra_query` directly (it returns `PATRA_ERR_PARAM`). A `patra_bind_text` length of 0 binds an empty value; a negative one is refused with `PATRA_ERR_PARAM` and stores nothing, so the placeholder keeps what it held (v1.16.6).
 
 **Write readback** — after a write, two accessors report what it did (mirroring `sqlite3_last_insert_rowid` / `sqlite3_changes`):
 

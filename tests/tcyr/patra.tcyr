@@ -6806,6 +6806,198 @@ fn test_negative_ref_length_read_refused() {
     cleanup();
 }
 
+# The row count of a query (0 for a refused one).
+fn _nb_count(db, sql) {
+    var rs = patra_query(db, sql);
+    var n = patra_result_count(rs);
+    patra_result_free(rs);
+    return n;
+}
+
+# Row `r` of `SELECT * FROM <tbl>` (hash STR, content TEXT) holds the STR `hash`
+# and the TEXT `body` of `blen` bytes, byte for byte.
+fn _nb_row(db, sql, r, hash, body, blen) {
+    var rs = patra_query(db, sql);
+    assert_eq(patra_result_get_str_len(rs, r, 0), strlen(hash), "the STR value's length");
+    assert_streq(patra_result_get_str(rs, r, 0), hash, "the STR value");
+    assert_eq(patra_result_get_text_len(rs, r, 1), blen, "the TEXT value's length");
+    var out = fl_alloc(blen + 8);
+    memset(out, 90, blen + 8);
+    assert_eq(patra_result_read_text(db, rs, r, 1, out), PATRA_OK, "the TEXT value reads");
+    assert_eq(_bytes_eq(out, body, blen), 1, "the TEXT value reads byte for byte");
+    assert_eq(load8(out + blen), 90, "and no further");
+    fl_free(out);
+    patra_result_free(rs);
+    return 0;
+}
+
+fn test_negative_bind_text_refused() {
+    test_group("a negative patra_bind_text length is refused, nothing stored (1.16.6)");
+    # The cyrius maintainer's decision D34, extended from patra_insert_row to
+    # the bind (2026-10-19). patra_bind_text stored a negative length and the
+    # prepared exec copied it: into a TEXT column the row kept it (read -1 /
+    # PATRA_ERR_PAGE), into a STR column the row stored an empty string, and a
+    # WHERE value matched no row. A refused bind stores nothing, so the slot
+    # keeps what it held: one never bound is INT 0, which a STR / TEXT
+    # placeholder answers PATRA_ERR_TYPE for — measured on a fresh statement
+    # beside each refusal, not assumed.
+    var lens = fl_alloc(24);
+    store64(lens + 0, 0 - 5);                          # the review's measurement
+    store64(lens + 8, 0 - 1);
+    store64(lens + 16, 0 - 0x7FFFFFFFFFFFFFFF - 1);    # i64 min
+    cleanup();
+    var db = patra_open(_tpath);
+    patra_exec(db, "CREATE TABLE t (hash STR, content TEXT)");
+
+    # INSERT: what an unbound placeholder answers, for each column.
+    var un = patra_prepare(db, "INSERT INTO t VALUES (?, ?)");
+    assert_eq(patra_bind_text(un, 0, "h", 1), PATRA_OK, "INSERT, unbound TEXT: the hash binds");
+    assert_eq(patra_exec_prepared(db, un), PATRA_ERR_TYPE, "INSERT, unbound TEXT: PATRA_ERR_TYPE");
+    patra_finalize(un);
+    un = patra_prepare(db, "INSERT INTO t VALUES (?, ?)");
+    assert_eq(patra_bind_text(un, 1, "body", 4), PATRA_OK, "INSERT, unbound STR: the content binds");
+    assert_eq(patra_exec_prepared(db, un), PATRA_ERR_TYPE, "INSERT, unbound STR: PATRA_ERR_TYPE");
+    patra_finalize(un);
+
+    # INSERT: every negative length refused, into either column.
+    var ins = patra_prepare(db, "INSERT INTO t VALUES (?, ?)");
+    var li = 0;
+    while (li < 3) {
+        assert_eq(patra_bind_text(ins, 1, "body", load64(lens + li * 8)), PATRA_ERR_PARAM,
+          "INSERT: a negative length bound into TEXT is PATRA_ERR_PARAM");
+        assert_eq(patra_bind_text(ins, 0, "h", load64(lens + li * 8)), PATRA_ERR_PARAM,
+          "INSERT: a negative length bound into STR is PATRA_ERR_PARAM");
+        li = li + 1;
+    }
+    assert_eq(patra_exec_prepared(db, ins), PATRA_ERR_TYPE,
+      "INSERT: every bind refused, the placeholders are unbound: PATRA_ERR_TYPE");
+    assert_eq(patra_bind_text(ins, 0, "h", 1), PATRA_OK, "INSERT: the hash binds");
+    assert_eq(patra_exec_prepared(db, ins), PATRA_ERR_TYPE,
+      "INSERT: the refused TEXT bind is unbound: PATRA_ERR_TYPE, as above");
+    patra_finalize(ins);
+    ins = patra_prepare(db, "INSERT INTO t VALUES (?, ?)");
+    assert_eq(patra_bind_text(ins, 0, "h", 0 - 5), PATRA_ERR_PARAM, "INSERT: a STR bind of -5 is refused");
+    assert_eq(patra_bind_text(ins, 1, "body", 4), PATRA_OK, "INSERT: the content binds");
+    assert_eq(patra_exec_prepared(db, ins), PATRA_ERR_TYPE,
+      "INSERT: the refused STR bind is unbound: PATRA_ERR_TYPE, as above");
+    assert_eq(_nb_count(db, "SELECT * FROM t"), 0, "INSERT: no row was written");
+
+    # A following valid bind writes exactly its value; a refused bind over a
+    # valid one leaves the valid one in the slot; len 0 is an empty value.
+    assert_eq(patra_bind_text(ins, 0, "h", 1), PATRA_OK, "INSERT: the hash binds after the refusal");
+    assert_eq(patra_exec_prepared(db, ins), PATRA_OK, "INSERT: the valid binds insert");
+    assert_eq(patra_bind_text(ins, 0, "zz", 0 - 1), PATRA_ERR_PARAM, "INSERT: a STR bind of -1 over 'h' is refused");
+    assert_eq(patra_bind_text(ins, 1, "XXXXXXXX", 0 - 5), PATRA_ERR_PARAM,
+      "INSERT: a TEXT bind of -5 over 'body' is refused");
+    assert_eq(patra_exec_prepared(db, ins), PATRA_OK, "INSERT: the slots kept their values");
+    assert_eq(patra_bind_text(ins, 0, "e", 0), PATRA_OK, "INSERT: len 0 binds into STR");
+    assert_eq(patra_bind_text(ins, 1, "body", 0), PATRA_OK, "INSERT: len 0 binds into TEXT");
+    assert_eq(patra_exec_prepared(db, ins), PATRA_OK, "INSERT: the empty values insert");
+    patra_finalize(ins);
+    assert_eq(_nb_count(db, "SELECT * FROM t"), 3, "INSERT: the three valid rows");
+    _nb_row(db, "SELECT * FROM t", 0, "h", "body", 4);
+    _nb_row(db, "SELECT * FROM t", 1, "h", "body", 4);
+    _nb_row(db, "SELECT * FROM t", 2, "", "body", 0);
+
+    # A slot holding an INT keeps it: the refused text bind changes no type.
+    patra_exec(db, "CREATE TABLE u (id INT, body TEXT)");
+    var ui = patra_prepare(db, "INSERT INTO u VALUES (?, ?)");
+    assert_eq(patra_bind_int(ui, 0, 7), PATRA_OK, "INSERT: an INT binds");
+    assert_eq(patra_bind_text(ui, 0, "x", 0 - 5), PATRA_ERR_PARAM, "INSERT: a text bind of -5 over the INT is refused");
+    assert_eq(patra_bind_text(ui, 1, "body", 4), PATRA_OK, "INSERT: the body binds");
+    assert_eq(patra_exec_prepared(db, ui), PATRA_OK, "INSERT: the slot kept its INT, the row inserts");
+    patra_finalize(ui);
+    var rs = patra_query(db, "SELECT * FROM u");
+    assert_eq(patra_result_count(rs), 1, "INSERT: the one row");
+    assert_eq(patra_result_get_int(rs, 0, 0), 7, "INSERT: the INT the slot kept");
+    patra_result_free(rs);
+
+    # UPDATE ... SET: the TEXT column, then the STR column.
+    patra_exec(db, "CREATE TABLE v (hash STR, content TEXT)");
+    patra_exec(db, "INSERT INTO v VALUES ('k', 'orig')");
+    var up = patra_prepare(db, "UPDATE v SET content = ?");
+    assert_eq(patra_exec_prepared(db, up), PATRA_ERR_TYPE, "UPDATE SET TEXT, unbound: PATRA_ERR_TYPE");
+    li = 0;
+    while (li < 3) {
+        assert_eq(patra_bind_text(up, 0, "XXXXXXXX", load64(lens + li * 8)), PATRA_ERR_PARAM,
+          "UPDATE SET TEXT: a negative length is PATRA_ERR_PARAM");
+        li = li + 1;
+    }
+    assert_eq(patra_exec_prepared(db, up), PATRA_ERR_TYPE,
+      "UPDATE SET TEXT: the refused bind is unbound: PATRA_ERR_TYPE, as above");
+    _nb_row(db, "SELECT * FROM v", 0, "k", "orig", 4);
+    assert_eq(patra_bind_text(up, 0, "new!", 4), PATRA_OK, "UPDATE SET TEXT: a value binds");
+    assert_eq(patra_bind_text(up, 0, "XXXXXXXX", 0 - 5), PATRA_ERR_PARAM, "UPDATE SET TEXT: -5 over it is refused");
+    assert_eq(patra_exec_prepared(db, up), PATRA_OK, "UPDATE SET TEXT: the kept value updates");
+    _nb_row(db, "SELECT * FROM v", 0, "k", "new!", 4);
+    assert_eq(patra_bind_text(up, 0, "new!", 0), PATRA_OK, "UPDATE SET TEXT: len 0 binds");
+    assert_eq(patra_exec_prepared(db, up), PATRA_OK, "UPDATE SET TEXT: the empty value updates");
+    _nb_row(db, "SELECT * FROM v", 0, "k", "new!", 0);
+    patra_finalize(up);
+    up = patra_prepare(db, "UPDATE v SET hash = ?");
+    assert_eq(patra_exec_prepared(db, up), PATRA_ERR_TYPE, "UPDATE SET STR, unbound: PATRA_ERR_TYPE");
+    li = 0;
+    while (li < 3) {
+        assert_eq(patra_bind_text(up, 0, "zz", load64(lens + li * 8)), PATRA_ERR_PARAM,
+          "UPDATE SET STR: a negative length is PATRA_ERR_PARAM");
+        li = li + 1;
+    }
+    assert_eq(patra_exec_prepared(db, up), PATRA_ERR_TYPE,
+      "UPDATE SET STR: the refused bind is unbound: PATRA_ERR_TYPE, as above");
+    _nb_row(db, "SELECT * FROM v", 0, "k", "new!", 0);
+    assert_eq(patra_bind_text(up, 0, "q", 1), PATRA_OK, "UPDATE SET STR: a value binds");
+    assert_eq(patra_bind_text(up, 0, "zz", 0 - 1), PATRA_ERR_PARAM, "UPDATE SET STR: -1 over it is refused");
+    assert_eq(patra_exec_prepared(db, up), PATRA_OK, "UPDATE SET STR: the kept value updates");
+    _nb_row(db, "SELECT * FROM v", 0, "q", "new!", 0);
+    assert_eq(patra_bind_text(up, 0, "q", 0), PATRA_OK, "UPDATE SET STR: len 0 binds");
+    assert_eq(patra_exec_prepared(db, up), PATRA_OK, "UPDATE SET STR: the empty value updates");
+    _nb_row(db, "SELECT * FROM v", 0, "", "new!", 0);
+    patra_finalize(up);
+
+    # WHERE: t holds ('h', 'body') twice and ('', '').
+    var sel = patra_prepare(db, "SELECT * FROM t WHERE hash = ?");
+    assert_eq(patra_query_prepared(db, sel), 0, "SELECT WHERE, unbound: no result set");
+    li = 0;
+    while (li < 3) {
+        assert_eq(patra_bind_text(sel, 0, "h", load64(lens + li * 8)), PATRA_ERR_PARAM,
+          "SELECT WHERE: a negative length is PATRA_ERR_PARAM");
+        li = li + 1;
+    }
+    assert_eq(patra_query_prepared(db, sel), 0, "SELECT WHERE: the refused bind is unbound: no result set, as above");
+    assert_eq(patra_bind_text(sel, 0, "h", 1), PATRA_OK, "SELECT WHERE: a value binds");
+    rs = patra_query_prepared(db, sel);
+    assert_eq(patra_result_count(rs), 2, "SELECT WHERE: the two 'h' rows");
+    patra_result_free(rs);
+    assert_eq(patra_bind_text(sel, 0, "zz", 0 - 5), PATRA_ERR_PARAM, "SELECT WHERE: -5 over it is refused");
+    rs = patra_query_prepared(db, sel);
+    assert_eq(patra_result_count(rs), 2, "SELECT WHERE: the kept value matches the two 'h' rows");
+    patra_result_free(rs);
+    assert_eq(patra_bind_text(sel, 0, "h", 0), PATRA_OK, "SELECT WHERE: len 0 binds");
+    rs = patra_query_prepared(db, sel);
+    assert_eq(patra_result_count(rs), 1, "SELECT WHERE: len 0 matches the empty hash");
+    patra_result_free(rs);
+    patra_finalize(sel);
+    var uw = patra_prepare(db, "UPDATE t SET content = 'z' WHERE hash = ?");
+    assert_eq(patra_exec_prepared(db, uw), PATRA_ERR_TYPE, "UPDATE WHERE, unbound: PATRA_ERR_TYPE");
+    assert_eq(patra_bind_text(uw, 0, "h", 0 - 5), PATRA_ERR_PARAM, "UPDATE WHERE: -5 is PATRA_ERR_PARAM");
+    assert_eq(patra_exec_prepared(db, uw), PATRA_ERR_TYPE,
+      "UPDATE WHERE: the refused bind is unbound: PATRA_ERR_TYPE, as above");
+    patra_finalize(uw);
+    var dw = patra_prepare(db, "DELETE FROM t WHERE hash = ?");
+    assert_eq(patra_exec_prepared(db, dw), PATRA_ERR_TYPE, "DELETE WHERE, unbound: PATRA_ERR_TYPE");
+    assert_eq(patra_bind_text(dw, 0, "h", 0 - 1), PATRA_ERR_PARAM, "DELETE WHERE: -1 is PATRA_ERR_PARAM");
+    assert_eq(patra_exec_prepared(db, dw), PATRA_ERR_TYPE,
+      "DELETE WHERE: the refused bind is unbound: PATRA_ERR_TYPE, as above");
+    patra_finalize(dw);
+    assert_eq(_nb_count(db, "SELECT * FROM t"), 3, "WHERE: no row deleted");
+    _nb_row(db, "SELECT * FROM t", 0, "h", "body", 4);
+    _nb_row(db, "SELECT * FROM t", 1, "h", "body", 4);
+
+    patra_close(db);
+    fl_free(lens);
+    cleanup();
+}
+
 # -- v1.14.0: WAL state is per-database, not process-global ----
 
 var _tpath2 = _scr("/tmp/patra_test_2.patra");
@@ -10059,6 +10251,7 @@ fn main() {
     test_oversized_ref_read_refused();
     test_negative_length_insert_refused();
     test_negative_ref_length_read_refused();
+    test_negative_bind_text_refused();
     test_alter_add_rowsz_guard();
     test_btree_equal_separator_split();
     test_btree_index_matches_scan();

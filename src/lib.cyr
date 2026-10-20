@@ -3522,11 +3522,16 @@ fn patra_bind_int(stmt, idx, val): i64 {
 # until patra_exec_prepared / patra_query_prepared runs. The bytes are written
 # to the row / compared as-is — never reparsed as SQL — so embedded quotes and
 # other metacharacters cannot escape the value (this is the safe path for free
-# text that `patra_exec` string literals can't carry).
+# text that `patra_exec` string literals can't carry). `len` 0 is an empty value.
+# Returns PATRA_ERR_PARAM if the stmt is null, idx is out of range or len is
+# negative; a refused bind stores nothing, so the slot keeps what it held. A
+# negative len was stored and copied into the row by the exec: a TEXT cell kept
+# it, a STR cell was emptied, a WHERE value matched nothing (CHANGELOG [1.16.6]).
 fn patra_bind_text(stmt, idx, ptr, len): i64 {
     if (stmt == 0) { return PATRA_ERR_PARAM; }
     if (idx < 0) { return PATRA_ERR_PARAM; }
     if (idx >= load64(stmt + STMT_NPARAMS)) { return PATRA_ERR_PARAM; }
+    if (len < 0) { return PATRA_ERR_PARAM; }
     var slot = stmt + STMT_BINDS + idx * BIND_SZ;
     store64(slot + BIND_TYPE, COL_STR);
     store64(slot + BIND_PTR, ptr);
